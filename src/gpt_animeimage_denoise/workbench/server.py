@@ -134,6 +134,8 @@ def create_server(workspace, *, port=0):
             identifier, action = match.groups()
             if not post and action is None:
                 return self._json(documents.get(identifier))
+            if not post and action == 'thumbnail':
+                return self._send(200, documents.thumbnail(identifier), 'image/png')
             if not post and action == 'changes':
                 values = parse_qs(path.query, keep_blank_values=True).get('revision', [])
                 if len(values) != 1 or not values[0].isdecimal() or len(values[0]) > 16:

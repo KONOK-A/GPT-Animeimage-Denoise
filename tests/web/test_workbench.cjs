@@ -65,10 +65,13 @@ function harness({ theme, prefersDark = false } = {}) {
     ['view', [...html.matchAll(/<button data-view="([^"]+)"/g)].map(([, view]) => view)],
     ['tool', [...html.matchAll(/<button data-tool="([^"]+)"/g)].map(([, tool]) => tool)],
     ['preset', ['standard', 'soft', 'strong']], ['mode', ['review', 'range', 'effect']],
-    ['scope', ['auto', 'empty', 'all']],
+    ['scope', ['auto', 'empty', 'all']], ['theme-option', ['system', 'light', 'dark']],
   ]) {
     nodes[key] = values.map(value => {
-      const button = new Element('button'); button.dataset[key] = value; return button;
+      const button = new Element('button');
+      const datasetKey = key === 'theme-option' ? 'themeOption' : key;
+      button.dataset[datasetKey] = value;
+      return button;
     });
   }
   for (const name of ['strength', 'restoration_gain', 'structure_protection', 'radius', 'protection']) elements.get(name).type = 'range';
@@ -92,10 +95,10 @@ function harness({ theme, prefersDark = false } = {}) {
   };
   const body = new Element('body'), win = new Element();
   const root = new Element('html'), scheme = new Element();
-  root.dataset.themePreference = theme;
+  if (theme) root.dataset.themePreference = theme;
   scheme.matches = prefersDark;
   const storage = new Map();
-  const preferences = new Map();
+  const preferences = new Map(theme ? [['gaid-theme', theme]] : []);
   const sandbox = vm.createContext({
     document: {
       getElementById: id => elements.get(id), createElement: tag => new Element(tag), body, documentElement: root,
@@ -112,7 +115,7 @@ function harness({ theme, prefersDark = false } = {}) {
     window: {
       devicePixelRatio: 1, addEventListener: (...args) => win.addEventListener(...args),
       matchMedia: () => scheme,
-      localStorage: { setItem: (key, value) => preferences.set(key, value) },
+      localStorage: { setItem: (key, value) => preferences.set(key, value), removeItem: key => preferences.delete(key) },
       sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     }, file,
     Image: class {
@@ -180,22 +183,41 @@ function harness({ theme, prefersDark = false } = {}) {
   return { elements, nodes, run, api, window: win, storage, root, scheme, preferences };
 }
 
-test('appearance follows system changes until a manual theme is chosen', () => {
+test('appearance follows the system, supports manual overrides and can return to following the system', () => {
   const h = harness({ prefersDark: true });
-  const toggle = h.elements.get('theme-toggle');
+  const [system, light, dark] = h.nodes['theme-option'];
   assert.equal(h.root.dataset.theme, 'dark');
-  assert.equal(toggle['aria-pressed'], 'true');
+  assert.equal(system['aria-pressed'], 'true');
   h.scheme.matches = false;
   h.scheme.fire('change');
   assert.equal(h.root.dataset.theme, 'light');
-  toggle.click();
+  dark.click();
   assert.equal(h.root.dataset.theme, 'dark');
   assert.equal(h.preferences.get('gaid-theme'), 'dark');
   h.scheme.fire('change');
   assert.equal(h.root.dataset.theme, 'dark');
+  system.click();
+  assert.equal(h.root.dataset.theme, 'light');
+  assert.equal(h.preferences.has('gaid-theme'), false);
+  h.scheme.matches = true;
+  h.scheme.fire('change');
+  assert.equal(h.root.dataset.theme, 'dark');
+  light.click();
+  assert.equal(h.root.dataset.theme, 'light');
+  assert.equal(h.preferences.get('gaid-theme'), 'light');
   const reopened = harness({ theme: 'light', prefersDark: true });
   assert.equal(reopened.root.dataset.theme, 'light');
-  assert.equal(reopened.elements.get('theme-toggle')['aria-pressed'], 'false');
+  assert.equal(reopened.nodes['theme-option'][1]['aria-pressed'], 'true');
+});
+
+test('Space on a disclosure does not trigger the canvas pan shortcut', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  let prevented = false;
+  h.window.fire('keydown', { key: ' ', target: new Element('summary'), preventDefault() { prevented = true; } });
+  assert.equal(prevented, false);
+  assert.equal(h.run('state.space'), false);
 });
 
 test('canvas click bubbling does not reset an in-progress polygon', async () => {

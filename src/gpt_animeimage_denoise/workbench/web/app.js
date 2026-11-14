@@ -4,20 +4,33 @@ const byId = id => document.getElementById(id);
 const themeToggle = byId('theme-toggle');
 const themeRoot = document.documentElement;
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+const themeOptions = [...document.querySelectorAll('button[data-theme-option]')];
+const themeLabels = { system: '跟随系统', light: '浅色', dark: '深色' };
+const themeIcons = { system: 'system', light: 'sun', dark: 'moon' };
 function applyTheme() {
-  const theme = themeRoot.dataset.themePreference || (systemTheme.matches ? 'dark' : 'light');
+  const preference = themeRoot.dataset.themePreference || 'system';
+  const theme = preference === 'system' ? (systemTheme.matches ? 'dark' : 'light') : preference;
   themeRoot.dataset.theme = theme;
-  themeToggle.setAttribute('aria-pressed', String(theme === 'dark'));
-  themeToggle.title = theme === 'dark' ? '切换到浅色外观' : '切换到深色外观';
+  byId('theme-icon').setAttribute('href', '#icon-' + themeIcons[preference]);
+  themeToggle.title = '外观 · ' + themeLabels[preference];
+  themeToggle.setAttribute('aria-label', '外观，' + themeLabels[preference]);
+  for (const button of themeOptions) {
+    button.setAttribute('aria-pressed', String(button.dataset.themeOption === preference));
+  }
 }
 applyTheme();
 systemTheme.addEventListener('change', applyTheme);
-themeToggle.addEventListener('click', () => {
-  const theme = themeRoot.dataset.theme === 'dark' ? 'light' : 'dark';
-  themeRoot.dataset.themePreference = theme;
+for (const button of themeOptions) button.addEventListener('click', () => {
+  const preference = button.dataset.themeOption;
+  if (preference === 'system') delete themeRoot.dataset.themePreference;
+  else themeRoot.dataset.themePreference = preference;
   applyTheme();
-  try { window.localStorage.setItem('gaid-theme', theme); }
-  catch { /* Keep the selection for this page. */ }
+  try {
+    if (preference === 'system') window.localStorage.removeItem('gaid-theme');
+    else window.localStorage.setItem('gaid-theme', preference);
+  } catch { /* Keep the selection for this page. */ }
+  byId('theme-panel').open = false;
+  themeToggle.focus({ preventScroll: true });
 });
 
 const canvas = byId('canvas'), stage = byId('stage'), ctx = canvas.getContext('2d');
@@ -305,7 +318,9 @@ function updateControls() {
   document.body.dataset.mode = state.mode;
   byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = byId('file-meta').hidden = !hasImage;
   const viewHint = comparing() ? '拖动分割线比较 · 空格拖动画布' : '滚轮缩放 · 空格拖动画布';
-  if (byId('viewer-hint').textContent !== viewHint) byId('viewer-hint').textContent = viewHint;
+  const hint = byId('viewer-hint');
+  hint.hidden = !hasImage;
+  if (hint.textContent !== viewHint) hint.textContent = viewHint;
   byId('inspector').hidden = !state.doc || state.opening;
   byId('empty-title').textContent = state.opening ? '正在打开图片…' : '拖入图片开始精修';
   byId('empty-help').hidden = state.opening;
@@ -872,7 +887,7 @@ async function openFile(file) {
     if (epoch === state.epoch) {
       state.opening = false;
       startDocument(doc);
-      loadRecent();
+      if (byId('recent-panel').open) loadRecent();
     }
   } catch (error) {
     if (epoch === state.epoch) { state.opening = false; showError(error); status('无法打开图片，请重新选择。', 'error'); refresh(); }
@@ -880,7 +895,10 @@ async function openFile(file) {
 }
 async function openRecent(id) {
   if (state.opening || !(await flushChanges()) || state.opening) return;
-  byId('recent-panel').open = false;
+  if (byId('recent-panel').open) {
+    byId('recent-panel').open = false;
+    byId('recent-toggle').focus({ preventScroll: true });
+  }
   const epoch = beginDocumentChange();
   status('正在载入已保存的图片…', 'pending');
   try {
@@ -890,24 +908,66 @@ async function openRecent(id) {
     if (epoch === state.epoch) { state.opening = false; showError(error); status('无法恢复草稿，请从「近期」重试。', 'error'); refresh(); }
   }
 }
+let recentRequest = 0;
+function recentMessage(message) {
+  const text = document.createElement('p');
+  text.classList.add('recent-message');
+  text.textContent = message;
+  byId('recent').replaceChildren(text);
+}
+function recentButton(entry) {
+  const button = document.createElement('button');
+  const preview = document.createElement('span'), image = document.createElement('img');
+  const fallback = document.createElement('span');
+  const details = document.createElement('span'), name = document.createElement('strong');
+  const metadata = document.createElement('small');
+  const current = entry.id === state.doc?.id;
+  const status = { queued: '等待处理', running: '处理中', error: '处理失败' }[entry.status];
+  button.type = 'button';
+  button.classList.add('recent-item');
+  button.title = entry.name;
+  if (current) button.setAttribute('aria-current', 'true');
+  preview.classList.add('recent-preview');
+  fallback.classList.add('recent-fallback');
+  fallback.textContent = '无预览';
+  fallback.hidden = true;
+  fallback.setAttribute('aria-hidden', 'true');
+  image.classList.add('recent-thumb');
+  image.alt = '';
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; });
+  image.src = '/api/documents/' + encodeURIComponent(entry.id) + '/thumbnail';
+  preview.append(image, fallback);
+  if (status || current) {
+    const indicator = document.createElement('span');
+    indicator.classList.add('recent-indicator');
+    indicator.dataset.tone = entry.status === 'error' ? 'error' : status ? 'pending' : 'current';
+    indicator.textContent = status || '当前';
+    preview.append(indicator);
+  }
+  details.classList.add('recent-details');
+  name.textContent = entry.name;
+  metadata.textContent = entry.width + ' × ' + entry.height;
+  details.append(name, metadata);
+  button.append(preview, details);
+  button.addEventListener('click', () => openRecent(entry.id));
+  return button;
+}
 async function loadRecent() {
+  const requestId = ++recentRequest;
+  recentMessage('正在读取近期图片…');
   try {
     const payload = await (await request('/api/documents')).json();
+    if (requestId !== recentRequest || !byId('recent-panel').open) return;
     const list = Array.isArray(payload) ? payload : payload.documents;
-    const panel = byId('recent');
-    panel.replaceChildren();
-    if (!list?.length) {
-      const text = document.createElement('p');
-      text.textContent = '还没有近期图片';
-      panel.append(text);
+    if (list?.length) byId('recent').replaceChildren(...list.map(recentButton));
+    else recentMessage('还没有近期图片');
+  } catch {
+    if (requestId === recentRequest && byId('recent-panel').open) {
+      recentMessage('无法读取近期图片，请关闭后重试。');
     }
-    for (const entry of list || []) {
-      const button = document.createElement('button');
-      button.type = 'button'; button.textContent = entry.name; button.title = entry.name;
-      button.addEventListener('click', () => openRecent(entry.id));
-      panel.append(button);
-    }
-  } catch (error) { showError(error); }
+  }
 }
 
 function schedulePoll() {
@@ -1770,7 +1830,15 @@ byId('correction-files').addEventListener('change', event => {
 });
 byId('correction-import').addEventListener('click', () => byId('correction-files').click());
 byId('correction-export').addEventListener('click', exportCorrection);
-byId('recent-panel').addEventListener('toggle', event => { if (event.target.open) loadRecent(); });
+const popovers = [byId('recent-panel'), byId('theme-panel'), byId('export-panel')];
+for (const popover of popovers) popover.addEventListener('toggle', () => {
+  if (!popover.open) return;
+  for (const other of popovers) if (other !== popover) other.open = false;
+  if (popover.id === 'recent-panel') loadRecent();
+});
+window.addEventListener('click', event => {
+  for (const popover of popovers) if (popover.open && !popover.contains(event.target)) popover.open = false;
+});
 byId('undo').addEventListener('click', undo);
 byId('redo').addEventListener('click', redo);
 byId('download').addEventListener('click', () => state.mode === 'review' ? download() : selectMode('review'));
@@ -1916,6 +1984,16 @@ window.addEventListener('paste', event => {
   if (file?.type.startsWith('image/')) { event.preventDefault(); openFile(file); }
 });
 window.addEventListener('keydown', event => {
+  const open = popovers.find(popover => popover.open);
+  if (event.key === 'Escape') {
+    if (open) {
+      event.preventDefault();
+      open.open = false;
+      open.querySelector('summary').focus({ preventScroll: true });
+      return;
+    }
+  }
+  if (open?.contains(event.target) || event.target.tagName === 'SUMMARY') return;
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) || event.target.isContentEditable) return;
   const key = event.key.toLowerCase();
   if (state.mode === 'range' && (event.ctrlKey || event.metaKey) && key === 'z') {
@@ -1965,7 +2043,6 @@ new ResizeObserver(draw).observe(stage);
 
 request('/api/options').then(reply => reply.json()).then(options => {
   installOptions(options);
-  loadRecent();
   const previous = storage('getItem', 'gaid-active-document');
   if (previous) openRecent(previous);
 }).catch(error => {

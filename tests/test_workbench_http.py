@@ -46,6 +46,52 @@ class WorkbenchHTTPTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), [])
 
+    def test_recent_thumbnail_uses_normalized_original_during_analysis(self):
+        from gpt_animeimage_denoise.editor import SelectionEditor
+
+        pixels = np.full((216, 384, 4), (80, 120, 180, 192), np.uint8)
+        pixels[:, :96, 3] = 0
+        icc = b'workbench-thumbnail-test-profile'
+        content = BytesIO()
+        Image.fromarray(pixels).save(content, 'PNG', icc_profile=icc)
+        labels = np.ones(pixels.shape[:2], np.uint8)
+        empty = np.zeros_like(labels, dtype=bool)
+        editor = SelectionEditor(pixels[..., :3], pixels[..., 3], labels, empty, empty)
+        candidate = Mock(return_value=np.full(pixels[..., :3].shape, .3, np.float32))
+        session = SimpleNamespace(editor=editor, icc=icc, candidate=candidate)
+        started, release = Event(), Event()
+
+        def open_session(*_):
+            started.set()
+            self.assertTrue(release.wait(8))
+            return session
+
+        with patch.object(self.server.documents, 'opener', side_effect=open_session) as analyze:
+            try:
+                status, body = self.request('POST', '/api/documents', content.getvalue(),
+                                            **{'X-GAID-Request': '1', 'Content-Type': 'application/octet-stream',
+                                               'X-GAID-Filename': 'sample.png'})
+                self.assertEqual(status, 200)
+                doc = json.loads(body)['id']
+                self.assertTrue(started.wait(5))
+                route = '/api/documents/' + doc
+                status, png = self.request('GET', route + '/thumbnail')
+                self.assertEqual(status, 200)
+                with Image.open(BytesIO(png)) as thumbnail:
+                    self.assertEqual(thumbnail.format, 'PNG')
+                    self.assertEqual(thumbnail.size, (192, 108))
+                    self.assertEqual(thumbnail.info['icc_profile'], icc)
+                    self.assertEqual(thumbnail.getpixel((10, 60))[3], 0)
+                    self.assertEqual(thumbnail.getpixel((128, 60))[3], 192)
+                analyze.assert_called_once()
+                candidate.assert_not_called()
+            finally:
+                release.set()
+            self.assertEqual(self.ready(route)['revision'], 0)
+            (self.server.documents.root / doc / 'original.png').unlink()
+            self.assertEqual(self.request('GET', route + '/thumbnail')[0], 404)
+        self.assertEqual(self.request('GET', '/api/documents/' + '0' * 64 + '/thumbnail')[0], 404)
+
     def test_magnetic_lasso_worker_is_served_as_local_javascript(self):
         connection = HTTPConnection('127.0.0.1', self.port, timeout=10)
         try:

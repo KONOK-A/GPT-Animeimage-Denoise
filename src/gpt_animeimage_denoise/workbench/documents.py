@@ -286,6 +286,8 @@ class Documents:
         self._changes_lock = Lock()
         self._changes_cache = None
         self._changes_baseline = None
+        self._thumbnail_lock = Lock()
+        self._thumbnails = OrderedDict()
         self._documents = {}
         self._pending = OrderedDict()
         self._object_previews = OrderedDict()
@@ -387,6 +389,32 @@ class Documents:
             states = sorted(self._documents.values(), key=lambda state: state['_updated'], reverse=True)
             return [{key: state[key] for key in ('id', 'name', 'width', 'height', 'status')}
                     for state in states[:20]]
+
+    def thumbnail(self, doc):
+        with self._condition:
+            self._lookup(doc, upgrade=False)
+        original = self.root / doc / 'original.png'
+        # Decode one original at a time outside the document lock. Cache only small previews.
+        with self._thumbnail_lock:
+            try:
+                stat = original.stat()
+                version = (stat.st_mtime_ns, stat.st_size)
+                cached = self._thumbnails.pop(doc, None)
+                if cached is not None and cached[0] == version:
+                    self._thumbnails[doc] = cached
+                    return cached[1]
+                stream = BytesIO()
+                with Image.open(original) as image:
+                    image.thumbnail((192, 192), Image.Resampling.LANCZOS)
+                    image.save(stream, 'PNG', icc_profile=image.info.get('icc_profile'))
+            except (OSError, Image.DecompressionBombError) as error:
+                raise KeyError('找不到可用的缩略图。') from error
+            data = stream.getvalue()
+            if len(data) <= 256 * 1024:
+                self._thumbnails[doc] = (version, data)
+                if len(self._thumbnails) > 20:
+                    self._thumbnails.popitem(last=False)
+            return data
 
     def _source_path(self, doc, suffix):
         return self.workspace / 'inputs' / doc / ('source' + suffix)

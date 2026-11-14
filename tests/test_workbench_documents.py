@@ -438,6 +438,10 @@ class DocumentsTest(unittest.TestCase):
 
         with Documents(self.workspace, waiting_opener) as recovered:
             try:
+                before_thumbnail = path.read_bytes()
+                with Image.open(BytesIO(recovered.thumbnail(doc))) as thumbnail:
+                    self.assertEqual(thumbnail.size, (previous['width'], previous['height']))
+                self.assertEqual(path.read_bytes(), before_thumbnail)
                 pending = recovered.get(doc)
                 self.assertEqual(pending['revision'], previous['revision'] + 1)
                 self.assertEqual(pending['selection_revision'], previous['selection_revision'] + 1)
