@@ -1,0 +1,326 @@
+{
+  "2x_APISR_RRDB_GAN_generator.pth": {
+    "optional": true,
+    "sha256": "3b0d2b3a3c0461ac17d00f4f32240666fb832b738ea5a48449b1acf07fbb07e5"
+  },
+  "AnimeSeg/base-configs/large/config.json": {
+    "generate": "mask2former-label-config",
+    "sha256": "0f01771fc9adae7f47fd27078e8c800afd655b1b752969f866e5e2b3748a8eb8"
+  },
+  "AnimeSeg/base-configs/large/upstream_config.json": {
+    "sha256": "573b9330846ed787069557d7eaf78d20a695a4ac7155b957becff02748a8d293",
+    "url": "https://huggingface.co/facebook/mask2former-swin-large-ade-semantic/resolve/aa25c92404a40599614215e76514c79b427c7527/config.json"
+  },
+  "AnimeSeg/config.json": {
+    "sha256": "c86d63c206a72695791bc202f42351c3fe825589d61aa6622a172f3a69642571",
+    "url": "https://huggingface.co/suzukimain/AnimeSeg/resolve/c96402281c15e7761392012ec04f171ec884866f/config.json"
+  },
+  "AnimeSeg/models/anime_seg_mask2former_v4.safetensors": {
+    "sha256": "b7b684be5f682e6fd476d60fe4b23a9f3925f43ffb26ff8383220b5117954ea1",
+    "url": "https://huggingface.co/suzukimain/AnimeSeg/resolve/c96402281c15e7761392012ec04f171ec884866f/models/anime_seg_mask2former_v4.safetensors"
+  },
+  "AnimeSeg/source/UPSTREAM_README.md": {
+    "sha256": "e1e997588a050e28ec6afd9ad17f4abd1ddfbba0979a9137b8666ffe9ca89e71",
+    "url": "https://raw.githubusercontent.com/suzukimain/AnimeSeg/8a7a6532e7f19ae9ca31f1ded2ca1db1b2322675/README.md"
+  },
+  "AnimeSeg/source/mask2former/__init__.py": {
+    "generate": "mask2former-namespace",
+    "sha256": "6dafbf4e165fc117d6509d2bb54f628d367b1a3b7d602b82073743d63b45542d"
+  },
+  "AnimeSeg/source/mask2former/mask2former_model.py": {
+    "sha256": "9ca002f7f73ba4fe412dba0b4772f2e702633bc4d9bdc6e090dd149fab97944f",
+    "url": "https://raw.githubusercontent.com/suzukimain/AnimeSeg/8a7a6532e7f19ae9ca31f1ded2ca1db1b2322675/src/anime_seg/mask2former/mask2former_model.py"
+  },
+  "AnimeSeg/source/mask2former/mask2former_pipeline.py": {
+    "sha256": "9f78425bbe320df9f83e9f13af6e858cdee9da4a0a1aa63a6ed7bea861834bdb",
+    "url": "https://raw.githubusercontent.com/suzukimain/AnimeSeg/8a7a6532e7f19ae9ca31f1ded2ca1db1b2322675/src/anime_seg/mask2former/mask2former_pipeline.py"
+  },
+  "RealESRGAN_x4plus_anime_6B.pth": {
+    "optional": true,
+    "sha256": "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da"
+  },
+  "v2/asset_hashes.json": {
+    "generate": "v2-checksums",
+    "sha256": "8f5f6e6536535d29798b12de983d577cd1e6d9f497ad88e7bff970082782c81a"
+  },
+  "v2/sam2/sam2.1_hiera_large.pt": {
+    "sha256": "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318",
+    "url": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+  },
+  "v2/sam2/source/LICENSE": {
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE"
+  },
+  "v2/sam2/source/README.md": {
+    "sha256": "eea69ee1042fb30933c5ca5019fbf0f6f9366cec5e792109281b5023a4f1589c",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/README.md"
+  },
+  "v2/sam2/source/pyproject.toml": {
+    "sha256": "c58230f78769620dcd11d15824d491b049be8f542eeb875d2e8091be797ec3f3",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/pyproject.toml"
+  },
+  "v2/sam2/source/sam2/__init__.py": {
+    "sha256": "b87ca1e95cd54b81766e8c74acf0e937952639529e40d2b4088693286f49419e",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/__init__.py"
+  },
+  "v2/sam2/source/sam2/automatic_mask_generator.py": {
+    "sha256": "66df266dbe14412305ae3398f0ec1bb21b303a93216b102d767e6c4ee5d4c3d7",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/automatic_mask_generator.py"
+  },
+  "v2/sam2/source/sam2/benchmark.py": {
+    "sha256": "9b7a3506b88842ec09031fb7cd0fc1d3fed82e137ce06dbca10495e6c180dda9",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/benchmark.py"
+  },
+  "v2/sam2/source/sam2/build_sam.py": {
+    "sha256": "856d64d71e44407401297b551884fb4cd1aba8082de0ff5fc60fac3dd42f094d",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/build_sam.py"
+  },
+  "v2/sam2/source/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml": {
+    "sha256": "37d6c56b07a7f8d08baaa314315c60dc3aabe2edc66cd92bac6d1ed50038e788",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2.1/sam2.1_hiera_l.yaml": {
+    "sha256": "1dbd6cb6dfebeaf588c7006ee222c6efbfa9049a7ad472a3cdfb2f5d919e8107",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2.1/sam2.1_hiera_s.yaml": {
+    "sha256": "0f36b91e86e58d06c87e42997166212468b88b98b60e4d816d5e4d4d088b6f55",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2.1/sam2.1_hiera_s.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2.1/sam2.1_hiera_t.yaml": {
+    "sha256": "f932eac1c6241e910031b2f000a81cd9f8a8d4896e2277ab5ffb721f378b188d",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2.1/sam2.1_hiera_t.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml": {
+    "sha256": "d96919e157527116c3a80c6ec961151bda98e5eb988ae4dd85be6e7efbd2b51f",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2/sam2_hiera_b+.yaml": {
+    "sha256": "644d1a9aaa7e14183802246dee4f43627e067d77dd89f1f40d83657db18d038b",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2/sam2_hiera_b+.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2/sam2_hiera_l.yaml": {
+    "sha256": "0ee9f2037fd98489212bb0b78a56f33ac82eb177cf5e52c88be3714cb84eea26",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2/sam2_hiera_l.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2/sam2_hiera_s.yaml": {
+    "sha256": "20e0ade957a4ab5e8138c93c346a8d8965c0b00d1a05fa0e79ce477985904188",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2/sam2_hiera_s.yaml"
+  },
+  "v2/sam2/source/sam2/configs/sam2/sam2_hiera_t.yaml": {
+    "sha256": "33399c73cd13bbc3d0c1cea843fa2fc255fdb20139fe07f042743e046ac46b6b",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/configs/sam2/sam2_hiera_t.yaml"
+  },
+  "v2/sam2/source/sam2/modeling/__init__.py": {
+    "sha256": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/__init__.py"
+  },
+  "v2/sam2/source/sam2/modeling/backbones/__init__.py": {
+    "sha256": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/backbones/__init__.py"
+  },
+  "v2/sam2/source/sam2/modeling/backbones/hieradet.py": {
+    "sha256": "03785581ca304d0451ae0df7a08ee0bf1e1dbe66fad285066e6b9ffc0d88d64f",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/backbones/hieradet.py"
+  },
+  "v2/sam2/source/sam2/modeling/backbones/image_encoder.py": {
+    "sha256": "16eaad232220386f510ca8dfab8655e63699977149a4daf9ce9c6f374e6777a9",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/backbones/image_encoder.py"
+  },
+  "v2/sam2/source/sam2/modeling/backbones/utils.py": {
+    "sha256": "c4a0657db2a92bda2a7ff116cd4017f6b1c59af6408093d8874eb08a0df476ad",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/backbones/utils.py"
+  },
+  "v2/sam2/source/sam2/modeling/memory_attention.py": {
+    "sha256": "07358cb7f58ec3788e88ff4e6415f8a9d628a3963529d6e2c915494a5347c8e2",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/memory_attention.py"
+  },
+  "v2/sam2/source/sam2/modeling/memory_encoder.py": {
+    "sha256": "73f7089ae5fdacdfcaaf3deca1ca6d9f84d89e7deb9cf97589622a9ef17ba42f",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/memory_encoder.py"
+  },
+  "v2/sam2/source/sam2/modeling/position_encoding.py": {
+    "sha256": "b51404718c0d38f381293c8e5e00a15d129651b7f09b1158002d8974a30967b5",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/position_encoding.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam/__init__.py": {
+    "sha256": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam/__init__.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam/mask_decoder.py": {
+    "sha256": "ca3523c58365574faddf1bfb54f374e4b4beba05127185ea2b17d22b916e099a",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam/mask_decoder.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam/prompt_encoder.py": {
+    "sha256": "4965ccb4a4504aa4d7246b2ad66ffeacd2626415c86a261dc1c65ffd8ae1d40d",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam/prompt_encoder.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam/transformer.py": {
+    "sha256": "cda19052331e775190ce8b1159efcb828a4632d931a6d8bd4d47109f121782f1",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam/transformer.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam2_base.py": {
+    "sha256": "69a46b44e8625f509791352bd09beaafe589cd7d872721384e63d37f9fdc6e41",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam2_base.py"
+  },
+  "v2/sam2/source/sam2/modeling/sam2_utils.py": {
+    "sha256": "e35bbf13bc2e544a0272cd3f9539af38a752676ac3cd744be31cd8220afee804",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/modeling/sam2_utils.py"
+  },
+  "v2/sam2/source/sam2/sam2_hiera_b+.yaml": {
+    "sha256": "212887bd5b1d90c07a3439a911593ec6ec8a586cce0b12799f1ebec38bbe401d",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_hiera_b+.yaml"
+  },
+  "v2/sam2/source/sam2/sam2_hiera_l.yaml": {
+    "sha256": "0e313563f8f467c382c81192a0e2aff4624dda2b23218f1a78df30ebe4b4eb1a",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_hiera_l.yaml"
+  },
+  "v2/sam2/source/sam2/sam2_hiera_s.yaml": {
+    "sha256": "6fff1ab952d4ff7bc4bf8bb480f6283bcf12a763057f5bb697b25151a20f7608",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_hiera_s.yaml"
+  },
+  "v2/sam2/source/sam2/sam2_hiera_t.yaml": {
+    "sha256": "4ba0a249a1da9a6cc4070d47894808f206f67249d0c6fda21c6280af692dd77e",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_hiera_t.yaml"
+  },
+  "v2/sam2/source/sam2/sam2_image_predictor.py": {
+    "sha256": "f13e5f9d94e5c8d9d2c3622dab20c8f334c089ef2ee5ea8e199da7d332b029ba",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_image_predictor.py"
+  },
+  "v2/sam2/source/sam2/sam2_video_predictor.py": {
+    "sha256": "912555920a77f72ded07839efa33fcceecc79f3523abbec783f0be46ee2c55c2",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_video_predictor.py"
+  },
+  "v2/sam2/source/sam2/sam2_video_predictor_legacy.py": {
+    "sha256": "e0c054112f21bfa63620f2026c8bb2e0f4e284b138d09426a08d39f2e882c3f2",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/sam2_video_predictor_legacy.py"
+  },
+  "v2/sam2/source/sam2/utils/__init__.py": {
+    "sha256": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/utils/__init__.py"
+  },
+  "v2/sam2/source/sam2/utils/amg.py": {
+    "sha256": "b7b33090e2af72e04dbb815c8f32aff41a4ed1abf9668f62b59f1bdd640ca5d8",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/utils/amg.py"
+  },
+  "v2/sam2/source/sam2/utils/misc.py": {
+    "sha256": "01600c01c161cd079d7106fb1d4da845cf91aa31ab2bcecaf8cb151b6d6d20a2",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/utils/misc.py"
+  },
+  "v2/sam2/source/sam2/utils/transforms.py": {
+    "sha256": "ba3a64f4600c62f209206a6df3b40e3fcf133edae32fad658831bb0c2a6d1146",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/sam2/utils/transforms.py"
+  },
+  "v2/sam2/source/setup.py": {
+    "sha256": "9ca49a33def161d2cafa56ddef744178fa56d3219242bd8b69909904c2e63dff",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/setup.py"
+  },
+  "v2/see_through/LICENSE": {
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/LICENSE"
+  },
+  "v2/see_through/checkpoint-18000.pt": {
+    "sha256": "dda82b916f6c340bc5a6c3a077ff1214f9906906abe3707b1076d55b508f253f",
+    "url": "https://huggingface.co/24yearsold/l2d_sam_iter2/resolve/0b0608310fb7a89e32ecd7397147a249540cf1e7/checkpoint-18000.pt"
+  },
+  "v2/see_through/common/modules/__init__.py": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/__init__.py"
+  },
+  "v2/see_through/common/modules/extend_sam.py": {
+    "sha256": "5bac16ef1de63be27e187cc679bb653d53bf7cc94d3555c33ab7dcccbc5034ae",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/extend_sam.py"
+  },
+  "v2/see_through/common/modules/sam/__init__.py": {
+    "sha256": "53d00f308faf726191cc219ac7b1fb992d95c8230e639275185b91fb02456078",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/__init__.py"
+  },
+  "v2/see_through/common/modules/sam/automatic_mask_generator.py": {
+    "sha256": "71c698d2b6cbf5a62eafa5f12106fdf3bff676102adf1aed2287df3b3990b4e0",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/automatic_mask_generator.py"
+  },
+  "v2/see_through/common/modules/sam/build_sam.py": {
+    "sha256": "eaa09b751a061a69421207580b3ca29131a02480808707d0267aefa67151548e",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/build_sam.py"
+  },
+  "v2/see_through/common/modules/sam/builder.py": {
+    "sha256": "efb3352ef60c248a73d54457a568413e66aa972fdb87351476b412a91c1fbbc9",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/builder.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/__init__.py": {
+    "sha256": "47f6363b86c0bfaa7a6abf723975136d17fae4a5f002d2814a5cce8834d18980",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/__init__.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/common.py": {
+    "sha256": "59a53bfa5d0a4d446df7f2bb57d2e95808b130601592b934600fb663d256ce17",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/common.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/image_encoder.py": {
+    "sha256": "963c667ff8c1dfb85a768c548e5540033dfb51836cb571279a7d5edcc93d8b52",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/image_encoder.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/mask_decoder.py": {
+    "sha256": "7448a5168b93f274ef42d9b8d0c7791a8d705a670c3fe32d54f92b02ce92df6f",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/mask_decoder.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/prompt_encoder.py": {
+    "sha256": "16dc685fc87f26372918b0cc0ed800b93a78c649864bfc3e8d3887d147863884",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/prompt_encoder.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/sam.py": {
+    "sha256": "b7c18c9d932ece40d76bfdff21ec9cebc23dcdbaa3fe7c3b0664ba1a1a837feb",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/sam.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/tiny_vit_sam.py": {
+    "sha256": "126d80dee27d273ae1b326bcc22f4fb1dd5f3bc62437ba84e059d8d933f17b40",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/tiny_vit_sam.py"
+  },
+  "v2/see_through/common/modules/sam/modeling/transformer.py": {
+    "sha256": "996d0a0d27342ac6b84deec34a6dedb38d2ca414879eaab10fdf080aaaf1d91a",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/modeling/transformer.py"
+  },
+  "v2/see_through/common/modules/sam/predictor.py": {
+    "sha256": "419db087e2d8cf17baabb7f03927214a269b41575e0a05ed975bbbeeb0c56acc",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/predictor.py"
+  },
+  "v2/see_through/common/modules/sam/utils/__init__.py": {
+    "sha256": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/utils/__init__.py"
+  },
+  "v2/see_through/common/modules/sam/utils/amg.py": {
+    "sha256": "5c10f8dd63facb642ff090f61426b35b3c6c3a07e72839595cb04d74828b1d39",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/utils/amg.py"
+  },
+  "v2/see_through/common/modules/sam/utils/transforms.py": {
+    "sha256": "72eaf29da093e839d233c121c7af05edd62e4bac236af011a1e78b35c009b6ea",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/utils/transforms.py"
+  },
+  "v2/see_through/common/modules/sam/visualize.py": {
+    "sha256": "ca24c6873fe682fc528d1937722743c431ae040c8ef1380af16af217f9baea05",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/sam/visualize.py"
+  },
+  "v2/see_through/common/modules/semanticsam.py": {
+    "sha256": "c8e37fa78fbd51680e8074ceb3f10bdbd623b68bb3ea1659ebe290f9bce6eb31",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/modules/semanticsam.py"
+  },
+  "v2/see_through/common/utils/io_utils.py": {
+    "sha256": "0965fd47b98cdb48622a87dfa82d0d5adafaa77db6da4debc602870471f5ef15",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/utils/io_utils.py"
+  },
+  "v2/see_through/common/utils/torch_utils.py": {
+    "sha256": "78fe332931747442c21422e44edaacced4b10a4235b4ae9b4d8d882425482f9d",
+    "url": "https://raw.githubusercontent.com/shitagaki-lab/see-through/df019de5129d6c4b406587a14c3501669441a783/common/utils/torch_utils.py"
+  },
+  "v2/skytnt/LICENSE": {
+    "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a",
+    "url": "https://raw.githubusercontent.com/SkyTNT/anime-segmentation/55d874013a2811cdf59c365059174c7823acf5b4/LICENSE"
+  },
+  "v2/skytnt/isnet.py": {
+    "sha256": "7aac0d67ab7fa8cd6ce2412163e98b704b3e1ff5525ffef4475db739c2da1d45",
+    "url": "https://raw.githubusercontent.com/SkyTNT/anime-segmentation/55d874013a2811cdf59c365059174c7823acf5b4/model/isnet.py"
+  },
+  "v2/skytnt/model.safetensors": {
+    "sha256": "3351563ba8b61a01a66bacb79cf36aabce2da62d88b7606a719f573f23fe5d3e",
+    "url": "https://huggingface.co/skytnt/anime-seg/resolve/976cbb9ba61600e0993d1ee2a8a247ae05d183ee/model.safetensors"
+  }
+}

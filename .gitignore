@@ -1,0 +1,33 @@
+# Python environments and build products
+/.venv*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Local model assets, inputs, and generated outputs
+/models/
+/data/
+/inputs/
+/outputs/
+/runs/
+.cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.npy
+*.npz
+
+# Per-machine settings and credentials
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/

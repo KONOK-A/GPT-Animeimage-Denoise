@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-animeimage-denoise"
+version = "2.1.0"
+description = "Local anime illustration denoising with optional character-part segmentation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "accelerate==1.15.0",
+    "einops==0.8.2",
+    "huggingface-hub==0.36.0",
+    "hydra-core==1.3.2",
+    "iopath==0.1.10",
+    "numpy==2.5.4",
+    "opencv-python==4.13.0.92",
+    "Pillow==13.0.0",
+    "requests==2.34.2",
+    "safetensors==0.8.0",
+    "scipy==1.18.1",
+    "spandrel==0.4.2",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "transformers==4.57.6",
+]
+
+[project.scripts]
+gaid = "gpt_animeimage_denoise.cli:main"
+gaid-whole = "denoise:main"
+gaid-eval = "gpt_animeimage_denoise.evaluate:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["gpt_animeimage_denoise", "gpt_animeimage_denoise.workbench"]
+py-modules = ["denoise", "l0_cuda", "tiled_inference"]
+
+[tool.setuptools.package-data]
+"gpt_animeimage_denoise.workbench" = ["web/*.html", "web/*.css", "web/*.js"]

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>GAID 单图精修</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body data-mode="review">
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-open" viewBox="0 0 24 24"><path d="M3 7V5h6l2 2h10v3M3 9v10h16l3-9H7l-4 9"/></symbol>
+    <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M9 5 4 10l5 5m-4-5h8a6 6 0 0 1 6 6v3"/></symbol>
+    <symbol id="icon-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5m4-5h-8a6 6 0 0 0-6 6v3"/></symbol>
+    <symbol id="icon-pan" viewBox="0 0 24 24"><path d="M7 12V7a2 2 0 0 1 4 0v4-6a2 2 0 0 1 4 0v6-3a2 2 0 0 1 4 0v7a6 6 0 0 1-6 6h-1c-3 0-4-2-6-5l-2-3a2 2 0 0 1 3-2l2 2"/></symbol>
+    <symbol id="icon-brush" viewBox="0 0 24 24"><path d="m9 15 8-11a2 2 0 0 1 3 3L10 16m-1-1c-4-1-3 4-6 5 3 1 7 0 7-3l-1-2Z"/></symbol>
+    <symbol id="icon-protect" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3 8 8 10 5-2 8-5 8-10V6l-8-3Z"/><path d="M8 12h8m-4-4v8"/></symbol>
+    <symbol id="icon-exclude" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3 8 8 10 5-2 8-5 8-10V6l-8-3Z"/><path d="M8 12h8"/></symbol>
+    <symbol id="icon-mix" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16M7 9l2-2m-3 7 4-4m-1 7 1-1"/></symbol>
+    <symbol id="icon-erase" viewBox="0 0 24 24"><path d="m4 13 8-9a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3l-8 8H8l-4-4a2 2 0 0 1 0-3Zm5-5 8 8M12 20h9"/></symbol>
+    <symbol id="icon-lasso" viewBox="0 0 24 24"><path d="M9 17C3 16 2 11 5 7s12-5 15 0-1 9-8 10c-4 0-6-2-5-4s4-1 4 1c0 4-3 6-6 6"/></symbol>
+    <symbol id="icon-magnetic" viewBox="0 0 24 24"><path d="M5 4v9a7 7 0 0014 0V4h-4v9a3 3 0 01-6 0V4zM5 8h4m6 0h4"/></symbol>
+    <symbol id="icon-object-point" viewBox="0 0 24 24"><path d="M3 8V3h5m8 0h5v5m0 8v5h-5m-8 0H3v-5m6-4h6m-3-3v6"/></symbol>
+  </svg>
+  <header class="topbar">
+    <div class="identity" aria-label="GAID 单图精修">
+      <svg class="mark" width="31" height="31" viewBox="0 0 36 36" aria-hidden="true"><path fill="currentColor" d="M0 0h36v36H0z"/><path d="M14 8H8v6m14-6h6v6M8 22v6h6m14-6v6h-6M15 24l4-12 4 12m-7-3h6" fill="none" stroke="#222423" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      <div><strong>GAID</strong><span>单图精修</span></div>
+    </div>
+    <div class="document-actions">
+      <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/tiff" hidden>
+      <button id="open" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
+      <details id="recent-panel" class="popover">
+        <summary class="button">近期</summary>
+        <div id="recent" class="recent-list"><p>还没有近期图片</p></div>
+      </details>
+      <div class="history" role="group" aria-label="编辑历史">
+        <button id="undo" type="button" aria-label="撤销选区操作" title="撤销选区操作 Ctrl+Z" disabled><svg aria-hidden="true"><use href="#icon-undo"/></svg></button>
+        <button id="redo" type="button" aria-label="重做选区操作" title="重做选区操作 Ctrl+Shift+Z" disabled><svg aria-hidden="true"><use href="#icon-redo"/></svg></button>
+      </div>
+    </div>
+    <div class="top-export">
+      <button id="download" class="button primary" type="button" disabled>导出 PNG</button>
+      <details id="export-panel" class="popover export-panel">
+        <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
+        <div class="export-list">
+          <button id="download-a" type="button" disabled>导出固定方案 A</button>
+          <button id="correction-export" type="button" disabled>导出命令行校正</button>
+          <button id="correction-import" type="button" disabled>导入命令行校正</button>
+        </div>
+      </details>
+      <input id="correction-files" type="file" accept=".json,.png" multiple hidden>
+    </div>
+  </header>
+  <nav id="workspace-modes" class="workspace-modes" aria-label="工作模式，可随时切换">
+    <button type="button" data-mode="review" aria-pressed="true"><strong>看成品</strong><span>对比原图与结果，确认后导出</span></button>
+    <button type="button" data-mode="range" aria-pressed="false" disabled><strong>改哪里</strong><span>选区域、修局部、核对改动</span></button>
+    <button type="button" data-mode="effect" aria-pressed="false" disabled><strong>调效果</strong><span>保留范围，调整算法与强弱</span></button>
+  </nav>
+  <main class="workspace">
+    <nav id="tools" class="tools" aria-label="画布工具">
+      <button data-tool="pan" type="button" aria-pressed="true" title="移动（按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
+      <div class="tool-group" role="group" aria-labelledby="tools-range-label">
+        <span id="tools-range-label">选区</span>
+        <button data-tool="include" type="button" aria-pressed="false" title="画入处理范围 B" disabled><svg aria-hidden="true"><use href="#icon-brush"/></svg><span>画入</span></button>
+        <button data-tool="exclude" type="button" aria-pressed="false" title="移出处理范围，保留原图 D" disabled><svg aria-hidden="true"><use href="#icon-exclude"/></svg><span>移出</span></button>
+        <button data-tool="lasso" type="button" aria-pressed="false" title="多边形套索 L" disabled><svg aria-hidden="true"><use href="#icon-lasso"/></svg><span>套索</span></button>
+        <button data-tool="magnetic" type="button" aria-pressed="false" title="磁性套索 G" disabled><svg aria-hidden="true"><use href="#icon-magnetic"/></svg><span>磁性套索</span></button>
+      </div>
+      <div class="tool-group" role="group" aria-labelledby="tools-local-label">
+        <span id="tools-local-label">强度</span>
+        <button data-tool="protect" type="button" aria-pressed="false" title="减少这块区域的处理强度 P" disabled><svg aria-hidden="true"><use href="#icon-protect"/></svg><span>局部减弱</span></button>
+        <button data-tool="mix" type="button" aria-pressed="false" title="指定画入区域的原图比例 M" disabled><svg aria-hidden="true"><use href="#icon-mix"/></svg><span>原图比例</span></button>
+      </div>
+      <div class="tool-group" role="group" aria-labelledby="tools-fix-label">
+        <span id="tools-fix-label">修正</span>
+        <button data-tool="erase" type="button" aria-pressed="false" title="擦掉手动画过的改动 E" disabled><svg aria-hidden="true"><use href="#icon-erase"/></svg><span>擦改动</span></button>
+        <button data-tool="sam_object" type="button" aria-pressed="false" title="用 SAM2 点选并标记外物" disabled><svg aria-hidden="true"><use href="#icon-object-point"/></svg><span>点选外物</span></button>
+      </div>
+    </nav>
+    <section class="viewer" aria-label="图像画布">
+      <div class="viewbar">
+        <div id="views" class="view-tabs" role="group" aria-label="画布视图">
+          <button data-view="compare" type="button" aria-pressed="true" disabled>对比</button>
+          <button data-view="original" type="button" aria-pressed="false" disabled>原图</button>
+          <button data-view="result" type="button" aria-pressed="false" disabled>成品</button>
+          <button data-view="parts" type="button" aria-pressed="false" disabled>识别部位</button>
+          <button data-view="weight" type="button" aria-pressed="false" disabled>实际处理</button>
+          <button data-view="changes" type="button" aria-pressed="false" disabled>手动改动</button>
+          <button data-view="suspected_objects" type="button" aria-pressed="false" disabled hidden>疑似外物</button>
+          <button id="show-unknown" class="button unknown-toggle" type="button" aria-pressed="true" hidden><i class="hatch-key" aria-hidden="true"></i>显示待确认</button>
+        </div>
+        <div class="zoom-tools" role="group" aria-label="缩放">
+          <button id="peek" type="button" title="按住 X 查看原图" disabled><span>按住看原图</span> <kbd>X</kbd></button>
+          <button id="zoom-out" type="button" aria-label="缩小" disabled>−</button>
+          <output id="zoom-level" aria-label="缩放比例">—</output>
+          <button id="zoom-in" type="button" aria-label="放大" disabled>+</button>
+          <button id="fit" type="button" disabled>适合</button>
+          <button id="actual" type="button" title="按原像素显示" disabled>1:1</button>
+        </div>
+      </div>
+      <div id="mode-context" class="mode-context" role="region" aria-label="当前可做的操作">
+        <div class="context-purpose">
+          <strong id="context-action">打开一张图片</strong>
+          <span id="context-impact">原图先显示，成品在后台生成。</span>
+        </div>
+        <span id="context-update" role="status">尚未打开图片</span>
+      </div>
+      <div id="stage" class="stage" tabindex="0" data-tool="pan" aria-label="图像画布">
+        <canvas id="canvas" aria-label="图像和选区"></canvas>
+        <canvas id="magnetic-canvas" aria-hidden="true" hidden></canvas>
+        <div id="empty" class="empty-state">
+          <div class="opening-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+          <h1>打开一张图片</h1>
+          <p>拖入、粘贴，或从本机选择。原图会先显示，降噪在后台进行。</p>
+          <button id="empty-open" class="button primary" type="button" disabled>选择图片</button>
+        </div>
+        <div id="compare-badges" class="compare-badges" hidden>
+          <span id="left-badge">原图</span><span id="right-badge">方案 B</span>
+        </div>
+        <button id="divider" class="divider" type="button" role="slider" aria-label="对比分割位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span>‹ ›</span></button>
+        <div id="overlay-legend" class="overlay-legend" hidden>
+          <span id="objects-legend"><i class="dot object"></i>已识别外物</span>
+          <span id="unknown-legend" hidden><i class="hatch-key" aria-hidden="true"></i>待确认 · 默认保留</span>
+          <span id="protection-legend"><i class="dot protect"></i>手动保护</span>
+          <span id="weight-legend"><i class="dot include"></i>蓝色越深，处理越强</span>
+        </div>
+        <div id="suspected-objects-legend" class="overlay-legend" hidden>
+          <span><i class="dot suspected" aria-hidden="true"></i>疑似外物仅供检查。原部位保留，可照常使用画笔。</span>
+        </div>
+        <div id="history-location-label" class="history-location-label" hidden>虚线 · 这次操作的位置</div>
+        <div id="notice" class="notice" role="alert" hidden>
+          <span id="notice-text"></span>
+          <button id="notice-close" type="button" aria-label="关闭提示">×</button>
+        </div>
+      </div>
+      <div class="statusbar" role="status" aria-live="polite">
+        <span id="image-name">尚未打开图片</span><span id="image-size"></span>
+        <span id="status">正在连接本机服务…</span>
+        <button id="retry" type="button" hidden>重试</button>
+        <button id="conflict-local" type="button" hidden>保留本页修改</button>
+        <button id="conflict-remote" type="button" hidden>载入已保存版本</button>
+      </div>
+    </section>
+    <aside class="inspector" aria-label="工作区">
+      <div class="inspector-scroll">
+        <section id="review-inspector" aria-label="检查成品">
+          <div class="panel mode-intro review-intro">
+            <h2>对比与导出</h2>
+            <p>拖动分割线比较同一处细节，点「成品」看整张结果，满意后点右上角导出 PNG。这里的查看操作不会修改图片。</p>
+          </div>
+          <div class="panel review-next">
+            <button type="button" data-go-mode="range" class="review-action" disabled>
+              <strong>改哪里</strong><small>补上漏选，或让某一处保留原图</small>
+            </button>
+            <button type="button" data-go-mode="effect" class="review-action" disabled>
+              <strong>调效果</strong><small>保留处理范围，调强弱或换算法</small>
+            </button>
+          </div>
+          <div class="panel comparison-panel">
+            <h2>留一份结果对照</h2>
+            <p>固定当前成品后，左边保留这一版，右边显示之后的调整。</p>
+            <button id="pin" class="button" type="button" disabled>固定当前成品为对照 A</button>
+          </div>
+        </section>
+        <section id="range-inspector" aria-label="修改范围" hidden>
+        <section id="brush-panel" class="panel edit-panel">
+          <div class="section-heading"><h2 id="current-tool-name">移动画布</h2><span id="tool-hint">当前工具</span></div>
+          <p id="tool-description" class="tool-description" hidden></p>
+          <button id="suggested-range-view" class="text-button" type="button" hidden>查看实际处理</button>
+          <p id="stroke-feedback" class="stroke-feedback" role="status" hidden></p>
+          <div id="unknown-stroke-actions" class="unknown-stroke-actions" hidden>
+            <button id="include-unknown-stroke" class="button" type="button" title="只加入这笔跳过的待确认像素">加入这笔的处理范围</button>
+            <div class="unknown-assignment">
+              <select id="unknown-stroke-module" aria-label="为这笔的待确认区选择部位"></select>
+              <button id="assign-unknown-stroke" class="button" type="button">归为所选部位</button>
+            </div>
+          </div>
+          <div id="brush-radius-row" class="range-row">
+            <label for="radius">笔刷半径</label><output id="radius-value" for="radius">24 px</output>
+            <input id="radius" type="range" min="1" max="256" value="24" step="1" disabled>
+          </div>
+          <div id="protect-row" class="range-row" hidden>
+            <label for="protection" id="protection-label">保护比例</label><output id="protection-value" for="protection" hidden>90%</output>
+            <span class="retention-input"><input id="retention-percent" type="number" min="0" max="100" step="0.1" value="90" inputmode="decimal" aria-label="局部保留百分比" disabled><span aria-hidden="true">%</span></span>
+            <input id="protection" type="range" min="0" max="1" value="0.9" step="0.001" disabled>
+          </div>
+          <div id="allow-protected-row" class="allow-protected-row" hidden>
+            <label for="allow-protected"><input type="checkbox" id="allow-protected" disabled>允许补选模型建议保留的区域</label>
+            <p>只对画笔或套索标出的区域生效。完全透明的像素仍保留。</p>
+          </div>
+          <div id="lasso-options" hidden>
+            <label for="lasso-action">圈选动作</label>
+            <select id="lasso-action" disabled><option value="include">加入处理范围</option><option value="exclude">保留原图</option><option value="protect">减弱处理</option><option value="mix">指定原图比例</option><option value="override">纠正误判</option></select>
+            <label id="override-label" for="override-module" hidden>恢复为<select id="override-module" disabled></select></label>
+            <div id="magnetic-options" hidden>
+              <div class="range-row">
+                <label for="magnetic-radius">吸附半径</label><output id="magnetic-radius-value" for="magnetic-radius">10 px</output>
+                <input id="magnetic-radius" type="range" min="6" max="24" step="1" value="10">
+              </div>
+              <p id="magnetic-status" class="panel-hint" role="status"></p>
+              <p class="panel-hint">小圆点为自动锚点，方点为手动锚点。Alt 拉直线，Backspace 撤回上一点。</p>
+            </div>
+            <div class="text-actions">
+              <button id="close-lasso" type="button" class="text-button" disabled>闭合选区</button>
+              <button id="magnetic-undo" type="button" class="text-button" disabled hidden>撤回上一锚点</button>
+            </div>
+          </div>
+        </section>
+        <section id="sam-panel" class="panel sam-panel" aria-labelledby="sam-title" hidden>
+          <div class="section-heading"><h2 id="sam-title">点选外物</h2><span>SAM2</span></div>
+          <p class="panel-hint">点在要排除的道具上。手套、袖口等需要保留的地方可加排除点。</p>
+          <div class="sam-point-modes" role="group" aria-label="要添加的点">
+            <button id="sam-positive" class="button" type="button" aria-pressed="true" disabled><span class="sam-dot positive" aria-hidden="true">+</span>目标点</button>
+            <button id="sam-negative" class="button" type="button" aria-pressed="false" disabled><span class="sam-dot negative" aria-hidden="true">−</span>排除点</button>
+          </div>
+          <p id="sam-status" class="panel-hint" role="status"></p>
+          <div class="sam-actions">
+            <button id="sam-preview" class="button" type="button" disabled>生成预览</button>
+            <button id="sam-apply" class="button primary" type="button" disabled>标为外物</button>
+          </div>
+          <div class="text-actions">
+            <button id="sam-undo-point" class="text-button" type="button" disabled>撤回上一点</button>
+            <button id="sam-cancel" class="text-button" type="button">取消点选</button>
+          </div>
+        </section>
+        <details id="range-scope" class="panel range-scope">
+          <summary><strong>自动选区起点</strong><span id="coverage"></span><span id="scope-summary" class="scope-summary"></span></summary>
+          <div class="scope-body">
+            <div class="scope-actions" role="group" aria-label="初始处理范围">
+              <button data-scope="auto" type="button" disabled>按人物部位</button>
+              <button data-scope="empty" type="button" disabled>从空范围</button>
+              <button data-scope="all" type="button" disabled>整图</button>
+            </div>
+            <p class="panel-hint">先选要处理的部位，再在图上局部修正。</p>
+            <div id="modules" class="module-grid"></div>
+            <details class="fold">
+              <summary>分部位强度</summary>
+              <div id="part-strengths" class="part-strengths"></div>
+            </details>
+            <div class="text-actions">
+              <button id="invert" type="button" class="text-button" disabled>反选</button>
+              <button id="reset" type="button" class="text-button" disabled>按部位恢复</button>
+            </div>
+          </div>
+        </details>
+        <section id="range-history" class="panel range-history">
+          <div class="section-heading">
+            <h2>核对改动</h2>
+            <button id="show-manual-changes" class="button" type="button" disabled>查看手动改动</button>
+          </div>
+          <div id="changes-details" hidden>
+            <p class="panel-hint">以同一组部位和强度设置下的自动选区为基准。</p>
+            <p id="changes-status" class="changes-status" role="status"></p>
+            <button id="retry-changes" class="text-button" type="button" hidden>重试读取改动</button>
+            <dl id="changes-counts" class="changes-counts" hidden>
+              <div id="change-count-added"><dt><i class="dot change-added"></i>新增处理</dt><dd id="changes-added"></dd></div>
+              <div id="change-count-removed"><dt><i class="dot change-removed"></i>移出处理</dt><dd id="changes-removed"></dd></div>
+              <div id="change-count-stronger"><dt><i class="dot change-stronger"></i>处理增强</dt><dd id="changes-stronger"></dd></div>
+              <div id="change-count-weaker"><dt><i class="dot change-weaker"></i>处理减弱</dt><dd id="changes-weaker"></dd></div>
+              <div id="change-count-reclassified"><dt><i class="dot change-reclassified"></i>仅改分区</dt><dd id="changes-reclassified"></dd></div>
+            </dl>
+          </div>
+          <p id="change-history-empty" class="panel-hint">画完一笔或闭合选区，操作会出现在这里。</p>
+          <p id="change-history-note" class="panel-hint" hidden>「B 已包含」表示这条记录已纳入成品。净影响请看手动改动。</p>
+          <ol id="change-history-list" class="change-history-list" aria-label="最近四次手动操作"></ol>
+        </section>
+        </section>
+        <section id="effect-inspector" aria-label="调整效果" hidden>
+          <div class="panel mode-intro">
+            <h2>调整已选区域的效果</h2>
+            <p>更换算法、调整强度，画过的范围和局部保护仍然有效。对比图会随设置更新。</p>
+          </div>
+          <div class="panel">
+            <div class="section-heading"><h2>当前算法与强度</h2><span id="method-summary">纯 L0</span></div>
+            <label class="method-field" for="method">降噪算法<select id="method" disabled></select></label>
+            <div class="range-row">
+              <label for="strength">整体强度</label><output id="strength-value" for="strength">100%</output>
+              <input id="strength" type="range" min="0" max="1" step="0.01" disabled>
+            </div>
+            <p class="panel-hint">在处理范围内混入多少降噪结果，0% 保留原图。</p>
+            <div class="presets" role="group" aria-label="快捷参数操作">
+              <button data-preset="soft" type="button" aria-pressed="false" title="只改整体强度为 65%" disabled>强度 65%</button>
+              <button data-preset="strong" type="button" aria-pressed="false" title="只改 L0 参数为 0.001" disabled>L0 0.001</button>
+              <button data-preset="standard" type="button" aria-pressed="false" title="恢复标准算法与效果参数" disabled>恢复标准</button>
+            </div>
+          </div>
+        <details class="panel advanced">
+          <summary>高级设置</summary>
+          <div class="advanced-fields">
+            <div class="number-grid">
+              <label for="l0">L0 参数<input id="l0" type="number" min="0.000001" step="any" inputmode="decimal" disabled></label>
+              <label for="downscale">预缩放<input id="downscale" type="number" min="0.01" max="1" step="any" inputmode="decimal" disabled></label>
+            </div>
+            <div class="range-row">
+              <label for="restoration_gain">渐变恢复</label><output id="restoration_gain-value" for="restoration_gain">25%</output>
+              <input id="restoration_gain" type="range" min="0" max="1" step="0.01" disabled>
+            </div>
+            <div class="range-row">
+              <label for="structure_protection">线条保护</label><output id="structure_protection-value" for="structure_protection">20%</output>
+              <input id="structure_protection" type="range" min="0" max="1" step="0.01" disabled>
+            </div>
+            <label for="sigma">渐变尺度<input id="sigma" type="number" min="0.01" max="256" step="any" inputmode="decimal" disabled></label>
+          </div>
+        </details>
+        </section>
+      </div>
+      <div class="inspector-footer">
+        <p id="export-hint">完成第一份结果后即可导出。</p>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>
+

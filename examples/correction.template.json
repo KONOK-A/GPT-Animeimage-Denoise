@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "id": "REPLACE_WITH_CASE_ID_FROM_REPORT_OR_MANIFEST",
+  "source_sha256": "REPLACE_WITH_FULL_SOURCE_SHA256_FROM_REPORT_JSON",
+  "size": ["REPLACE_WITH_ORIENTED_INTEGER_WIDTH", "REPLACE_WITH_ORIENTED_INTEGER_HEIGHT"],
+  "notes": "不可直接运行：先填写源文件SHA256、定向后整数尺寸和ID。删除未使用的可选蒙版字段及SAM条目；路径相对本JSON，蒙版必须同尺寸。SAM坐标也必须由该源图实际审阅后填写。",
+  "module_overrides": {
+    "skin": "REPLACE_WITH_REVIEWED_SKIN_MASK_PATH_OR_REMOVE_ENTRY"
+  },
+  "object_add_mask": "REPLACE_WITH_OBJECT_ADD_MASK_PATH_OR_REMOVE_FIELD",
+  "object_remove_mask": "REPLACE_WITH_OBJECT_REMOVE_MASK_PATH_OR_REMOVE_FIELD",
+  "allow_mask": "REPLACE_WITH_ALLOW_MASK_PATH_OR_REMOVE_FIELD",
+  "protect_mask": "REPLACE_WITH_PROTECT_MASK_PATH_OR_REMOVE_FIELD",
+  "sam_regions": [
+    {
+      "action": "protect",
+      "positive": [["REPLACE_WITH_X_DIVIDED_BY_WIDTH", "REPLACE_WITH_Y_DIVIDED_BY_HEIGHT"]],
+      "negative": [],
+      "box": ["REPLACE_WITH_X0_DIVIDED_BY_WIDTH", "REPLACE_WITH_Y0_DIVIDED_BY_HEIGHT", "REPLACE_WITH_EXCLUSIVE_X1_DIVIDED_BY_WIDTH", "REPLACE_WITH_EXCLUSIVE_Y1_DIVIDED_BY_HEIGHT"],
+      "notes": "仅为结构示例，无图片点位；不使用SAM时删除此条目。candidate可省略，显式选择时只能是整数0、1或2。part动作另需part模块名。"
+    }
+  ]
+}

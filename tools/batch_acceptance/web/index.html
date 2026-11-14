@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>批次去噪验收</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="manifest.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="identity"><span class="identity-mark" aria-hidden="true"><i></i><i></i><i></i></span><h1>批次去噪验收</h1></div>
+      <p class="header-purpose">先核对处理范围，再比较伪影减少与细节保留</p>
+      <button class="button primary" id="export-review" type="button">导出验收意见</button>
+    </header>
+    <aside class="sample-sidebar" aria-label="本批次图片">
+      <div class="sidebar-heading"><h2>本批图片</h2><span id="sample-count"></span></div>
+      <nav id="sample-list" class="sample-list"></nav>
+      <div class="sidebar-help"><p>滚轮缩放，拖动平移。所有列查看同一个原图位置。</p><p><kbd>←</kbd> <kbd>→</kbd> 换图　<kbd>0</kbd> 适应　<kbd>1</kbd> 原像素</p><p id="review-count">0 张已记录</p></div>
+    </aside>
+    <main class="workspace">
+      <section class="case-heading" aria-labelledby="case-title">
+        <div class="case-heading-text"><p class="run-label" id="run-id"></p><h2 id="case-title">正在载入批次</h2><p id="case-description"></p></div>
+        <div class="case-navigation"><button class="button icon" id="previous-case" type="button" aria-label="上一张">←</button><span id="case-position"></span><button class="button icon" id="next-case" type="button" aria-label="下一张">→</button></div>
+      </section>
+      <section id="aggregation-note" class="aggregation-note record-section" aria-label="追加批次汇总" hidden><p id="aggregation-text"></p><div id="aggregation-links" class="method-links"></div></section>
+      <nav class="stage-list" id="stage-list" aria-label="处理过程"></nav>
+      <section class="inspection-controls" aria-label="查看选项">
+        <div class="control-row">
+          <div class="column-switches" role="group" aria-label="显示列"><label><input id="show-original" type="checkbox" checked>原图</label><label><input id="show-l0" type="checkbox" checked>纯 L0</label><label><input id="show-esrgan-l0" type="checkbox" checked>ESRGAN + L0</label><label><input id="show-difference" type="checkbox">最终差异</label></div>
+          <label class="compact-control">差异倍率<select id="difference-gain"><option value="1">×1</option><option value="4">×4</option><option value="8" selected>×8</option></select></label>
+          <div class="view-controls"><button class="button small" id="peek-original" type="button" aria-pressed="false">暂看原图</button><button class="button small" id="fit-view" type="button">适应</button><button class="button small" id="native-view" type="button">100%</button><span id="zoom-value">—</span></div>
+        </div>
+        <div class="control-row detail-controls">
+          <label class="compact-control" id="region-control" hidden>查看分区<select id="region-view"></select></label>
+          <label class="compact-control" id="evidence-control" hidden>模型输入<select id="evidence-view"><option value="white">白底分析图</option><option value="original">原图分析图</option></select></label>
+          <label class="compact-control" id="candidate-control" hidden>候选阶段<select id="candidate-view"><option value="candidate">原始降噪候选</option><option value="restored">Gaussian恢复后候选</option></select></label>
+          <div id="mask-display-controls" class="mask-display-controls" hidden><label class="compact-control">显示<select id="mask-mode"><option value="overlay">叠加原图</option><option value="mask">纯蒙版</option><option value="cutout">选区抠图</option><option value="original">仅原图</option></select></label><label class="compact-control">透明度<input id="opacity" type="range" min="0" max="100" value="55"><output id="opacity-value">55%</output></label></div>
+          <span class="stage-chip" id="current-stage">最终出图</span>
+        </div>
+        <p id="stage-note" class="stage-note"></p>
+      </section>
+      <div id="shared-status" class="shared-status warning" role="status">正在核对两算法选区</div>
+      <section class="comparison-grid" id="comparison-grid" aria-label="图像对照">
+        <article class="image-pane original-pane" id="original-pane"><header class="pane-heading"><span class="pane-dot"></span><h3 id="original-title">原图</h3></header><div class="canvas-frame"><canvas id="original-canvas" aria-label="原图参考；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="original-message" hidden></div></div><p class="pane-note" id="original-note"></p></article>
+        <article class="image-pane l0-pane" id="l0-pane"><header class="pane-heading"><span class="pane-dot"></span><h3 id="l0-title">纯 L0</h3></header><div class="canvas-frame"><canvas id="l0-canvas" aria-label="纯L0对应阶段；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="l0-message" hidden></div></div><p class="pane-note" id="l0-note"></p></article>
+        <article class="image-pane esrgan-pane" id="esrgan-l0-pane"><header class="pane-heading"><span class="pane-dot"></span><h3 id="esrgan-l0-title">ESRGAN + L0</h3></header><div class="canvas-frame"><canvas id="esrgan-l0-canvas" aria-label="ESRGAN加L0对应阶段；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="esrgan-l0-message" hidden></div></div><p class="pane-note" id="esrgan-l0-note"></p></article>
+        <article class="image-pane difference-pane" id="difference-pane" hidden><header class="pane-heading"><span class="pane-dot"></span><h3 id="difference-title">最终算法差异</h3></header><div class="canvas-frame"><canvas id="difference-canvas" aria-label="最终算法绝对差异；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="difference-message" hidden></div></div><p class="pane-note" id="difference-note"></p></article>
+      </section>
+      <div class="inspection-status"><span id="dimensions"></span><span id="pixel-position">各列同步查看同一位置</span><span id="load-status" role="status" aria-live="polite"></span></div>
+      <div id="source-legend" class="source-legend"></div>
+      <section class="acceptance-section" aria-labelledby="acceptance-title">
+        <div class="section-heading"><h2 id="acceptance-title">本图验收</h2><span>只记录你的观察，不自动批准像素真值或修改策略</span></div>
+        <div class="review-grid"><label>分区判断<select id="segmentation-review"><option value="pending">待查看</option><option value="ok">大致满意</option><option value="needs-fix">需要修复</option></select></label><label>降噪偏好<select id="preference-review"><option value="pending">待比较</option><option value="original">保留原图</option><option value="l0">纯 L0 更好</option><option value="esrgan-l0">ESRGAN + L0 更好</option><option value="adjust">两种都需调整</option></select></label></div>
+        <fieldset class="issue-fieldset"><legend>发现的问题</legend><div class="issue-tags" id="issue-tags"></div></fieldset>
+        <label class="review-note-label">备注<textarea id="review-note" rows="2" placeholder="例如：脸部去纹理明显，头发局部变平；右袖不应该进入选区。"></textarea></label>
+      </section>
+      <section class="record-grid" aria-label="核验与过程记录">
+        <details class="record-section" open><summary>工程核验</summary><p class="record-help">Alpha或ICC原图未含时记为不适用，不冒充已完成有通道图片的测试。通过仅说明工程约束，不代表观感更好。</p><div id="check-list" class="check-list"></div></details>
+        <details class="record-section" open><summary>阶段产物与留痕</summary><div class="method-links" id="method-links"></div><div class="trace-list" id="trace-list"></div></details>
+      </section>
+      <details class="record-section parameter-section"><summary>本批参数、策略与输入身份</summary><p id="parameter-summary"></p><p class="record-help">下方保存两方法实际参数与分区策略；各模型输入尺寸、计算精度、权重来源和缓存身份见对应原生报告。</p><div class="method-links" id="parameter-links"></div><p class="source-identity">原图 SHA256：<code id="source-sha"></code></p><pre id="parameter-json"></pre></details>
+      <footer class="workspace-footer"><span>最终只在保存权重允许的区域写回；候选预览不等于最终处理范围</span><span id="save-status" role="status">意见保存在当前浏览器</span></footer>
+      <div id="page-error" class="page-error" role="alert" hidden></div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>服饰与部位对照</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="manifest.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="identity"><span class="identity-mark" aria-hidden="true"><i></i><i></i></span><h1>服饰与部位对照</h1></div>
+      <p class="header-purpose">看清独立证据、当前融合与它们的差异</p>
+      <div class="header-actions"><label class="button import-button">导入判断<input id="import-review" type="file" accept=".json,application/json"></label><button class="button primary" id="export-review" type="button">导出判断 JSON</button></div>
+    </header>
+    <aside class="sample-sidebar" aria-label="样本列表">
+      <div class="sidebar-heading"><h2>开发集样本</h2><span id="sample-count"></span></div>
+      <nav class="sample-list" id="sample-list"></nav>
+      <div class="sidebar-help"><p>滚轮缩放、拖动平移，三个视图同步。</p><p><kbd>←</kbd> <kbd>→</kbd> 换图　<kbd>0</kbd> 适应　<kbd>1</kbd> 原像素</p><p>隐藏一栏，可放大其余视图。</p></div>
+    </aside>
+    <main class="workspace">
+      <section class="case-heading" aria-labelledby="case-title">
+        <div class="case-heading-text"><h2 id="case-title">正在载入样本</h2><p id="case-description"></p></div>
+        <div class="case-navigation"><button id="previous-case" class="button icon-button" type="button" aria-label="上一张">←</button><span id="case-position"></span><button id="next-case" class="button icon-button" type="button" aria-label="下一张">→</button></div>
+      </section>
+      <section class="inspection-controls" aria-label="查看设置">
+        <div class="control-row"><div class="part-tabs" id="module-tabs" role="group" aria-label="查看部位"></div><button id="raw-toggle" class="button subtle" type="button" aria-expanded="false" aria-controls="raw-panel">原始通道</button></div>
+        <div class="control-row secondary-controls">
+          <label class="compact-control">服饰细项<select id="garment-detail"></select></label>
+          <label class="compact-control">原始模型输入<select id="input-view"><option value="white">共同白底</option><option value="original">共同原图</option></select></label>
+          <a id="analysis-input" class="analysis-input-link" target="_blank" rel="noopener">查看实际输入</a>
+          <label class="compact-control">M2F映射<select id="m2f-projection"><option value="score">还原分数后判类</option><option value="nearest">基线最近邻</option></select></label>
+          <label class="compact-control">See阈值<select id="see-threshold"><option value="0">0</option><option value="1" selected>1</option><option value="2">2</option></select></label>
+        </div>
+        <div class="control-row display-controls">
+          <div class="model-switches" role="group" aria-label="显示模型"><label><input id="show-see" type="checkbox" checked>See-through</label><label><input id="show-m2f" type="checkbox" checked>Mask2Former</label><label><input id="show-fusion" type="checkbox" checked>当前fusion</label></div>
+          <label class="compact-control">显示<select id="display-mode"><option value="overlay">叠加原图</option><option value="mask">纯蒙版</option><option value="cutout">选区抠图</option><option value="original">仅原图</option></select></label>
+          <label class="compact-control opacity-control">透明度<input id="overlay-opacity" type="range" min="0" max="100" value="55"><output id="opacity-value">55%</output></label>
+          <label class="toggle-control"><input id="difference-view" type="checkbox">只看标签差异</label>
+          <label class="toggle-control"><input id="show-unknown" type="checkbox">叠加fusion待确认</label>
+          <div class="view-controls"><button id="fit-view" class="button small" type="button">适应</button><button id="native-view" class="button small" type="button">100%</button><span id="zoom-value">—</span></div>
+        </div>
+        <p id="part-note" class="part-note"></p>
+        <div id="difference-legend" class="difference-legend" hidden><span><i class="m2f-only"></i>M2F独有</span><span><i class="see-only"></i>See独有</span><span><i class="fusion-added"></i>fusion新增</span><span><i class="fusion-removed"></i>fusion已确认移出</span><span>相对当前所选单视图；待确认不计为移出</span></div>
+        <div class="raw-channel-panel" id="raw-panel" hidden>
+          <div class="raw-panel-intro"><p>See的19通道独立且可重叠；手脚粗类不自动等于裸肤或衣服。</p><button id="return-modules" class="button small" type="button">返回部位对照</button></div>
+          <div class="raw-channel-columns"><fieldset><legend>See-through · 19 通道</legend><div id="see-channel-list" class="channel-list"></div></fieldset><fieldset><legend>Mask2Former · 12 类</legend><div id="m2f-channel-list" class="channel-list"></div></fieldset><fieldset><legend>当前fusion · 六模块</legend><div id="fusion-channel-list" class="channel-list"></div></fieldset></div>
+        </div>
+      </section>
+      <div class="fixed-fusion-note"><span class="fixed-badge">fusion为已保存结果</span><p>采用双输入、锚定规则与SAM；服饰／外物强证据阈值为1，眼睛另有轮廓规则。切换原始输入、See阈值或M2F映射不会重算fusion。当前结果尚未包含专门的完整服饰补选算法。</p></div>
+      <section class="comparison-grid" id="comparison-grid" aria-label="三个分割结果">
+        <article class="model-pane see-pane" id="see-pane"><header class="pane-heading"><div><span class="model-dot"></span><h3>See-through</h3></div><span id="see-detail" class="pane-detail"></span></header><div class="canvas-frame"><canvas id="see-canvas" aria-label="See-through选区，滚轮缩放，拖动平移"></canvas><div id="see-message" class="pane-message" hidden></div></div><p id="see-note" class="pane-note"></p></article>
+        <article class="model-pane m2f-pane" id="m2f-pane"><header class="pane-heading"><div><span class="model-dot"></span><h3>Mask2Former v4</h3></div><span id="m2f-detail" class="pane-detail"></span></header><div class="canvas-frame"><canvas id="m2f-canvas" aria-label="Mask2Former选区，滚轮缩放，拖动平移"></canvas><div id="m2f-message" class="pane-message" hidden></div></div><p id="m2f-note" class="pane-note"></p></article>
+        <article class="model-pane fusion-pane" id="fusion-pane"><header class="pane-heading"><div><span class="model-dot"></span><h3>当前 fusion</h3></div><span id="fusion-detail" class="pane-detail"></span></header><div class="canvas-frame"><canvas id="fusion-canvas" aria-label="当前fusion选区，滚轮缩放，拖动平移"></canvas><div id="fusion-message" class="pane-message" hidden></div></div><p id="fusion-note" class="pane-note"></p></article>
+      </section>
+      <div class="inspection-status"><span id="image-dimensions"></span><span id="pixel-position">三个视图使用同一图像中心</span><span id="load-status" role="status" aria-live="polite"></span></div>
+      <p id="input-context" class="input-context"></p>
+      <section class="review-section" aria-labelledby="review-title">
+        <div class="review-heading"><div><h2 id="review-title">记录这张图的判断</h2><span id="review-progress">0 / 6</span></div><button class="button subtle" id="review-toggle" type="button" aria-expanded="false" aria-controls="review-content">展开记录</button></div>
+        <div id="review-content" hidden><div id="review-choices" class="review-choices"></div><label class="review-notes">备注<textarea id="review-notes" rows="2" placeholder="例如：See领口范围更完整；当前fusion保住了发饰，但衣服边缘仍有漏选。"></textarea></label><p class="review-footnote">判断保存在当前浏览器，可导出JSON。旧工具的记录仍在原工具，可导入旧导出的JSON，按源图身份合并并保留当前已有判断；意见不会自动改策略。</p></div>
+      </section>
+      <details class="reading-guide"><summary>理解对比口径</summary><p>这里比较模型预测，不提供真值或准确率。服饰总览范围并不完全一致：See的明确服饰通道不含有歧义的手臂／腿粗类；M2F只有衣服与配饰大类；fusion只有合并后的服饰模块。细项中宽范围参照已单独标明。</p><p>100%表示一个原图像素对应一个CSS像素；此时关闭画布平滑以查看边缘。fusion待确认255单独展示，不等于已删除或识别错误。</p></details>
+      <footer class="workspace-footer"><span>本地证据对照 · 查看与意见记录不修改模型或融合结果</span><span id="save-status" role="status">判断保存在当前浏览器</span></footer>
+      <div class="page-error" id="page-error" role="alert" hidden></div>
+    </main>
+  </div>
+</body>
+</html>

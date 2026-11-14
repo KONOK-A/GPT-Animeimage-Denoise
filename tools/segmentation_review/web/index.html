@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>部位分割对照</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="manifest.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="identity"><span class="identity-mark" aria-hidden="true"><i></i><i></i></span><h1>部位分割对照</h1></div>
+      <p class="header-purpose">先看各自分得好的地方，再决定如何互补</p>
+      <button class="button primary" id="export-review" type="button">导出判断 JSON</button>
+    </header>
+    <aside class="sample-sidebar" aria-label="图片列表">
+      <div class="sidebar-heading"><h2>对照样本</h2><span id="sample-count"></span></div>
+      <nav class="sample-list" id="sample-list"></nav>
+      <div class="sidebar-help"><p>滚轮放大，拖动平移。两侧始终查看同一位置。</p><p><kbd>←</kbd> <kbd>→</kbd> 换图　<kbd>0</kbd> 适应　<kbd>1</kbd> 原像素</p></div>
+    </aside>
+    <main class="workspace">
+      <section class="case-heading" aria-labelledby="case-title">
+        <div class="case-heading-text"><h2 id="case-title">正在载入样本</h2><p id="case-description"></p></div>
+        <div class="case-navigation"><button class="button icon-button" id="previous-case" type="button" aria-label="上一张">←</button><span id="case-position"></span><button class="button icon-button" id="next-case" type="button" aria-label="下一张">→</button></div>
+      </section>
+      <section class="inspection-controls" aria-label="对照设置">
+        <div class="control-row">
+          <div class="part-tabs" id="module-tabs" role="group" aria-label="查看部位"></div>
+          <button class="button subtle" id="raw-toggle" type="button" aria-expanded="false" aria-controls="raw-channel-panel">原始通道</button>
+        </div>
+        <div class="control-row secondary-controls">
+          <label class="compact-control">分析输入 <select id="input-view"><option value="white">共同白底</option><option value="original">共同原图</option></select></label>
+          <a class="analysis-input-link" id="analysis-input-link" target="_blank" rel="noopener">查看分析输入</a>
+          <label class="compact-control">显示 <select id="display-mode"><option value="overlay">叠加原图</option><option value="mask">纯蒙版</option><option value="cutout">选区抠图</option><option value="original">仅原图</option></select></label>
+          <label class="compact-control opacity-control">叠加强度 <input id="overlay-opacity" type="range" min="0" max="100" value="55"><output id="opacity-value" for="overlay-opacity">55%</output></label>
+          <label class="compact-control">See 阈值 <select id="see-threshold"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select></label>
+          <div class="view-controls"><button class="button small" id="fit-view" type="button">适应</button><button class="button small" id="native-view" type="button">100%</button><span id="zoom-value">—</span></div>
+        </div>
+        <p class="part-note" id="part-note"></p>
+        <div class="raw-channel-panel" id="raw-channel-panel" hidden>
+          <div class="raw-panel-intro"><p>独立查看模型原始类别。See-through 是多通道预测，允许重叠，不做互斥归类。</p><button class="button small" id="return-modules" type="button">返回部位对照</button></div>
+          <div class="raw-channel-columns"><fieldset><legend>See-through · 19 通道</legend><div id="see-channel-list" class="channel-list"></div></fieldset><fieldset><legend>Mask2Former · 12 类</legend><div id="m2f-channel-list" class="channel-list"></div></fieldset></div>
+        </div>
+      </section>
+      <section class="comparison-grid" aria-label="模型分割结果">
+        <article class="model-pane see-pane"><header class="pane-heading"><div><span class="model-dot"></span><h3>See-through</h3></div><span class="pane-detail" id="see-pane-detail">原始多通道预测</span></header><div class="canvas-frame" id="see-frame"><canvas id="see-canvas" aria-label="See-through 分割结果；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="see-message" hidden></div></div></article>
+        <article class="model-pane m2f-pane"><header class="pane-heading"><div><span class="model-dot"></span><h3>Mask2Former v4</h3></div><span class="pane-detail" id="m2f-pane-detail">768 × 768 / FP32</span></header><div class="canvas-frame" id="m2f-frame"><canvas id="m2f-canvas" aria-label="Mask2Former 分割结果；滚轮缩放，拖动平移"></canvas><div class="pane-message" id="m2f-message" hidden></div></div></article>
+      </section>
+      <div class="inspection-status"><span id="image-dimensions"></span><span id="pixel-position">两侧同步缩放与平移</span><span id="input-context">白底输入预测，叠加原图</span><span id="load-status" role="status" aria-live="polite"></span></div>
+      <section class="review-section" aria-labelledby="review-title">
+        <div class="review-heading"><div><h2 id="review-title">记录这张图的判断</h2><span id="review-progress">0 / 6</span></div><button class="button subtle" id="review-toggle" type="button" aria-expanded="false" aria-controls="review-content">展开记录</button></div>
+        <div id="review-content" hidden><div class="review-choices" id="review-choices"></div><label class="review-notes">备注<textarea id="review-notes" rows="2" placeholder="例如：长发边缘 See 更完整，但左肩把围巾算成了头发。"></textarea></label><p class="review-footnote">这里只记录观察，不会修改分割或 fusion 配置。导出的 JSON 可用于下一轮整理。</p></div>
+      </section>
+      <footer class="workspace-footer"><span>分割原始结果对照 · 未做 SAM2 修补与降噪</span><span id="save-status" role="status">判断保存在当前浏览器</span></footer>
+      <div class="page-error" id="page-error" role="alert" hidden></div>
+    </main>
+  </div>
+</body>
+</html>
