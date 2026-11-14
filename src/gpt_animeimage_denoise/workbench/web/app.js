@@ -1,13 +1,31 @@
 'use strict';
 
 const byId = id => document.getElementById(id);
+const themeToggle = byId('theme-toggle');
+const themeRoot = document.documentElement;
+const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+function applyTheme() {
+  const theme = themeRoot.dataset.themePreference || (systemTheme.matches ? 'dark' : 'light');
+  themeRoot.dataset.theme = theme;
+  themeToggle.setAttribute('aria-pressed', String(theme === 'dark'));
+  themeToggle.title = theme === 'dark' ? '切换到浅色外观' : '切换到深色外观';
+}
+applyTheme();
+systemTheme.addEventListener('change', applyTheme);
+themeToggle.addEventListener('click', () => {
+  const theme = themeRoot.dataset.theme === 'dark' ? 'light' : 'dark';
+  themeRoot.dataset.themePreference = theme;
+  applyTheme();
+  try { window.localStorage.setItem('gaid-theme', theme); }
+  catch { /* Keep the selection for this page. */ }
+});
+
 const canvas = byId('canvas'), stage = byId('stage'), ctx = canvas.getContext('2d');
 const magneticCanvas = byId('magnetic-canvas'), magneticCtx = magneticCanvas.getContext('2d');
 const viewButtons = [...document.querySelectorAll('[data-view]')];
 const toolButtons = [...document.querySelectorAll('button[data-tool]')];
 const presetButtons = [...document.querySelectorAll('[data-preset]')];
-const modeButtons = [...document.querySelectorAll('[data-mode]')];
-const modeLinks = [...document.querySelectorAll('[data-go-mode]')];
+const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const scopeButtons = [...document.querySelectorAll('[data-scope]')];
 const numberFields = ['strength', 'l0', 'downscale', 'sigma', 'restoration_gain', 'structure_protection'];
 const MASK_VIEWS = ['weight', 'parts', 'suspected_objects'];
@@ -17,12 +35,13 @@ const MAGNETIC_PIN_DISTANCE = 48;
 const MODE_VIEWS = { review: ['compare', 'original', 'result'], range: [...RANGE_VIEWS, 'original', 'result'],
   effect: ['compare', 'original', 'result'] };
 const state = {
-  options: null, doc: null, file: null, draft: null, dirty: false, save: null, conflict: null,
+  options: null, doc: null, file: null, draft: null, dirty: false, save: null, saveFailed: false, conflict: null,
   epoch: 0, opening: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0,
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
   mode: 'review', tool: 'pan', brushSized: false, peek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
   changesError: null, appliedHistory: null, historyLocation: null, historyDisplayKey: '',
+  displayedResult: null,
 };
 const isLasso = () => ['lasso', 'magnetic'].includes(state.tool);
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -33,11 +52,13 @@ const viewAvailable = view => (view !== 'suspected_objects' && view !== 'unknown
 const unknownOverlayAvailable = () => state.mode === 'range' && (state.view === 'parts' || state.view === 'weight')
   && viewAvailable('unknown');
 const pendingKey = id => 'gaid-pending-' + id;
-function status(message) {
+function status(message, tone = 'neutral') {
   const label = byId('status');
   if (label.textContent !== message) label.textContent = message;
+  if (label.dataset.tone !== tone) label.dataset.tone = tone;
 }
 function showError(error) {
+  byId('notice').dataset.tone = 'error';
   byId('notice-text').textContent = error.message || String(error);
   byId('notice').hidden = false;
 }
@@ -98,7 +119,7 @@ function renderIsCurrent() {
     && !state.dirty && !state.save && !state.conflict && state.doc.status === 'ready');
 }
 function resultIsCurrent() {
-  return renderIsCurrent() && state.images.get('b')?.revision === state.doc.b.revision;
+  return renderIsCurrent() && state.displayedResult === state.doc.b.revision;
 }
 function comparing() {
   return state.view === 'compare' && !state.peek && Boolean(visibleImage('b') && (visibleImage('a') || visibleImage('original')));
@@ -120,9 +141,9 @@ function updateToolGuidance(current) {
       : '把未选区域加入处理范围。可在下方允许手动补选模型建议保留的像素。',
     exclude: '把' + region + '移出处理范围，保留原像素。需要重新处理时可用补选。',
     protect: '保留部分原图，让这里少降噪。设为 100% 时，' + (isLasso() ? '圈内' : '笔画中心') + '完全保留。',
-    mix: isLasso() ? '按输入比例在圈内保留原图。仅对已加入处理范围的像素生效。'
-      : '在已选区域指定原图比例。笔刷中心按输入值混合，边缘柔和过渡。未选区域先用补选。',
-    erase: '擦掉手动画过的标记，恢复初始范围。想让已选区域不降噪，请用「不处理」。',
+    mix: (isLasso() ? '圈内的已选区域' : '笔刷中心的已选区域') + '混合 ' + Number(byId('retention-percent').value)
+      + '% 原图。' + (isLasso() ? '' : '边缘柔和过渡。'),
+    erase: '擦掉手动画过的标记，恢复初始范围。想保留原像素可用「移出」。',
     override: '圈出误判的外物或待确认区域，再指定它实际属于哪个部位。',
   };
   const description = byId('tool-description');
@@ -229,48 +250,29 @@ function updateRangeHistory(canEdit) {
     return li;
   }));
 }
-function updateModeContext() {
-  const tool = isLasso() ? byId('lasso-action').value : state.tool;
-  const region = isLasso() ? '圈住的区域' : '画过的区域';
-  const tasks = {
-    pan: ['改哪里', '识别部位看模型分区，实际处理看当前权重，手动改动看你改了哪里。'],
-    include: ['画入范围', region + '里可编辑的像素会参与降噪。'],
-    exclude: ['移出范围', region + '退出处理范围，保留原像素。'],
-    protect: ['局部减弱', region + '保留更多原图，原有选区继续生效。'],
-    mix: ['原图比例', (isLasso() ? '圈内的已选区域按 ' : '在已选区域画一笔，中心按 ') +
-      Number(byId('retention-percent').value) + '% 原图混合。'],
-    erase: ['擦改动', '清除该处手动改动，让初始选区重新生效。'],
-    override: ['纠正误判', '圈定一块模型误判区域，并指定它实际属于哪个部位。'],
-    sam_object: ['点选外物', '给道具加目标点，给要保留的部位加排除点。确认预览后才会更新外物分区。'],
-  };
-  const [action, impact] = !state.file ? ['打开一张图片', '选择、拖入或粘贴图片，后台会自动生成标准成品。']
-    : state.mode === 'range' ? tasks[tool] || tasks.pan
-    : state.mode === 'effect' ? ['调效果', '换算法或调强度会更新已选区域的降噪效果，保留当前处理范围。']
-    : ['看成品', '拖分割线比较原图和结果。对比、缩放和移动只改变显示。'];
-  byId('context-action').textContent = isLasso() && state.mode === 'range'
-    ? (state.magnetic ? '磁性套索 · ' : '套索 · ') + action : action;
-  byId('context-impact').textContent = impact;
-  let message = '';
-  if (state.doc && !state.opening) {
-    if (state.conflict) message = '请先处理版本冲突';
-    else if (state.doc.status === 'error') message = '更新失败，可重试';
-    else if (state.dirty || state.save) message = '正在提交修改';
-    else if (!renderIsCurrent()) {
-      message = { analysis: '正在识别区域', candidate: '正在生成算法候选', compose: '正在合成预览',
-        encoding: '正在生成图层', queued: '等待更新' }[state.doc.phase] || '正在更新';
-      if (state.mode === 'range') message += '，可继续画';
-    } else if (state.view === 'changes') {
-      message = state.images.get('changes')?.revision === state.doc.revision ? '改动图已更新'
-        : state.changesError?.revision === state.doc.revision ? '改动图读取失败' : '正在读取改动图';
-    } else if (state.view === 'suspected_objects') {
-      message = state.images.get(state.view)?.revision === state.doc.revision ? '疑似外物已显示' : '正在显示疑似外物';
-    } else if (state.mode === 'range' && MASK_VIEWS.includes(state.view)) {
-      message = state.images.get(state.view)?.revision === state.doc.revision ? '范围已更新' : '正在显示新图层';
-    } else if (!resultIsCurrent()) message = '正在显示新成品';
-    else message = state.mode === 'review' ? '可导出当前成品' : '成品已更新';
-  }
-  byId('context-update').textContent = message;
-  byId('mode-context').dataset.state = state.doc && !renderIsCurrent() ? 'pending' : 'ready';
+function updateStatus(current) {
+  if (!state.doc || state.opening) return;
+  const rangeMode = state.mode === 'range';
+  const editing = rangeMode ? '，可继续编辑' : '';
+  const phases = { queued: '等待处理', loading: '正在读取图片', analyzing: '正在识别分区', analysis: '正在识别分区',
+    candidate: '正在生成降噪候选', rendering: '正在合成预览', compose: '正在合成预览',
+    encoding: '正在保存结果', saving: '正在保存结果' };
+  if (state.conflict) status('另一页面已更新，请选择保留哪份修改。', 'error');
+  else if (state.save) status('正在提交修改' + editing, 'pending');
+  else if (state.saveFailed) status('修改保存失败，可重试。', 'error');
+  else if (state.dirty) status('修改待更新' + editing, 'pending');
+  else if (state.doc.status === 'error') status(state.doc.error || '处理失败，请重试。', 'error');
+  else if (state.doc.status !== 'ready') status((phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
+  else if (rangeMode && RANGE_VIEWS.includes(state.view)) {
+    const revision = state.doc.revision;
+    if (state.view === 'changes' && state.changesError?.revision === revision) status('改动图读取失败，可在「核对改动」重试。', 'error');
+    else if (state.images.get(state.view)?.revision === revision) {
+      const label = { changes: '改动图已更新', suspected_objects: '疑似外物已显示' };
+      status(label[state.view] || '范围已更新', 'ready');
+    } else status('正在显示当前图层' + editing, 'pending');
+  } else if (current) status('当前成品已就绪', 'ready');
+  else if (state.view === 'original' && visibleImage('original')) status('原图已显示，可切换到「成品」检查。', 'neutral');
+  else status('正在显示当前成品' + editing, 'pending');
 }
 function updateSamControls() {
   const sam = state.sam;
@@ -301,13 +303,20 @@ function updateControls() {
   const rangeMode = state.mode === 'range';
   const reviewMode = state.mode === 'review';
   document.body.dataset.mode = state.mode;
+  byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = byId('file-meta').hidden = !hasImage;
+  const viewHint = comparing() ? '拖动分割线比较 · 空格拖动画布' : '滚轮缩放 · 空格拖动画布';
+  if (byId('viewer-hint').textContent !== viewHint) byId('viewer-hint').textContent = viewHint;
+  byId('inspector').hidden = !state.doc || state.opening;
+  byId('empty-title').textContent = state.opening ? '正在打开图片…' : '拖入图片开始精修';
+  byId('empty-help').hidden = state.opening;
+  byId('empty-open').hidden = state.opening;
   const drawingMagnetic = Boolean(state.magnetic?.segments.length || state.magnetic?.intent);
   byId('undo').disabled = !canEdit || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === 0;
   byId('redo').disabled = !canEdit || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === state.draft.edits.length;
-  byId('download').textContent = reviewMode ? '导出 PNG' : '去看成品';
+  byId('download-label').textContent = reviewMode ? '导出 PNG' : '去看成品';
   byId('download').disabled = reviewMode ? !current : !canEdit;
   byId('pin').disabled = !current;
-  byId('export-panel').hidden = !reviewMode && !rangeMode;
+  byId('export-panel').hidden = !state.doc || (!reviewMode && !rangeMode);
   byId('more-actions').textContent = rangeMode ? '校正文件' : '⌄';
   byId('more-actions').setAttribute('aria-label', rangeMode ? '校正文件' : '更多导出选项');
   byId('correction-export').hidden = byId('correction-import').hidden = !rangeMode;
@@ -315,8 +324,12 @@ function updateControls() {
   byId('correction-export').disabled = !renderIsCurrent();
   byId('download-a').disabled = !state.doc?.a;
   byId('correction-import').disabled = !canEdit || state.dirty || Boolean(state.save || state.conflict);
-  byId('export-hint').textContent = !reviewMode ? '在「看成品」中检查并导出 PNG。' : current ? '可导出当前方案 B。'
-    : visibleImage('b') ? '当前修改正在更新。结果显示后即可导出。' : '第一份成品显示后即可导出。';
+  byId('export-hint').textContent = reviewMode && !current ? '当前成品显示后，即可固定或导出。' : '';
+  const a = state.doc?.a, b = state.images.get('b')?.meta;
+  byId('comparison-a').textContent = !a ? '原图' : state.images.get('a')?.revision === a.revision
+    ? '固定对照 · ' + methodLabel(a.method) : '正在载入固定对照';
+  byId('comparison-b').textContent = !b ? '等待第一份成品' : methodLabel(b.method)
+    + (current ? ' · 当前成品' : b.revision === state.doc?.revision && renderIsCurrent() ? ' · 待查看' : ' · 上一版');
   for (const id of ['zoom-out', 'zoom-in', 'fit', 'actual', 'peek']) byId(id).disabled = !hasImage;
   for (const [buttons, key, value, disabled] of [
     [viewButtons, 'view', state.view, !hasImage], [toolButtons, 'tool', state.tool, !canEdit],
@@ -331,7 +344,6 @@ function updateControls() {
   unknownToggle.hidden = !unknownOverlayAvailable();
   unknownToggle.setAttribute('aria-pressed', String(state.showUnknown));
   for (const mode of ['review', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode;
-  for (const button of modeLinks) button.disabled = !canEdit;
   for (const button of presetButtons) {
     button.disabled = !canEdit || (button.dataset.preset === 'strong' && !method?.uses_l0);
     button.setAttribute('aria-pressed', String(Boolean(presetMatches(button.dataset.preset))));
@@ -347,7 +359,6 @@ function updateControls() {
   for (const id of ['method', ...numberFields, 'radius', 'protection', 'retention-percent', 'allow-protected', 'lasso-action', 'override-module', 'invert', 'reset']) {
     byId(id).disabled = !canEdit || (id === 'l0' && !method?.uses_l0) || (id === 'downscale' && !method?.uses_downscale);
   }
-  byId('method-summary').textContent = method?.label || '纯 L0';
   byId('lasso-options').hidden = !isLasso();
   byId('brush-radius-row').hidden = isLasso() || state.tool === 'pan';
   const operation = isLasso() ? byId('lasso-action').value : state.tool;
@@ -383,28 +394,17 @@ function updateControls() {
   updateToolGuidance(renderIsCurrent());
   updateSamControls();
   updateRangeHistory(canEdit);
-  updateModeContext();
   stage.dataset.tool = state.space ? 'pan' : state.tool;
   byId('conflict-local').hidden = byId('conflict-remote').hidden = !state.conflict;
-  byId('retry').hidden = state.doc?.status !== 'error' && !state.dirty;
-  if (state.doc && !state.opening) {
-    const phases = { queued: '等待处理', loading: '正在读取图片', analyzing: '正在识别分区', analysis: '正在识别分区',
-      candidate: '正在生成降噪候选', rendering: '正在合成预览', compose: '正在合成预览',
-      encoding: '正在保存结果', saving: '正在保存结果', ready: '结果已就绪' };
-    if (state.conflict) status('另一页面已更新，请选择保留哪份修改。');
-    else if (state.doc.status === 'error') status(state.doc.error || '处理失败，请重试。');
-    else if (state.save || state.dirty) status('修改待更新');
-    else if (state.doc.status === 'ready') status(renderIsCurrent() &&
-      (current || (rangeMode && (!RANGE_VIEWS.includes(state.view) || state.images.get(state.view)?.revision === state.doc.revision)))
-      ? '结果已就绪' : '正在显示当前预览');
-    else status(phases[state.doc.phase] || phases[state.doc.status] || state.doc.phase || '正在处理');
-  }
+  byId('retry').hidden = !state.doc || Boolean(state.conflict || state.save)
+    || (!state.saveFailed && (state.doc.status !== 'error' || state.dirty));
+  updateStatus(current);
 }
 
 function layout() {
   const width = canvas.clientWidth, height = canvas.clientHeight;
   if (!state.file?.width || !state.file.height || !width || !height) return null;
-  const fit = Math.min(Math.max(1, width - 38) / state.file.width, Math.max(1, height - 38) / state.file.height, 1);
+  const fit = Math.min(Math.max(1, width - 38) / state.file.width, Math.max(1, height - 52) / state.file.height, 1);
   const scale = state.fit ? fit : state.zoom;
   const w = state.file.width * scale, h = state.file.height * scale;
   return { width, height, scale, w, h, x: (width - w) / 2 + state.panX, y: (height - h) / 2 + state.panY };
@@ -500,7 +500,7 @@ function drawHistoryLocation(box) {
   ctx.restore();
 }
 function draw() {
-  const box = layout(), showDivider = comparing(), divider = byId('divider');
+  const box = layout(), showDivider = comparing();
   byId('history-location-label').hidden = !box || state.historyLocation === null || state.mode !== 'range' || state.peek || Boolean(state.sam);
   const maskView = MASK_VIEWS.includes(state.view), suspectedView = state.view === 'suspected_objects';
   const diffView = state.view === 'changes';
@@ -512,10 +512,27 @@ function draw() {
   const showUnknown = Boolean(box && !state.peek && state.showUnknown && unknownOverlayAvailable()
     && unknown && unknown.revision === base?.revision);
   byId('unknown-legend').hidden = !showUnknown;
-  divider.hidden = byId('compare-badges').hidden = !showDivider;
-  divider.style.left = state.split * 100 + '%';
-  divider.setAttribute('aria-valuenow', String(Math.round(state.split * 100)));
+  const underlay = byId('art-underlay');
+  underlay.hidden = !box;
+  const divider = byId('divider'), badges = byId('compare-badges');
+  const visible = box && box.x + box.w > 0 && box.x < box.width && box.y + box.h > 0 && box.y < box.height;
+  divider.hidden = badges.hidden = !showDivider || !visible;
   if (!box) { drawMagneticLayer(null); return; }
+  const cut = clamp(box.x + box.w * state.split, 0, box.width);
+  const artStyle = underlay.style;
+  artStyle.left = box.x + 'px'; artStyle.top = box.y + 'px';
+  artStyle.width = box.w + 'px'; artStyle.height = box.h + 'px';
+  if (showDivider && visible) {
+    const top = Math.max(0, box.y);
+    divider.style.left = clamp(cut, 15, box.width - 15) + 'px';
+    divider.style.top = top + 'px';
+    divider.style.height = Math.min(box.height, box.y + box.h) - top + 'px';
+    divider.setAttribute('aria-valuenow', String(Math.round(state.split * 100)));
+    const badgeInset = Math.max(9, box.width / 2 - 80);
+    badges.style.left = clamp(box.x, 9, badgeInset) + 'px';
+    badges.style.right = clamp(box.width - box.x - box.w, 9, badgeInset) + 'px';
+    badges.style.top = Math.max(7, box.y - 27) + 'px';
+  }
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   if (canvas.width !== Math.round(box.width * dpr)) canvas.width = Math.round(box.width * dpr);
   if (canvas.height !== Math.round(box.height * dpr)) canvas.height = Math.round(box.height * dpr);
@@ -523,8 +540,14 @@ function draw() {
   ctx.clearRect(0, 0, box.width, box.height);
   ctx.imageSmoothingEnabled = box.scale < 1.75;
   const original = visibleImage('original');
+  const b = state.images.get('b');
+  const showsResult = !state.peek && b && (state.view === 'result' || showDivider)
+    && Math.max(box.x, showDivider ? cut : 0) < Math.min(box.x + box.w, box.width)
+    && Math.max(box.y, 0) < Math.min(box.y + box.h, box.height);
+  const firstResultFrame = showsResult && state.displayedResult !== b.revision;
+  if (firstResultFrame) state.displayedResult = b.revision;
   if (showDivider) {
-    const a = visibleImage('a'), cut = box.width * state.split;
+    const a = visibleImage('a');
     paintImage(a || original, box);
     ctx.save();
     ctx.beginPath(); ctx.rect(cut, 0, box.width - cut, box.height); ctx.clip();
@@ -568,6 +591,7 @@ function draw() {
   if (byId('zoom-level').textContent !== zoom) byId('zoom-level').textContent = zoom;
   if (!isLasso()) updateBrushReadout(box);
   drawMagneticLayer(box);
+  if (firstResultFrame && resultIsCurrent()) updateControls();
 }
 function zoomTo(scale, x, y) {
   const box = layout();
@@ -764,7 +788,7 @@ function applyMetadata(doc) {
   refresh();
 }
 function startDocument(doc) {
-  state.dirty = false;
+  state.dirty = state.saveFailed = false;
   state.conflict = null;
   installDraft(doc);
   applyMetadata(doc);
@@ -798,9 +822,10 @@ function beginDocumentChange() {
   state.opening = true;
   state.doc = state.file = state.draft = null;
   state.conflict = null;
-  state.dirty = false;
+  state.dirty = state.saveFailed = false;
   state.images.clear();
   state.loading.clear();
+  state.displayedResult = null;
   state.polygon = [];
   state.sam = null;
   leaveMagnetic();
@@ -814,6 +839,9 @@ function beginDocumentChange() {
   byId('allow-protected').checked = false;
   byId('notice').hidden = true;
   byId('empty').hidden = false;
+  byId('image-name').textContent = '';
+  byId('image-name').title = '';
+  byId('image-size').textContent = '';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   refresh();
   return state.epoch;
@@ -824,13 +852,14 @@ async function openFile(file) {
   if (file.size > 64 * 1024 * 1024) { showError(new Error('请选择不超过 64 MiB 的图片。')); return; }
   if (!(await flushChanges()) || state.opening) return;
   const epoch = beginDocumentChange();
-  status('正在打开图片…');
+  status('正在打开图片…', 'pending');
   // Decode and transfer in parallel, so the view can appear before any model analysis.
   decodeImage(file).then(image => {
     if (epoch !== state.epoch || state.images.get('original')?.revision === 'normalized') return;
     if (!state.doc) state.file = { name: file.name, width: image.naturalWidth, height: image.naturalHeight };
     state.images.set('original', { image, revision: 'local' });
-    byId('image-name').textContent = file.name;
+    byId('image-name').textContent = state.file.name;
+    byId('image-name').title = state.file.name;
     byId('image-size').textContent = state.file.width + ' × ' + state.file.height;
     byId('empty').hidden = true;
     refresh();
@@ -846,19 +875,19 @@ async function openFile(file) {
       loadRecent();
     }
   } catch (error) {
-    if (epoch === state.epoch) { state.opening = false; showError(error); status('无法分析这张图片'); refresh(); }
+    if (epoch === state.epoch) { state.opening = false; showError(error); status('无法打开图片，请重新选择。', 'error'); refresh(); }
   }
 }
 async function openRecent(id) {
   if (state.opening || !(await flushChanges()) || state.opening) return;
   byId('recent-panel').open = false;
   const epoch = beginDocumentChange();
-  status('正在载入已保存的图片…');
+  status('正在载入已保存的图片…', 'pending');
   try {
     const doc = await (await request('/api/documents/' + encodeURIComponent(id))).json();
     if (epoch === state.epoch) { state.opening = false; startDocument(doc); }
   } catch (error) {
-    if (epoch === state.epoch) { state.opening = false; showError(error); refresh(); }
+    if (epoch === state.epoch) { state.opening = false; showError(error); status('无法恢复草稿，请从「近期」重试。', 'error'); refresh(); }
   }
 }
 async function loadRecent() {
@@ -914,6 +943,7 @@ function scheduleSave() {
 }
 function edited(delay = 180) {
   state.dirty = true;
+  state.saveFailed = false;
   state.historyLocation = null;
   state.saveDelay = delay;
   byId('notice').hidden = true;
@@ -926,7 +956,7 @@ async function saveDraft() {
   if (!state.doc || !state.dirty || state.conflict) return !state.conflict;
   const epoch = state.epoch, endpoint = route('/edit');
   const payload = { revision: state.doc.revision, ...clone(state.draft) };
-  state.dirty = false;
+  state.dirty = state.saveFailed = false;
   state.save = (async () => {
     try {
       const doc = await post(endpoint, payload);
@@ -942,10 +972,12 @@ async function saveDraft() {
         try { state.conflict = await (await request(route())).json(); }
         catch (readError) { showError(readError); }
         if (discarded) showError(new Error('这笔待确认结果已更新，快捷修正未提交。'));
-      } else showError(error);
+      } else { state.saveFailed = true; showError(error); }
       return false;
     }
   })();
+  updateStatus(false);
+  byId('retry').hidden = true;
   const result = await state.save;
   if (epoch === state.epoch) {
     state.save = null;
@@ -1599,6 +1631,7 @@ function startGesture(event) {
     }
     if (state.tool === 'lasso') {
       const first = state.polygon[0], last = state.polygon.at(-1);
+      stage.focus({ preventScroll: true });
       if (state.polygon.length >= 3 && Math.hypot(point[0] - first[0], point[1] - first[1]) * layout().scale <= 9) closeLasso();
       else if ((!last || point[0] !== last[0] || point[1] !== last[1]) && state.polygon.length < 5000) state.polygon.push(point);
       event.preventDefault();
@@ -1665,7 +1698,7 @@ async function download(view = 'b') {
       throw new Error('方案 B 已更新，请重新导出。');
     }
     downloadBlob(blob, name + (view === 'a' ? '-gaid-A.png' : '-gaid.png'));
-    status('PNG 已发送到浏览器下载。');
+    status('PNG 已发送到浏览器下载。', 'ready');
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
 async function pin() {
@@ -1680,11 +1713,12 @@ async function pin() {
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
 async function exportCorrection() {
-  if (!resultIsCurrent()) return;
+  if (!renderIsCurrent()) return;
   const epoch = state.epoch;
   try {
     const info = await post(route('/corrections/export'), { revision: state.doc.revision });
     if (epoch !== state.epoch) return;
+    byId('notice').dataset.tone = 'ready';
     byId('notice-text').textContent = '命令行校正已保存到 ' + info.path;
     byId('notice').hidden = false;
   } catch (error) { if (epoch === state.epoch) showError(error); }
@@ -1754,7 +1788,9 @@ byId('conflict-remote').addEventListener('click', () => {
   if (!state.conflict) return;
   installDraft(state.conflict);
   applyMetadata(state.conflict);
-  state.conflict = null; state.dirty = false;
+  state.conflict = null;
+  state.dirty = state.saveFailed = false;
+  byId('notice').hidden = true;
   persistPending(); refresh();
 });
 for (const button of viewButtons) button.addEventListener('click', () => selectView(button.dataset.view));
@@ -1774,7 +1810,6 @@ byId('show-unknown').addEventListener('click', () => {
 byId('include-unknown-stroke').addEventListener('click', () => resolveUnknownStroke());
 byId('assign-unknown-stroke').addEventListener('click', () => resolveUnknownStroke(byId('unknown-stroke-module').value));
 for (const button of modeButtons) button.addEventListener('click', () => selectMode(button.dataset.mode));
-for (const button of modeLinks) button.addEventListener('click', () => selectMode(button.dataset.goMode));
 for (const button of scopeButtons) button.addEventListener('click', () => chooseScope(button.dataset.scope));
 for (const button of toolButtons) button.addEventListener('click', () => {
   selectTool(button.dataset.tool);
@@ -1848,11 +1883,17 @@ canvas.addEventListener('dblclick', () => { if (state.tool === 'lasso') closeLas
 const divider = byId('divider');
 let dividerPointer = null;
 function moveDivider(event) {
-  const rect = stage.getBoundingClientRect();
-  state.split = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  const box = layout();
+  if (!box) return;
+  state.split = clamp((position(event).x - box.x) / box.w, 0, 1);
   draw();
 }
-divider.addEventListener('pointerdown', event => { dividerPointer = event.pointerId; divider.setPointerCapture(event.pointerId); moveDivider(event); });
+divider.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || dividerPointer !== null) return;
+  dividerPointer = event.pointerId;
+  divider.setPointerCapture(event.pointerId);
+  moveDivider(event);
+});
 divider.addEventListener('pointermove', event => { if (event.pointerId === dividerPointer) moveDivider(event); });
 for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) divider.addEventListener(type, () => { dividerPointer = null; });
 divider.addEventListener('keydown', event => {
@@ -1861,8 +1902,14 @@ divider.addEventListener('keydown', event => {
   state.split = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : clamp(state.split + (event.key === 'ArrowLeft' ? -.025 : .025), 0, 1);
   draw();
 });
-stage.addEventListener('dragover', event => { event.preventDefault(); stage.classList.add('dragging'); });
-stage.addEventListener('dragleave', () => stage.classList.remove('dragging'));
+stage.addEventListener('dragover', event => {
+  if (!event.dataTransfer.types.includes('Files')) return;
+  event.preventDefault();
+  stage.classList.add('dragging');
+});
+stage.addEventListener('dragleave', event => {
+  if (!stage.contains(event.relatedTarget)) stage.classList.remove('dragging');
+});
 stage.addEventListener('drop', event => { event.preventDefault(); stage.classList.remove('dragging'); openFile(event.dataTransfer.files[0]); });
 window.addEventListener('paste', event => {
   const file = event.clipboardData?.files[0];
@@ -1921,5 +1968,8 @@ request('/api/options').then(reply => reply.json()).then(options => {
   loadRecent();
   const previous = storage('getItem', 'gaid-active-document');
   if (previous) openRecent(previous);
-}).catch(showError);
+}).catch(error => {
+  status('无法连接本机服务，请确认工作台已启动后刷新页面。', 'error');
+  showError(error);
+});
 

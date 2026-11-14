@@ -3,8 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>GAID 单图精修</title>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      let theme;
+      try { theme = localStorage.getItem('gaid-theme'); }
+      catch { /* Follow the system when browser storage is unavailable. */ }
+      if (theme === 'light' || theme === 'dark') root.dataset.themePreference = theme;
+      root.dataset.theme = root.dataset.themePreference || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    })();
+  </script>
   <link rel="stylesheet" href="/style.css">
   <script defer src="/app.js"></script>
 </head>
@@ -22,43 +32,61 @@
     <symbol id="icon-lasso" viewBox="0 0 24 24"><path d="M9 17C3 16 2 11 5 7s12-5 15 0-1 9-8 10c-4 0-6-2-5-4s4-1 4 1c0 4-3 6-6 6"/></symbol>
     <symbol id="icon-magnetic" viewBox="0 0 24 24"><path d="M5 4v9a7 7 0 0014 0V4h-4v9a3 3 0 01-6 0V4zM5 8h4m6 0h4"/></symbol>
     <symbol id="icon-object-point" viewBox="0 0 24 24"><path d="M3 8V3h5m8 0h5v5m0 8v5h-5m-8 0H3v-5m6-4h6m-3-3v6"/></symbol>
+    <symbol id="icon-image" viewBox="0 0 60 48"><path d="M10 1H1v9m49-9h9v9M1 38v9h9m49-9v9h-9M17 13h26v22H17zM17 30l8-8 7 7 4-4 7 7"/><circle cx="35" cy="19" r="1.5"/></symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+    <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.8 14.3A8.9 8.9 0 0 1 9.7 3.2a9 9 0 1 0 11.1 11.1Z"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></symbol>
+    <symbol id="icon-split" viewBox="0 0 24 24"><path d="m9 8-4 4 4 4m6-8 4 4-4 4"/></symbol>
+    <symbol id="icon-compare" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 3v18M6 15l3-3m6 1 3-3"/></symbol>
+    <symbol id="icon-range" viewBox="0 0 24 24"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3m0 8v3a1 1 0 0 1-1 1h-3m-8 0H5a1 1 0 0 1-1-1v-3M8 14l3-4 3 2 2-3"/></symbol>
+    <symbol id="icon-effect" viewBox="0 0 24 24"><path d="M5 4v6m0 4v6M12 4v10m0 4v2M19 4v2m0 4v10M3 10h4v4H3zm7 4h4v4h-4zm7-8h4v4h-4z"/></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15 3 6 6-4 2-2 5-2 2-7-7 2-2 5-2 2-4ZM10 14l-6 6"/></symbol>
   </svg>
   <header class="topbar">
-    <div class="identity" aria-label="GAID 单图精修">
-      <svg class="mark" width="31" height="31" viewBox="0 0 36 36" aria-hidden="true"><path fill="currentColor" d="M0 0h36v36H0z"/><path d="M14 8H8v6m14-6h6v6M8 22v6h6m14-6v6h-6M15 24l4-12 4 12m-7-3h6" fill="none" stroke="#222423" stroke-width="1.7" stroke-linejoin="round"/></svg>
-      <div><strong>GAID</strong><span>单图精修</span></div>
-    </div>
-    <div class="document-actions">
-      <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/tiff" hidden>
-      <button id="open" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
-      <details id="recent-panel" class="popover">
-        <summary class="button">近期</summary>
-        <div id="recent" class="recent-list"><p>还没有近期图片</p></div>
-      </details>
-      <div class="history" role="group" aria-label="编辑历史">
-        <button id="undo" type="button" aria-label="撤销选区操作" title="撤销选区操作 Ctrl+Z" disabled><svg aria-hidden="true"><use href="#icon-undo"/></svg></button>
-        <button id="redo" type="button" aria-label="重做选区操作" title="重做选区操作 Ctrl+Shift+Z" disabled><svg aria-hidden="true"><use href="#icon-redo"/></svg></button>
+    <div class="top-start">
+      <div class="identity" role="img" aria-label="GAID 单图精修">
+        <svg class="mark" width="31" height="31" viewBox="0 0 36 36" aria-hidden="true"><path d="M14 8H8v6m14-6h6v6M8 22v6h6m14-6v6h-6M15 24l4-12 4 12m-7-3h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+        <div><strong>GAID</strong><span>单图精修</span></div>
+      </div>
+      <div class="document-actions">
+        <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/tiff" hidden>
+        <button id="open" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
+        <details id="recent-panel" class="popover">
+          <summary class="button">近期</summary>
+          <div id="recent" class="recent-list"><p>还没有近期图片</p></div>
+        </details>
+        <div class="history" role="group" aria-label="编辑历史">
+          <button id="undo" type="button" aria-label="撤销选区操作" title="撤销选区操作 Ctrl+Z" disabled><svg aria-hidden="true"><use href="#icon-undo"/></svg></button>
+          <button id="redo" type="button" aria-label="重做选区操作" title="重做选区操作 Ctrl+Shift+Z" disabled><svg aria-hidden="true"><use href="#icon-redo"/></svg></button>
+        </div>
       </div>
     </div>
-    <div class="top-export">
-      <button id="download" class="button primary" type="button" disabled>导出 PNG</button>
-      <details id="export-panel" class="popover export-panel">
-        <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
-        <div class="export-list">
-          <button id="download-a" type="button" disabled>导出固定方案 A</button>
-          <button id="correction-export" type="button" disabled>导出命令行校正</button>
-          <button id="correction-import" type="button" disabled>导入命令行校正</button>
-        </div>
-      </details>
-      <input id="correction-files" type="file" accept=".json,.png" multiple hidden>
+    <div id="file-meta" class="file-meta" hidden><span id="image-name"></span><span id="image-size"></span></div>
+    <div class="top-end">
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="深色外观" aria-pressed="false" title="切换外观">
+        <svg class="sun-icon" aria-hidden="true"><use href="#icon-sun"/></svg>
+        <svg class="moon-icon" aria-hidden="true"><use href="#icon-moon"/></svg>
+      </button>
+      <div class="top-export">
+        <button id="download" class="button primary" type="button" disabled><svg aria-hidden="true"><use href="#icon-download"/></svg><span id="download-label">导出 PNG</span></button>
+        <details id="export-panel" class="popover export-panel">
+          <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
+          <div class="export-list">
+            <button id="download-a" type="button" disabled>导出固定方案 A</button>
+            <button id="correction-export" type="button" disabled>导出命令行校正</button>
+            <button id="correction-import" type="button" disabled>导入命令行校正</button>
+          </div>
+        </details>
+        <input id="correction-files" type="file" accept=".json,.png" multiple hidden>
+      </div>
     </div>
   </header>
-  <nav id="workspace-modes" class="workspace-modes" aria-label="工作模式，可随时切换">
-    <button type="button" data-mode="review" aria-pressed="true"><strong>看成品</strong><span>对比原图与结果，确认后导出</span></button>
-    <button type="button" data-mode="range" aria-pressed="false" disabled><strong>改哪里</strong><span>选区域、修局部、核对改动</span></button>
-    <button type="button" data-mode="effect" aria-pressed="false" disabled><strong>调效果</strong><span>保留范围，调整算法与强弱</span></button>
-  </nav>
   <main class="workspace">
+    <nav id="workspace-modes" class="workspace-modes" aria-label="工作模式，可随时切换">
+      <button type="button" data-mode="review" aria-pressed="true" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>看成品</button>
+      <button type="button" data-mode="range" aria-pressed="false" disabled><svg aria-hidden="true"><use href="#icon-range"/></svg>改哪里</button>
+      <button type="button" data-mode="effect" aria-pressed="false" disabled><svg aria-hidden="true"><use href="#icon-effect"/></svg>调效果</button>
+    </nav>
     <nav id="tools" class="tools" aria-label="画布工具">
       <button data-tool="pan" type="button" aria-pressed="true" title="移动（按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
       <div class="tool-group" role="group" aria-labelledby="tools-range-label">
@@ -80,7 +108,7 @@
       </div>
     </nav>
     <section class="viewer" aria-label="图像画布">
-      <div class="viewbar">
+      <div class="viewbar" id="viewbar" hidden>
         <div id="views" class="view-tabs" role="group" aria-label="画布视图">
           <button data-view="compare" type="button" aria-pressed="true" disabled>对比</button>
           <button data-view="original" type="button" aria-pressed="false" disabled>原图</button>
@@ -91,35 +119,25 @@
           <button data-view="suspected_objects" type="button" aria-pressed="false" disabled hidden>疑似外物</button>
           <button id="show-unknown" class="button unknown-toggle" type="button" aria-pressed="true" hidden><i class="hatch-key" aria-hidden="true"></i>显示待确认</button>
         </div>
-        <div class="zoom-tools" role="group" aria-label="缩放">
-          <button id="peek" type="button" title="按住 X 查看原图" disabled><span>按住看原图</span> <kbd>X</kbd></button>
-          <button id="zoom-out" type="button" aria-label="缩小" disabled>−</button>
-          <output id="zoom-level" aria-label="缩放比例">—</output>
-          <button id="zoom-in" type="button" aria-label="放大" disabled>+</button>
-          <button id="fit" type="button" disabled>适合</button>
-          <button id="actual" type="button" title="按原像素显示" disabled>1:1</button>
-        </div>
-      </div>
-      <div id="mode-context" class="mode-context" role="region" aria-label="当前可做的操作">
-        <div class="context-purpose">
-          <strong id="context-action">打开一张图片</strong>
-          <span id="context-impact">原图先显示，成品在后台生成。</span>
-        </div>
-        <span id="context-update" role="status">尚未打开图片</span>
+        <button id="peek" type="button" title="按住 X 查看原图" disabled><span>按住看原图</span> <kbd>X</kbd></button>
       </div>
       <div id="stage" class="stage" tabindex="0" data-tool="pan" aria-label="图像画布">
+        <div id="art-underlay" class="art-underlay" aria-hidden="true" hidden></div>
         <canvas id="canvas" aria-label="图像和选区"></canvas>
         <canvas id="magnetic-canvas" aria-hidden="true" hidden></canvas>
         <div id="empty" class="empty-state">
-          <div class="opening-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
-          <h1>打开一张图片</h1>
-          <p>拖入、粘贴，或从本机选择。原图会先显示，降噪在后台进行。</p>
-          <button id="empty-open" class="button primary" type="button" disabled>选择图片</button>
+          <div class="drop-zone">
+            <div class="opening-icon" aria-hidden="true"><svg class="opening-glyph" viewBox="0 0 60 48"><use href="#icon-image"/></svg></div>
+            <h1 id="empty-title">拖入图片开始精修</h1>
+            <p id="empty-help">也可以按 <kbd>Ctrl</kbd> <kbd>V</kbd> 粘贴剪贴板中的图片</p>
+            <button id="empty-open" class="button primary" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>选择图片</button>
+            <small>PNG、JPEG、WebP、BMP、TIFF</small>
+          </div>
         </div>
         <div id="compare-badges" class="compare-badges" hidden>
           <span id="left-badge">原图</span><span id="right-badge">方案 B</span>
         </div>
-        <button id="divider" class="divider" type="button" role="slider" aria-label="对比分割位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span>‹ ›</span></button>
+        <button id="divider" class="divider" type="button" role="slider" aria-label="对比分割位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span><svg aria-hidden="true"><use href="#icon-split"/></svg></span></button>
         <div id="overlay-legend" class="overlay-legend" hidden>
           <span id="objects-legend"><i class="dot object"></i>已识别外物</span>
           <span id="unknown-legend" hidden><i class="hatch-key" aria-hidden="true"></i>待确认 · 默认保留</span>
@@ -135,33 +153,36 @@
           <button id="notice-close" type="button" aria-label="关闭提示">×</button>
         </div>
       </div>
-      <div class="statusbar" role="status" aria-live="polite">
-        <span id="image-name">尚未打开图片</span><span id="image-size"></span>
-        <span id="status">正在连接本机服务…</span>
-        <button id="retry" type="button" hidden>重试</button>
-        <button id="conflict-local" type="button" hidden>保留本页修改</button>
-        <button id="conflict-remote" type="button" hidden>载入已保存版本</button>
+      <div id="viewer-footer" class="viewer-footer" hidden>
+        <span id="viewer-hint">滚轮缩放，空格拖动画布</span>
+        <div class="zoom-tools" id="zoom-tools" role="group" aria-label="缩放" hidden>
+          <button id="zoom-out" type="button" aria-label="缩小" disabled>−</button>
+          <output id="zoom-level" aria-label="缩放比例">—</output>
+          <button id="zoom-in" type="button" aria-label="放大" disabled>+</button>
+          <button id="fit" type="button" disabled>适合</button>
+          <button id="actual" type="button" title="按原像素显示" disabled>1:1</button>
+        </div>
       </div>
     </section>
-    <aside class="inspector" aria-label="工作区">
+    <aside id="inspector" class="inspector" aria-label="当前模式的设置" hidden>
       <div class="inspector-scroll">
         <section id="review-inspector" aria-label="检查成品">
-          <div class="panel mode-intro review-intro">
-            <h2>对比与导出</h2>
-            <p>拖动分割线比较同一处细节，点「成品」看整张结果，满意后点右上角导出 PNG。这里的查看操作不会修改图片。</p>
-          </div>
-          <div class="panel review-next">
-            <button type="button" data-go-mode="range" class="review-action" disabled>
-              <strong>改哪里</strong><small>补上漏选，或让某一处保留原图</small>
-            </button>
-            <button type="button" data-go-mode="effect" class="review-action" disabled>
-              <strong>调效果</strong><small>保留处理范围，调强弱或换算法</small>
-            </button>
-          </div>
           <div class="panel comparison-panel">
-            <h2>留一份结果对照</h2>
-            <p>固定当前成品后，左边保留这一版，右边显示之后的调整。</p>
-            <button id="pin" class="button" type="button" disabled>固定当前成品为对照 A</button>
+            <div class="section-heading"><svg aria-hidden="true"><use href="#icon-compare"/></svg><h2>对照方案</h2></div>
+            <div class="comparison-versions">
+              <div><span class="version-letter" aria-hidden="true">A</span><span id="comparison-a">原图</span></div>
+              <div><span class="version-letter" aria-hidden="true">B</span><span id="comparison-b">等待第一份成品</span></div>
+            </div>
+            <button id="pin" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-pin"/></svg>固定当前成品为对照 A</button>
+            <p>固定后，左侧保留这一版，右侧显示后续调整。</p>
+          </div>
+          <div class="panel view-help">
+            <h2>检查细节</h2>
+            <dl>
+              <div><dt>比较同一处</dt><dd>拖动分割线</dd></div>
+              <div><dt>暂看原图</dt><dd>按住 <kbd>X</kbd></dd></div>
+              <div><dt>移动画布</dt><dd><kbd>空格</kbd> + 拖动</dd></div>
+            </dl>
           </div>
         </section>
         <section id="range-inspector" aria-label="修改范围" hidden>
@@ -268,18 +289,14 @@
         </section>
         </section>
         <section id="effect-inspector" aria-label="调整效果" hidden>
-          <div class="panel mode-intro">
-            <h2>调整已选区域的效果</h2>
-            <p>更换算法、调整强度，画过的范围和局部保护仍然有效。对比图会随设置更新。</p>
-          </div>
           <div class="panel">
-            <div class="section-heading"><h2>当前算法与强度</h2><span id="method-summary">纯 L0</span></div>
+            <div class="section-heading"><h2>降噪效果</h2></div>
             <label class="method-field" for="method">降噪算法<select id="method" disabled></select></label>
             <div class="range-row">
               <label for="strength">整体强度</label><output id="strength-value" for="strength">100%</output>
               <input id="strength" type="range" min="0" max="1" step="0.01" disabled>
             </div>
-            <p class="panel-hint">在处理范围内混入多少降噪结果，0% 保留原图。</p>
+                <p class="panel-hint">强度应用于已选区域。0% 保留原图。</p>
             <div class="presets" role="group" aria-label="快捷参数操作">
               <button data-preset="soft" type="button" aria-pressed="false" title="只改整体强度为 65%" disabled>强度 65%</button>
               <button data-preset="strong" type="button" aria-pressed="false" title="只改 L0 参数为 0.001" disabled>L0 0.001</button>
@@ -311,6 +328,14 @@
       </div>
     </aside>
   </main>
+  <footer class="statusbar">
+    <div class="status-group">
+      <span id="status" role="status" data-tone="pending">正在连接本机服务…</span>
+      <button id="retry" type="button" hidden>重试</button>
+      <button id="conflict-local" type="button" hidden>保留本页修改</button>
+      <button id="conflict-remote" type="button" hidden>载入已保存版本</button>
+    </div>
+  </footer>
 </body>
 </html>
 

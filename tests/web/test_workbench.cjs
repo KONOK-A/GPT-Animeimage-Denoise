@@ -58,14 +58,14 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-function harness() {
+function harness({ theme, prefersDark = false } = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const nodes = {};
   for (const [key, values] of [
     ['view', [...html.matchAll(/<button data-view="([^"]+)"/g)].map(([, view]) => view)],
     ['tool', [...html.matchAll(/<button data-tool="([^"]+)"/g)].map(([, tool]) => tool)],
     ['preset', ['standard', 'soft', 'strong']], ['mode', ['review', 'range', 'effect']],
-    ['go-mode', ['range', 'effect']], ['scope', ['auto', 'empty', 'all']],
+    ['scope', ['auto', 'empty', 'all']],
   ]) {
     nodes[key] = values.map(value => {
       const button = new Element('button'); button.dataset[key] = value; return button;
@@ -91,10 +91,14 @@ function harness() {
     ready: () => { doc = { ...doc, status: 'ready', b: { revision: doc.revision, method: doc.settings.method } }; },
   };
   const body = new Element('body'), win = new Element();
+  const root = new Element('html'), scheme = new Element();
+  root.dataset.themePreference = theme;
+  scheme.matches = prefersDark;
   const storage = new Map();
+  const preferences = new Map();
   const sandbox = vm.createContext({
     document: {
-      getElementById: id => elements.get(id), createElement: tag => new Element(tag), body,
+      getElementById: id => elements.get(id), createElement: tag => new Element(tag), body, documentElement: root,
       querySelectorAll(selector) {
         const match = /^(button)?\[data-(.+)\]$/.exec(selector);
         if (match) return match[2] === 'tool' && !match[1]
@@ -107,6 +111,8 @@ function harness() {
     },
     window: {
       devicePixelRatio: 1, addEventListener: (...args) => win.addEventListener(...args),
+      matchMedia: () => scheme,
+      localStorage: { setItem: (key, value) => preferences.set(key, value) },
       sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     }, file,
     Image: class {
@@ -146,6 +152,7 @@ function harness() {
       }
       if (route.endsWith('/edit')) {
         if (api.beforeEdit) await api.beforeEdit;
+        if (api.editError) return response({ error: api.editError }, 500);
         const { revision, ...draft } = JSON.parse(args.body);
         if (revision !== doc.revision) return response({ error: 'Conflict' }, 409);
         doc = { ...doc, ...draft, revision: revision + 1, status: 'queued' };
@@ -170,8 +177,26 @@ function harness() {
   });
   const run = code => vm.runInContext(code, sandbox);
   run(script);
-  return { elements, nodes, run, api, window: win, storage };
+  return { elements, nodes, run, api, window: win, storage, root, scheme, preferences };
 }
+
+test('appearance follows system changes until a manual theme is chosen', () => {
+  const h = harness({ prefersDark: true });
+  const toggle = h.elements.get('theme-toggle');
+  assert.equal(h.root.dataset.theme, 'dark');
+  assert.equal(toggle['aria-pressed'], 'true');
+  h.scheme.matches = false;
+  h.scheme.fire('change');
+  assert.equal(h.root.dataset.theme, 'light');
+  toggle.click();
+  assert.equal(h.root.dataset.theme, 'dark');
+  assert.equal(h.preferences.get('gaid-theme'), 'dark');
+  h.scheme.fire('change');
+  assert.equal(h.root.dataset.theme, 'dark');
+  const reopened = harness({ theme: 'light', prefersDark: true });
+  assert.equal(reopened.root.dataset.theme, 'light');
+  assert.equal(reopened.elements.get('theme-toggle')['aria-pressed'], 'false');
+});
 
 test('canvas click bubbling does not reset an in-progress polygon', async () => {
   const h = harness();
@@ -291,7 +316,7 @@ test('brush mode has explicit controls and only fetches the visible mask after e
   assert.equal(h.run('state.mode'), 'review');
   assert.equal(h.run('state.tool'), 'pan');
   h.run("selectMode('range'); selectTool('exclude')");
-  assert.match(h.elements.get('context-impact').textContent, /保留原像素/);
+  assert.match(h.elements.get('tool-description').textContent, /保留原像素/);
   stroke(h, [[200,120]]);
   await h.run('saveDraft()');
   h.api.ready();
@@ -299,7 +324,7 @@ test('brush mode has explicit controls and only fetches the visible mask after e
   await tick();
   assert.ok(h.api.requests.some(item => item.route.endsWith('/image?view=weight&revision=1')));
   assert.equal(h.api.requests.some(item => item.route.endsWith('/image?view=b&revision=1')), false);
-  assert.match(h.elements.get('context-update').textContent, /范围已更新/);
+  assert.match(h.elements.get('status').textContent, /范围已更新/);
   h.run("selectMode('review')");
   await tick();
   assert.equal(h.run('state.tool'), 'pan');
@@ -334,7 +359,7 @@ test('suspected objects are an optional diagnostic view that leaves brush edits 
   assert.ok(h.api.requests.some(item => item.route.endsWith('/image?view=suspected_objects&revision=0')));
   assert.equal(h.elements.get('suspected-objects-legend').hidden, false);
   assert.equal(h.elements.get('overlay-legend').hidden, true);
-  assert.match(h.elements.get('context-update').textContent, /疑似外物已显示/);
+  assert.match(h.elements.get('status').textContent, /疑似外物已显示/);
   stroke(h, [[200, 120]]);
   assert.equal(h.run('state.draft.cursor'), 1);
   assert.equal(h.run('state.view'), 'suspected_objects');
@@ -509,6 +534,7 @@ test('lasso closes explicitly, keeps source coordinates, and remains undoable du
     canvas.fire('pointerdown', { button: 0, clientX: 100 + rect.x + x * rect.scale,
       clientY: 50 + rect.y + y * rect.scale, preventDefault() {} });
   }
+  assert.equal(h.elements.get('stage').focused, true);
   assert.equal(h.run('state.draft.cursor'), 0);
   h.window.fire('keydown', { key: 'Enter', preventDefault() {} });
   assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.draft.edits)')), [{
@@ -985,6 +1011,7 @@ test('new B cannot be exported or pinned until its decoded frame replaces the ol
   assert.equal(h.run("state.images.get('b').revision"), 0);
   assert.equal(h.elements.get('download').disabled, true);
   assert.equal(h.elements.get('pin').disabled, true);
+  assert.equal(h.elements.get('status').dataset.tone, 'pending');
   assert.match(h.elements.get('right-badge').textContent, /待更新/);
   await h.run('download()');
   await h.run('pin()');
@@ -995,10 +1022,94 @@ test('new B cannot be exported or pinned until its decoded frame replaces the ol
   assert.equal(h.run("state.images.get('b').revision"), 1);
   assert.equal(h.elements.get('download').disabled, false);
   assert.equal(h.elements.get('pin').disabled, false);
+  assert.equal(h.elements.get('status').dataset.tone, 'ready');
   await h.run('download()');
   await h.run('pin()');
   assert.equal(h.api.requests.some(item => item.route.endsWith('/download?view=b&revision=1')), true);
   assert.equal(h.api.requests.some(item => item.route.endsWith('/pin')), true);
+});
+
+test('command-line correction export can run once the server revision is ready even in a mask view', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.run("state.images.has('b')"), false);
+  assert.equal(h.elements.get('correction-export').disabled, false);
+  await h.run('exportCorrection()');
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/corrections/export')), true);
+});
+
+test('a result loaded while viewing the original must be shown before it can be pinned or exported', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectView('original')");
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.run("state.images.get('b').revision"), 0);
+  assert.equal(h.elements.get('pin').disabled, true);
+  assert.equal(h.elements.get('download').disabled, true);
+  h.run("selectView('result')");
+  assert.equal(h.elements.get('pin').disabled, false);
+  assert.equal(h.elements.get('download').disabled, false);
+  h.run("selectView('original')");
+  assert.equal(h.elements.get('download').disabled, false);
+});
+
+test('comparison dragging and clipping map to the visible image at fit and after panning', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  h.run('zoomTo(.5); state.panX = -70; state.panY = 35; draw()');
+  const box = h.run('layout()');
+  const slider = h.elements.get('divider');
+  const drag = x => slider.fire('pointermove', { pointerId: 1, clientX: 100 + x });
+  slider.fire('pointerdown', { pointerId: 1, button: 0, clientX: 100 + box.x + box.w / 2 });
+  drag(box.x);
+  assert.equal(slider['aria-valuenow'], '0');
+  assert.equal(slider.style.left, box.x + 'px');
+  drag(box.x + box.w / 2);
+  assert.equal(slider['aria-valuenow'], '50');
+  assert.equal(slider.style.top, box.y + 'px');
+  assert.equal(slider.style.height, box.h + 'px');
+  drag(box.x + box.w);
+  assert.equal(slider['aria-valuenow'], '100');
+  assert.equal(slider.style.left, box.x + box.w + 'px');
+});
+
+test('only a failed save exposes retry and the draft survives retry', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("choosePreset('soft')");
+  assert.equal(h.elements.get('retry').hidden, true);
+  h.api.editError = '保存失败';
+  await h.run('saveDraft()');
+  assert.equal(h.elements.get('status').dataset.tone, 'error');
+  assert.equal(h.elements.get('retry').hidden, false);
+  assert.equal(h.run('state.draft.settings.strength'), .65);
+  h.api.editError = null;
+  await h.run('saveDraft()');
+  assert.equal(h.elements.get('retry').hidden, true);
+  assert.equal(h.run('state.doc.settings.strength'), .65);
+
+  h.run("choosePreset('strong')");
+  h.api.editError = '保存失败';
+  await h.run('saveDraft()');
+  h.api.mutate({ revision: 2 });
+  await h.run('pollDocument()');
+  h.elements.get('conflict-remote').click();
+  assert.equal(h.elements.get('retry').hidden, true);
+  assert.equal(h.elements.get('status').dataset.tone, 'pending');
+  assert.equal(h.run('state.draft.settings.l0'), .0005);
 });
 
 test('imported correction markers can be undone and redone without drawing a stroke', async () => {
@@ -1038,7 +1149,7 @@ test('explains brush behavior and only shows feedback for the latest completed s
   assert.equal(h.elements.get('stroke-feedback').hidden, true);
 
   h.run("selectTool('erase')");
-  assert.match(h.elements.get('tool-description').textContent, /不处理/);
+  assert.match(h.elements.get('tool-description').textContent, /移出/);
   stroke(h, [[220, 120]]);
   await h.run('saveDraft()');
   h.api.mutate({ edit_feedback: { tool: 'erase', changed_pixels: 0, reason: 'no_marks' } });
@@ -1177,7 +1288,7 @@ test('manual scope, deliberate override and typed local retention are separate e
   const ratio = h.elements.get('retention-percent');
   ratio.value = '67.5';
   ratio.fire('change');
-  assert.match(h.elements.get('context-impact').textContent, /67\.5% 原图/);
+  assert.match(h.elements.get('tool-description').textContent, /67\.5% 原图/);
   stroke(h, [[190, 125]]);
   h.run("selectTool('exclude')");
   stroke(h, [[210, 130]]);
