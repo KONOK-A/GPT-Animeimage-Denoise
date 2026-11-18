@@ -1,20 +1,27 @@
 """Loopback HTTP transport for the image workbench."""
 from base64 import b64decode
+from contextlib import closing
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+from threading import Lock, Thread
+from time import monotonic, sleep
 import traceback
 from urllib.parse import parse_qs, quote, unquote, urlsplit
+from uuid import uuid4
 
 from ..denoisers import uses_l0
 from ..editor import DEFAULT_MODULES, MODULES
 from .documents import WORKBENCH_METHODS
+from .storage import StorageBusy, _file_lock, _replace_json
 
 
 _WEB = Path(__file__).with_name('web')
 _STATIC = {'/': ('index.html', 'text/html'), '/style.css': ('style.css', 'text/css'),
            '/app.js': ('app.js', 'text/javascript'),
+           '/settings.js': ('settings.js', 'text/javascript'), '/settings.css': ('settings.css', 'text/css'),
            '/magnetic-lasso-worker.js': ('magnetic-lasso-worker.js', 'text/javascript')}
 _PARTS = {'skin': ('皮肤', '#db896c'), 'face': ('面部', '#e1b450'), 'hair': ('头发', '#6587df'),
           'eyes': ('眼睛', '#36a5a0'), 'mouth': ('嘴巴', '#d978a4'), 'outfit': ('服饰', '#8b78c7'),
@@ -22,6 +29,7 @@ _PARTS = {'skin': ('皮肤', '#db896c'), 'face': ('面部', '#e1b450'), 'hair': 
 _DEFAULTS = {'method': 'l0', 'l0': .0005, 'downscale': .6, 'strength': 1,
              'restoration_gain': .25, 'sigma': 12, 'structure_protection': .2}
 _DOCUMENT = re.compile(r'/api/documents/([0-9a-f]{64})(?:/(.*))?')
+_FOLDER_DIALOG = Lock()
 
 
 class _RequestError(ValueError):
@@ -30,10 +38,22 @@ class _RequestError(ValueError):
         self.status = status
 
 
-def _open_session(source, workspace):
-    from .session import WorkbenchSession
+def _choose_folder(initial):
+    if not isinstance(initial, str) or (initial and not Path(initial).is_absolute()):
+        raise ValueError('请选择有效的起始目录。')
+    import tkinter
+    from tkinter.filedialog import askdirectory
 
-    return WorkbenchSession.open(source, workspace)
+    with _FOLDER_DIALOG:
+        root = tkinter.Tk()
+        try:
+            root.withdraw()
+            root.attributes('-topmost', True)
+            selected = askdirectory(parent=root, title='选择工作台目录', mustexist=True,
+                                    initialdir=initial if initial and Path(initial).is_dir() else str(Path.home()))
+            return str(Path(selected).resolve()) if selected else None
+        finally:
+            root.destroy()
 
 
 def _options():
@@ -68,6 +88,9 @@ def _correction_files(value):
 def create_server(workspace, *, port=0):
     """Bind the workbench to IPv4 loopback only."""
     from .documents import Documents, RevisionConflict
+
+    # Keep the frontend paired with the Python code loaded by this process.
+    assets = {route: ((_WEB / name).read_bytes(), mime) for route, (name, mime) in _STATIC.items()}
 
     class Handler(BaseHTTPRequestHandler):
         def log_request(self, code='-', size='-'):
@@ -120,6 +143,19 @@ def create_server(workspace, *, port=0):
 
         def _document(self, path, post):
             documents = self.server.documents
+            if path.path == '/api/settings':
+                return self._json(documents.change_preferences(self._read_json()) if post else documents.preferences.read())
+            if not post and path.path == '/api/cache':
+                return self._json(documents.cache_info())
+            if post and path.path == '/api/cache/clear':
+                if self._read_json():
+                    raise ValueError('清理缓存不能指定路径。')
+                return self._json(documents.clear_cache())
+            if post and path.path == '/api/folder':
+                value = self._read_json()
+                if set(value) - {'initial'}:
+                    raise ValueError('目录选择字段无效。')
+                return self._json({'path': _choose_folder(value.get('initial', ''))})
             if path.path == '/api/documents':
                 if not post:
                     return self._json(documents.recent())
@@ -135,7 +171,12 @@ def create_server(workspace, *, port=0):
             if not post and action is None:
                 return self._json(documents.get(identifier))
             if not post and action == 'thumbnail':
-                return self._send(200, documents.thumbnail(identifier), 'image/png')
+                query = parse_qs(path.query, keep_blank_values=True)
+                view = query.get('view', ['original'])[0]
+                value = query.get('revision', [None])[0]
+                if (value is not None and (not value.isdecimal() or len(value) > 16)) or (view != 'original' and value is None):
+                    raise ValueError('请指定节点缩略图的修订号。')
+                return self._send(200, documents.thumbnail(identifier, view, None if value is None else int(value)), 'image/png')
             if not post and action == 'changes':
                 values = parse_qs(path.query, keep_blank_values=True).get('revision', [])
                 if len(values) != 1 or not values[0].isdecimal() or len(values[0]) > 16:
@@ -151,20 +192,31 @@ def create_server(workspace, *, port=0):
                 if value is not None and (not value.isdecimal() or len(value) > 16):
                     raise ValueError('图像版本无效。')
                 data = documents.asset(identifier, view, download=download,
-                                       revision=int(value) if value is not None else None)
+                                       revision=int(value) if value is not None else None, module=query.get('module', [None])[0])
                 name = Path(documents.get(identifier)['name']).stem + '-gaid.png' if download else None
                 return self._send(200, data, 'image/png', download=name)
             if post and action == 'edit':
                 return self._json(documents.update(identifier, self._read_json()))
             if post and action == 'pin':
                 return self._json(documents.pin(identifier, _revision(self._read_json())))
-            if post and action == 'sam-object':
+            if post and action == 'export':
+                value = self._read_json()
+                if set(value) != {'revision', 'view'}:
+                    raise ValueError('本机导出只接受版本和视图。')
+                return self._json({'path': str(documents.export(identifier, value['view'], _revision(value)))})
+            if post and action in ('sam-object', 'sam-selection'):
                 value = self._read_json()
                 return self._json(documents.preview_object(identifier, _revision(value),
                     value.get('positive'), value.get('negative', [])))
             if post and action == 'sam-object/apply':
                 value = self._read_json()
                 return self._json(documents.apply_object(identifier, _revision(value), value.get('token')))
+            if post and action == 'sam-selection/apply':
+                value = self._read_json()
+                revision = _revision(value)
+                value.pop('revision')
+                token = value.pop('token', None)
+                return self._json(documents.apply_object(identifier, revision, token, selection=value))
             if post and action == 'corrections/export':
                 return self._json({'path': str(documents.corrections(identifier, _revision(self._read_json())))})
             if post and action == 'corrections/import':
@@ -177,17 +229,25 @@ def create_server(workspace, *, port=0):
             try:
                 self._check_access(post=post)
                 path = urlsplit(self.path)
-                if not post and path.path in _STATIC:
-                    name, mime = _STATIC[path.path]
-                    return self._send(200, (_WEB / name).read_bytes(), mime + '; charset=utf-8')
+                if not post and path.path in assets:
+                    data, mime = assets[path.path]
+                    return self._send(200, data, mime + '; charset=utf-8')
                 if not post and path.path == '/api/options':
                     return self._json(_options())
+                if not post and path.path == '/api/instance':
+                    return self._json({'instance': self.server.instance})
+                if post and path.path == '/api/exit':
+                    if self._read_json():
+                        raise ValueError('退出工作台的请求须为空。')
+                    self._json({'closing': True})
+                    Thread(target=self.server.shutdown, name='gaid-exit', daemon=True).start()
+                    return
                 return self._document(path, post)
             except (BrokenPipeError, ConnectionResetError):
                 return
             except _RequestError as error:
                 self._json({'error': str(error)}, error.status)
-            except RevisionConflict as error:
+            except (RevisionConflict, StorageBusy) as error:
                 self._json({'error': str(error)}, 409)
             except (FileNotFoundError, KeyError) as error:
                 self._json({'error': str(error)}, 404)
@@ -210,25 +270,77 @@ def create_server(workspace, *, port=0):
                 self.documents.close()
 
     server = LocalServer(('127.0.0.1', port), Handler)
+    server.instance = uuid4().hex
     try:
-        server.documents = Documents(workspace, _open_session)
+        server.documents = Documents(workspace)
     except Exception:
         server.server_close()
         raise
     return server
 
 
-def launch_workbench(*, port=0, open_browser=True):
+def _open_browser(address):
     import webbrowser
 
-    with create_server(Path('outputs/workbench'), port=port) as server:
-        address = f'http://127.0.0.1:{server.server_address[1]}/'
-        print(f'GAID 工作台：{address}', flush=True)
-        if open_browser:
-            webbrowser.open(address)
+    try:
+        if webbrowser.open(address):
+            return True
+    except (OSError, webbrowser.Error):
+        pass
+    print(f'未能自动打开浏览器，请访问 {address}', flush=True)
+    return False
+
+
+def _running_port(marker):
+    try:
+        record = json.loads(marker.read_text(encoding='utf-8'))
+        if not isinstance(record, dict):
+            return None
+        port, instance = record.get('port'), record.get('instance')
+        if type(port) is not int or not 0 < port <= 65535 or not isinstance(instance, str):
+            return None
+        with closing(HTTPConnection('127.0.0.1', port, timeout=.4)) as connection:
+            connection.request('GET', '/api/instance')
+            response = connection.getresponse()
+            if response.status == 200 and json.loads(response.read(4096)) == {'instance': instance}:
+                return port
+    except (OSError, ValueError, HTTPException):
+        pass  # The process may still be publishing its address.
+    return None
+
+
+def launch_workbench(*, port=0, open_browser=True, workspace=None, browser=None):
+    workspace = Path(workspace or 'outputs/workbench').resolve()
+    marker = workspace / '.gaid-instance.json'
+    browser = browser or _open_browser
+    deadline = monotonic() + 5
+    while True:
         try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-    return 0
+            with _file_lock(workspace / '.gaid-instance.lock', wait=False), create_server(workspace, port=port) as server:
+                _replace_json(marker, {'port': server.server_port, 'instance': server.instance})
+                address = f'http://127.0.0.1:{server.server_port}/'
+                print(f'GAID 工作台：{address}', flush=True)
+                if open_browser:
+                    Thread(target=browser, args=(address,), name='gaid-browser', daemon=True).start()
+                try:
+                    server.serve_forever()
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    marker.unlink(missing_ok=True)
+            return 0
+        except StorageBusy:
+            existing = _running_port(marker)
+            if existing is None:
+                if monotonic() >= deadline:
+                    raise StorageBusy('工作台正在启动或退出，请稍后再打开。') from None
+                sleep(.1)
+                continue
+            address = f'http://127.0.0.1:{existing}/'
+            if port and port != existing:
+                raise StorageBusy(f'该工作区的工作台已在 {address} 运行。') from None
+            print(f'GAID 工作台：{address}', flush=True)
+            if open_browser:
+                browser(address)
+            return 0
 

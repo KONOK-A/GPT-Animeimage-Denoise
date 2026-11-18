@@ -64,7 +64,7 @@ class WorkbenchSession:
     """Use immutable analysis inputs while region choices and denoisers change."""
 
     def __init__(self, source, case_dir, source_sha256, device, editor, icc, baseline, baseline_lam,
-                 *, models, suspected_objects=None):
+                 *, models, suspected_objects=None, baseline_method='l0', baseline_downscale=DOWNSCALE):
         self.source = source
         self.case_dir = case_dir
         self.name = source.name
@@ -77,15 +77,15 @@ class WorkbenchSession:
         self.height, self.width = editor.labels.shape
         baseline.setflags(write=False)
         self._baseline = baseline
-        self._baseline_lam = baseline_lam
+        self._baseline_key = self._candidate_key(baseline_method, baseline_lam, baseline_downscale)
         # Keep the original candidate, two recent alternatives, and one SR input.
         self._candidates = OrderedDict()
         self._sr_input = None
         self._sr_key = None
 
     @classmethod
-    def open(cls, source, workspace, *, device='auto'):
-        """Run or resume one default fusion case per source digest."""
+    def open(cls, source, workspace, *, device='auto', method='l0', lam=None, downscale=DOWNSCALE, on_stage=None):
+        """Run or resume a fusion case using the document's actual denoiser."""
         import torch
 
         from ..fusion_models import FusionModels
@@ -102,7 +102,8 @@ class WorkbenchSession:
 
         models = FusionModels(device=device)
         try:
-            report = process_image(source, output, models, case_id='analysis', profile='fusion')
+            report = process_image(source, output, models, case_id='analysis', profile='fusion',
+                                   denoiser=method, lam=lam, downscale=downscale, on_stage=on_stage)
         finally:
             models.release()
         if _sha(source) != digest:
@@ -119,7 +120,8 @@ class WorkbenchSession:
             suspected.setflags(write=False)
         baseline = _review_candidate(output / '.cache', report, editor.rgb.shape)
         return cls(source, case, digest, report['parameters']['device'], editor, icc, baseline,
-                   report['parameters']['lambda'], models=models, suspected_objects=suspected)
+                   report['parameters']['lambda'], models=models, suspected_objects=suspected,
+                   baseline_method=report['parameters'].get('denoiser', 'l0'), baseline_downscale=downscale)
 
     def predict_object(self, positive, negative):
         """Preview a manually prompted shape in the source pixel grid."""
@@ -138,13 +140,17 @@ class WorkbenchSession:
         finally:
             self._models.release()
         if mask is None:
-            raise ValueError('SAM2 没有找到符合这些点的外物轮廓，请调整目标点或排除点。')
+            raise ValueError('SAM2 没有找到符合这些点的轮廓，请调整加入点或排除点。')
         return mask if alpha is None else mask & (alpha > 0)
+
+    @staticmethod
+    def _candidate_key(method, lam, downscale):
+        return method, lam if uses_l0(method) else None, downscale if method.startswith('esrgan') else None
 
     def candidate(self, method='l0', *, lam=None, downscale=DOWNSCALE):
         """Return the original-grid float32 candidate for the selected method."""
         method, lam = resolve_denoiser(method, lam)
-        if method == 'l0' and lam == self._baseline_lam:
+        if self._candidate_key(method, lam, downscale) == self._baseline_key:
             return self._baseline
 
         sr_key = None

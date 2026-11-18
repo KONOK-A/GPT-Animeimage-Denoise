@@ -1,10 +1,13 @@
 """Persist workbench drafts and publish only the newest completed image revision."""
 from base64 import b64encode
 from collections import OrderedDict
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 from io import BytesIO
 import json
+from math import inf, isfinite
+from numbers import Real
 from pathlib import Path, PureWindowsPath
 import re
 from threading import Condition, Lock, Thread
@@ -18,8 +21,8 @@ from PIL import Image, UnidentifiedImageError
 from ..corrections import MASK_KEYS, load_edits
 from ..denoisers import resolve_denoiser
 from ..editor import DEFAULT_MODULES, MODULES
-from ..filters import _radius, blend, gradient_preserving_candidate, validate_unit_interval
 from ..pipeline import _json, _read_source, _sha
+from .storage import CaseCache, Preferences, StorageBusy, export_png, write_atomic as _write_atomic
 
 
 DEFAULTS = {'method': 'l0', 'l0': .0005, 'downscale': .6, 'strength': 1,
@@ -31,7 +34,7 @@ _RETIRED_METHODS = {'cugan', 'cugan-l0', 'cugan60', 'cugan60_l0'}
 _FORMATS = {'PNG': '.png', 'JPEG': '.jpg', 'WEBP': '.webp', 'BMP': '.bmp', 'TIFF': '.tif'}
 _DOCUMENT_ID = re.compile(r'[0-9a-f]{64}')
 _CORRECTION_TOKEN = re.compile(r'correction-[0-9a-f]{32}')
-_ANALYSIS_VERSION = 4
+_ANALYSIS_VERSION = 5
 _SUSPECTED_ASSET = f'suspected-objects-{_ANALYSIS_VERSION}.png'
 _PALETTE = {'skin': (219, 137, 108), 'face': (225, 180, 80), 'hair': (101, 135, 223),
             'eyes': (54, 165, 160), 'mouth': (217, 120, 164), 'outfit': (139, 120, 199)}
@@ -66,6 +69,8 @@ def _restoration_key(settings):
 
 
 def _restore_candidate(rgb, candidate, settings):
+    from ..filters import gradient_preserving_candidate
+
     sigma = settings['sigma'] * (min(rgb.shape[:2]) / 2048)
     return gradient_preserving_candidate(rgb, candidate, sigma,
                                          restoration_gain=settings['restoration_gain'])
@@ -123,8 +128,20 @@ def _selection_images(session, mask, *, previous=None):
     old_mask, old_images = previous or (None, {})
     images = {}
     same_unknown = old_mask is not None and np.array_equal(old_mask.unknown, mask.unknown)
-    if same_unknown and all(np.array_equal(getattr(old_mask, key), getattr(mask, key))
-                            for key in ('labels', 'objects', 'soft_protection')):
+    same_parts = same_unknown and all(np.array_equal(getattr(old_mask, key), getattr(mask, key))
+                                      for key in ('labels', 'objects'))
+    if same_parts:
+        images['labels.png'] = old_images['labels.png']
+    else:
+        from .masks import part_ids
+
+        labels = part_ids(mask.labels, mask.objects, mask.unknown)
+        if editor.alpha is not None:
+            labels[editor.alpha == 0] = 254
+        images['labels.png'] = _png(labels, None, None)
+    part_marks = mask.soft_protection if mask.legacy_parts_overlay else None
+    old_marks = old_mask.soft_protection if old_mask is not None and old_mask.legacy_parts_overlay else None
+    if same_parts and np.array_equal(old_marks, part_marks):
         images['parts.png'] = old_images['parts.png']
     else:
         labels = mask.labels
@@ -137,10 +154,10 @@ def _selection_images(session, mask, *, previous=None):
                            np.where(mask.unknown | (labels == 0) | (labels == 255),
                                     np.float32(0), np.float32(.42)))
         parts = _overlay(editor.rgb, tint, opacity)
-        protected = mask.soft_protection > 0
-        if protected.any():
+        if part_marks is not None and part_marks.any():
+            protected = part_marks > 0
             parts[protected] = _overlay(parts[protected], np.array([220, 76, 106], np.uint8),
-                                        mask.soft_protection[protected] * .55)
+                                        part_marks[protected] * .55)
         images['parts.png'] = _png(parts, editor.alpha, session.icc)
     if same_unknown:
         unknown = old_images.get('unknown.png')
@@ -156,6 +173,19 @@ def _selection_images(session, mask, *, previous=None):
     return images
 
 
+def _setting_number(value, name, *, positive=False, maximum=inf):
+    """Validate saved settings without importing the image filters."""
+    if not isinstance(value, Real) or isinstance(value, bool):
+        raise ValueError(f'{name} 必须是数值。')
+    try:
+        value = float(value)
+    except OverflowError:
+        raise ValueError(f'{name} 超出允许范围。') from None
+    if not isfinite(value) or not 0 <= value <= maximum or (positive and value == 0):
+        raise ValueError(f'{name} 超出允许范围。')
+    return value
+
+
 def _settings(value):
     if not isinstance(value, dict) or set(value) - set(DEFAULTS):
         raise ValueError('工作台设置无效。')
@@ -167,33 +197,72 @@ def _settings(value):
     part = result['part_strengths']
     if not isinstance(part, dict) or set(part) - set(MODULES):
         raise ValueError('部位强度无效。')
-    result['part_strengths'] = {name: validate_unit_interval(value, name) for name, value in part.items()}
+    result['part_strengths'] = {name: _setting_number(value, name, maximum=1) for name, value in part.items()}
     if isinstance(result['method'], str) and result['method'] in _RETIRED_METHODS:
         raise ValueError('项目已移除 CUGAN，请选择其他降噪方法。')
-    result['method'], result['l0'] = resolve_denoiser(result['method'], _radius(result['l0'], 'L0', True))
+    if not isinstance(result['method'], str):
+        raise ValueError('请选择工作台支持的降噪方法。')
+    result['method'], result['l0'] = resolve_denoiser(result['method'], _setting_number(result['l0'], 'L0', positive=True))
     if result['method'] not in WORKBENCH_METHODS:
         raise ValueError('请选择工作台支持的降噪方法。')
     for name in ('strength', 'structure_protection', 'restoration_gain', 'downscale'):
-        result[name] = validate_unit_interval(result[name], name)
-    result['sigma'] = _radius(result['sigma'], 'sigma', True)
+        result[name] = _setting_number(result[name], name, maximum=1)
+    result['sigma'] = _setting_number(result['sigma'], 'sigma', positive=True)
     if not result['downscale'] or result['sigma'] > 256:
         raise ValueError('缩图比例须大于零，sigma 不能超过 256。')
     return result
 
 
+def _stage_tool(edit):
+    from ..filters import validate_unit_interval
+    from .masks import PART_ASSIGNMENT_TOOLS, PART_CODES, STAGE_TOOLS
+
+    stage, tool = edit.get('stage'), edit.get('tool')
+    if not isinstance(stage, str) or stage not in STAGE_TOOLS or tool not in STAGE_TOOLS[stage]:
+        raise ValueError('此工具不适用于当前编辑阶段。')
+    module = edit.get('module')
+    if tool == 'remove_part' and (not isinstance(module, str) or module not in PART_CODES or module == 'unknown'):
+        raise ValueError('请选择要移出的部位。')
+    if tool == 'classify' and (not isinstance(module, str) or module not in PART_CODES):
+        raise ValueError('请选择有效的分区类别。')
+    if 'module' in edit and tool not in PART_ASSIGNMENT_TOOLS:
+        raise ValueError('请在归入或移出操作中指定部位。')
+    if 'protected_parts' in edit:
+        parts = edit['protected_parts']
+        if (tool != 'classify' or not isinstance(parts, list)
+                or any(not isinstance(part, str) or part not in PART_CODES for part in parts)
+                or len(parts) != len(set(parts))):
+            raise ValueError('请选择有效且互不重复的保护分区。')
+    if 'allow_protected' in edit and (tool != 'include' or type(edit['allow_protected']) is not bool):
+        raise ValueError('只有补选可以允许使用自动保护的区域。')
+    if 'strength' in edit:
+        if tool not in ('protect', 'mix'):
+            raise ValueError('此工具不能指定局部强度。')
+        validate_unit_interval(edit['strength'], '局部强度')
+
+
 def _history(edits, cursor, width, height, stored_edits):
+    from ..filters import _radius, validate_unit_interval
+    from .masks import PART_ASSIGNMENT_TOOLS
+
     if (not isinstance(edits, list) or len(edits) > 2000 or type(cursor) is not int
             or not 0 <= cursor <= len(edits)):
         raise ValueError('编辑记录无效或已超过上限。')
     count = 0
+    seen_tokens = set()
     for index, edit in enumerate(edits):
-        if isinstance(edit, dict) and edit.get('tool') in ('import', 'sam_object'):
+        if isinstance(edit, dict) and ('token' in edit or edit.get('tool') in ('import', 'sam_object')
+                                       or edit.get('shape') == 'sam'):
             token = edit.get('token')
-            if (set(edit) != {'tool', 'token'} or not isinstance(token, str)
-                    or (edit['tool'], token) not in stored_edits):
+            if not isinstance(token, str) or stored_edits.get(token) != edit or token in seen_tokens:
                 raise ValueError('蒙版编辑记录必须来自当前文档。')
+            seen_tokens.add(token)
             continue
-        if not isinstance(edit, dict) or set(edit) - {'tool', 'shape', 'points', 'radius', 'strength', 'module', 'allow_protected'}:
+        fields = {'tool', 'shape', 'points', 'radius', 'strength', 'module', 'allow_protected'}
+        if isinstance(edit, dict) and 'stage' in edit:
+            _stage_tool(edit)
+            fields.update(('stage', 'feather', 'protected_parts'))
+        if not isinstance(edit, dict) or set(edit) - fields:
             raise ValueError('编辑记录无效。')
         tool = edit.get('tool')
         if tool == 'resolve_unknown':
@@ -204,10 +273,13 @@ def _history(edits, cursor, width, height, stored_edits):
         if 'allow_protected' in edit and (tool != 'include' or type(edit['allow_protected']) is not bool):
             raise ValueError('只有补选可明确允许使用自动保护的区域。')
         if tool in ('invert', 'reset'):
+            if 'stage' in edit and set(edit) != {'stage', 'tool'}:
+                raise ValueError('整体范围操作不能指定笔画或选区。')
             continue
         shape = edit.get('shape', 'brush')
         points = edit.get('points')
-        if (tool not in ('include', 'exclude', 'protect', 'mix', 'erase', 'override') or shape not in ('brush', 'polygon')
+        if (tool not in ('include', 'exclude', 'protect', 'mix', 'erase', 'override', *PART_ASSIGNMENT_TOOLS)
+                or (tool in PART_ASSIGNMENT_TOOLS and edit.get('stage') != 'parts') or shape not in ('brush', 'polygon')
                 or not isinstance(points, list) or len(points) < (3 if shape == 'polygon' else 1)):
             raise ValueError('笔画或套索记录无效。')
         count += len(points)
@@ -218,8 +290,12 @@ def _history(edits, cursor, width, height, stored_edits):
                 raise ValueError('笔画坐标无效。')
             if _radius(point[0], 'x') >= width or _radius(point[1], 'y') >= height:
                 raise ValueError('笔画坐标超出原图。')
-        if shape == 'brush' and _radius(edit.get('radius', 24), 'radius', True) > 256:
-            raise ValueError('笔刷半径不能超过 256。')
+        if shape == 'brush':
+            radius = edit.get('radius', 24)
+            if type(radius) is not int or not 1 <= radius <= 256 or _radius(edit.get('feather', 0), '羽化') > radius:
+                raise ValueError('笔刷半径须为 1 至 256 的整数，羽化不能超过半径。')
+        elif edit.get('feather', 0) != 0:
+            raise ValueError('套索使用明确的轮廓边界。')
         if tool == 'protect':
             validate_unit_interval(edit.get('strength', .9), '保护强度')
         if tool == 'mix':
@@ -236,17 +312,6 @@ def _safe_mask_filename(value):
             or any(c in '/\\:*?"<>|' or ord(c) < 32 for c in value)):
         raise ValueError('校正蒙版必须使用同目录文件名。')
     return value
-
-
-def _write_atomic(path, content):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name('.write-' + uuid4().hex + '.tmp')
-    try:
-        with temporary.open('xb') as stream:
-            stream.write(content)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _active_edit_layers(state):
@@ -275,9 +340,11 @@ def _sam_points(points, width, height):
 class Documents:
     """Source-bound drafts, with one resident analysis and one serialized render worker."""
 
-    def __init__(self, workspace, opener):
+    def __init__(self, workspace, opener=None):
         self.workspace = Path(workspace).resolve()
         self.opener = opener
+        self.preferences = Preferences(DEFAULTS, _settings)
+        self.cache = CaseCache(self.workspace, self.preferences)
         self.root = self.workspace / 'documents'
         self._condition = Condition()
         self._inference = Lock()
@@ -301,6 +368,7 @@ class Documents:
         self._selection_value = None
         self._restored_key = None
         self._restored = None
+        self._candidate_png = None
         self._restore()
         self._worker = Thread(target=self._run, name='gaid-workbench', daemon=True)
         self._worker.start()
@@ -345,6 +413,8 @@ class Documents:
                 continue
 
     def _store(self, state):
+        if state['status'] != 'error':
+            state.pop('failed_phase', None)
         _json(self.root / state['id'] / 'draft.json', state)
         self._documents[state['id']] = state
         preview = self._object_previews.get(state['id'])
@@ -384,13 +454,73 @@ class Documents:
         with self._condition:
             return self._public(self._lookup(doc))
 
+    @contextmanager
+    def maintenance(self):
+        if not self._inference.acquire(blocking=False):
+            raise StorageBusy('工作台正在处理图片，请等待空闲后再管理缓存。')
+        try:
+            with self._condition:
+                if any(state['status'] in ('queued', 'running') for state in self._documents.values()):
+                    raise StorageBusy('工作台有待处理图片，请等待空闲后再管理缓存。')
+            with self.cache.processing(wait=False):
+                yield
+        finally:
+            self._inference.release()
+
+    def change_preferences(self, patch):
+        return self.preferences.change(patch, self.cache, self.maintenance)
+
+    def clear_cache(self):
+        with self.maintenance():
+            return self.cache.clear()
+
+    def cache_info(self):
+        try:
+            with self.maintenance(), self.cache.lock(wait=False):
+                self.cache.switch(self.preferences.read()['cache_dir'])
+                return self.cache.info()
+        except StorageBusy:
+            return self.cache.info()
+
+    def _open_session(self, source, state, *, on_stage=None):
+        with self.cache.using(state['id']) as root:
+            if self.opener is not None:
+                return self.opener(source, root)
+            from .session import WorkbenchSession
+
+            settings = state['settings']
+            return WorkbenchSession.open(source, root, method=settings['method'], lam=settings['l0'],
+                                         downscale=settings['downscale'], on_stage=on_stage)
+
     def recent(self):
         with self._condition:
             states = sorted(self._documents.values(), key=lambda state: state['_updated'], reverse=True)
             return [{key: state[key] for key in ('id', 'name', 'width', 'height', 'status')}
                     for state in states[:20]]
 
-    def thumbnail(self, doc):
+    def thumbnail(self, doc, view='original', revision=None):
+        if view != 'original':
+            if view not in ('parts', 'weight', 'candidate', 'b'):
+                raise KeyError('找不到此节点的缩略图。')
+            key = (doc, view, revision)
+            with self._thumbnail_lock:
+                with self._condition:
+                    self._published_b(doc, revision)
+                    if key in self._thumbnails:
+                        self._thumbnails.move_to_end(key)
+                        return self._thumbnails[key]
+                data = self.asset(doc, view, revision=revision)
+                output = BytesIO()
+                with Image.open(BytesIO(data)) as image:
+                    image.thumbnail((320, 320), Image.Resampling.LANCZOS)
+                    image.save(output, 'PNG', icc_profile=image.info.get('icc_profile'))
+                data = output.getvalue()
+                with self._condition:
+                    self._published_b(doc, revision)
+                self._thumbnails[key] = data
+                if len(self._thumbnails) > 20:
+                    self._thumbnails.popitem(last=False)
+                return data
         with self._condition:
             self._lookup(doc, upgrade=False)
         original = self.root / doc / 'original.png'
@@ -467,7 +597,7 @@ class Documents:
             folder = self.root / doc
             _write_atomic(folder / 'original.png', original)
             state = {'id': doc, 'name': (name.replace('\\', '/').split('/')[-1] or 'image' + suffix)[:160],
-                     'width': width, 'height': height, 'revision': 0, 'settings': deepcopy(DEFAULTS),
+                     'width': width, 'height': height, 'revision': 0, 'settings': self.preferences.read()['defaults'],
                      'edits': [], 'cursor': 0, 'status': 'queued', 'phase': 'queued', 'error': None,
                      'b': None, 'a': None, 'selection_revision': 0,
                      '_schema': 1, '_updated': time(), '_suffix': suffix, '_correction': None, '_source_epoch': 0}
@@ -487,8 +617,7 @@ class Documents:
             state = self._lookup(doc)
             self._current(state, payload['revision'])
             settings = _settings(payload['settings'])
-            stored_edits = {(edit['tool'], edit['token']) for edit in state['edits']
-                            if edit['tool'] in ('import', 'sam_object')}
+            stored_edits = {edit['token']: edit for edit in state['edits'] if 'token' in edit}
             edits = _history(payload['edits'], payload['cursor'], state['width'], state['height'], stored_edits)
             new_resolutions = [i for i, edit in enumerate(edits) if edit['tool'] == 'resolve_unknown'
                                and edits[i - 1:i + 1] != state['edits'][i - 1:i + 1]]
@@ -514,8 +643,8 @@ class Documents:
 
     def pin(self, doc, revision):
         with self._condition:
-            state = self._lookup(doc)
-            if type(revision) is not int or not state['b'] or state['b']['revision'] != revision:
+            state = self._published_b(doc, revision)
+            if state['status'] != 'ready' or state['revision'] != revision:
                 raise RevisionConflict('可固定的结果已更新。请重新选择。')
             pinned = {**state, 'a': deepcopy(state['b']), '_updated': time()}
             self._store(pinned)
@@ -524,6 +653,12 @@ class Documents:
 
     def _render_path(self, doc, revision):
         return self.root / doc / f'render-{revision}'
+
+    def _published_b(self, doc, revision):
+        state = self._lookup(doc)
+        if type(revision) is not int or not state['b'] or state['b']['revision'] != revision:
+            raise RevisionConflict('请求的预览尚未完成或已更新。')
+        return state
 
     def _changes_state(self, doc, revision):
         state = self._lookup(doc, upgrade=False)
@@ -583,9 +718,9 @@ class Documents:
         from .masks import WorkbenchWeightCache
         from .session import _cached_editor
 
-        workspace = self.workspace / 'cases'
         try:
-            editor = _cached_editor(workspace, doc, [state['width'], state['height']])
+            with self.cache.using() as workspace:
+                editor = _cached_editor(workspace, doc, [state['width'], state['height']])
         except (OSError, ValueError, KeyError, TypeError, EOFError):
             # Custom openers and missing caches still use the verified session
             # path. Only the analysis, if needed, holds the inference lock.
@@ -597,24 +732,27 @@ class Documents:
                 source = self._source_path(doc, state['_suffix'])
                 if _sha(source) != doc:
                     raise ValueError('本地原图副本已更改，请重新打开源图。')
-                editor = self.opener(source, workspace).editor
+                editor = self._open_session(source, state).editor
             finally:
                 self._inference.release()
         cache = WorkbenchWeightCache(editor)
         return editor, self._replay_selection(doc, state, editor, cache), cache.lines
 
-    def asset(self, doc, view, *, download=False, revision=None):
+    def asset(self, doc, view, *, download=False, revision=None, module=None):
         if view == 'magnetic_source' and not download:
             return self._magnetic_source(doc, revision)
+        if view == 'highlight' and not download:
+            return self._highlight(doc, revision, module)
         with self._condition:
             state = self._lookup(doc)
             if view == 'original' and not download:
                 return (self.root / doc / 'original.png').read_bytes()
-            if view not in ('a', 'b', 'parts', 'weight', 'unknown', 'suspected_objects') or (download and view not in ('a', 'b')):
+            if view not in ('a', 'b', 'parts', 'weight', 'unknown', 'suspected_objects', 'candidate', 'labels'
+                            ) or (download and view not in ('a', 'b')):
                 raise KeyError('找不到此视图。')
             rendered = state['a' if view == 'a' else 'b']
             if (not rendered or (revision is not None and rendered['revision'] != revision)
-                    or (download and view == 'b' and rendered['revision'] != state['revision'])):
+                    or (download and view == 'b' and (state['status'] != 'ready' or rendered['revision'] != state['revision']))):
                 raise RevisionConflict('请求的结果尚未完成或已更新。')
             if view == 'suspected_objects':
                 if not rendered.get('images', {}).get(view):
@@ -624,8 +762,43 @@ class Documents:
                 return (self.root / doc / filename).read_bytes()
             if view == 'unknown' and not rendered.get('images', {}).get(view):
                 raise KeyError('此版本没有待确认图层。')
-            filename = view + '.png' if view in ('parts', 'weight', 'unknown') else 'result.png'
-            return (self._render_path(doc, rendered['revision']) / filename).read_bytes()
+            if view in ('candidate', 'labels'):
+                self._published_b(doc, revision)
+            filename = 'result.png' if view in ('a', 'b') else view + '.png'
+            path = self._render_path(doc, rendered['revision']) / filename
+            if view in ('candidate', 'labels') and not path.is_file():
+                if state['status'] == 'ready':
+                    self._restart_analysis(state, upgrade=False)
+                raise RevisionConflict('正在为这份草稿生成节点预览。')
+            return path.read_bytes()
+
+    def _highlight(self, doc, revision, module):
+        from .masks import PART_CODES
+
+        if not isinstance(module, str) or module not in PART_CODES:
+            raise ValueError('请选择要高亮的部位。')
+        labels = self.asset(doc, 'labels', revision=revision)
+        stream = BytesIO()
+        with Image.open(BytesIO(labels)) as image:
+            image.putpalette(bytes([255, 255, 255]) * 256)
+            transparency = bytearray(256)
+            transparency[PART_CODES[module]] = 145
+            image.save(stream, 'PNG', transparency=bytes(transparency), compress_level=1)
+        with self._condition:
+            self._published_b(doc, revision)
+        return stream.getvalue()
+
+    def export(self, doc, view, revision):
+        if view not in ('a', 'b') or type(revision) is not int or revision < 0:
+            raise ValueError('请选择要导出的对照或成品。')
+        with self._condition:
+            state = self._lookup(doc)
+            folder = self.preferences.read()['export_dir']
+            if not folder:
+                raise ValueError('请先选择本机导出目录。')
+            self.cache.validate_base(Path(folder).resolve())
+            data = self.asset(doc, view, download=True, revision=revision)
+            return export_png(folder, state['name'], data)
 
     def _magnetic_state(self, doc, revision):
         state = self._lookup(doc)
@@ -668,8 +841,9 @@ class Documents:
             if _sha(source) != doc:
                 raise ValueError('本地原图副本已更改，请重新打开源图。')
             try:
-                rgb, alpha, icc, candidate = _cached_l0_baseline(
-                    self.workspace / 'cases', doc, [state['width'], state['height']], settings['l0'])
+                with self.cache.using() as cases:
+                    rgb, alpha, icc, candidate = _cached_l0_baseline(
+                        cases, doc, [state['width'], state['height']], settings['l0'])
             except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
                 pass  # Missing or invalid analysis caches use the normal verified session path.
             else:
@@ -687,7 +861,7 @@ class Documents:
             else:
                 if _sha(source) != doc:
                     raise ValueError('本地原图副本已更改，请重新打开源图。')
-                session = self.opener(source, self.workspace / 'cases')
+                session = self._open_session(source, state)
             candidate = session.candidate(settings['method'], lam=settings['l0'], downscale=settings['downscale'])
         finally:
             self._inference.release()
@@ -701,7 +875,7 @@ class Documents:
                 raise RevisionConflict('请等待当前选区完成。')
             path = self._render_path(doc, revision) / 'corrections.json'
             if not path.is_file():
-                raise ValueError('当前软保护或部位强度不能导出为旧版二值校正。已保存在工作台文档中。')
+                raise ValueError(state.get('correction_error') or '当前设置不能导出为旧版二值校正。')
             record = json.loads(path.read_text(encoding='utf-8'))
             filenames = [record[key] for key in MASK_KEYS if key in record]
             filenames.extend(record.get('module_overrides', {}).values())
@@ -770,12 +944,12 @@ class Documents:
             included = _sam_points(positive, width, height)
             excluded = _sam_points(negative, width, height)
             if not included or included & excluded:
-                raise ValueError('请在外物上点至少一个加入点，加入点和排除点不能重叠。')
+                raise ValueError('请在选区内点至少一个加入点，加入点和排除点不能重叠。')
             if state['status'] != 'ready':
-                raise RevisionConflict('请等待当前结果更新后再点选外物。')
+                raise RevisionConflict('请等待当前结果更新后再点选区域。')
         # The render worker and HTTP requests share the GPU. State queries and
         # edits remain available while inference is in progress.
-        with self._inference:
+        with self._inference, self.cache.processing():
             with self._condition:
                 state = self._lookup(doc)
                 self._current(state, revision)
@@ -785,7 +959,7 @@ class Documents:
                 raise ValueError('本地原图副本已更改，请重新打开源图。')
             session = self._resident
             if self._resident_id != doc or self._resident_epoch != state.get('_source_epoch', 0):
-                session = self.opener(source, self.workspace / 'cases')
+                session = self._open_session(source, state)
             mask = session.predict_object(positive, negative)
             if not isinstance(mask, np.ndarray) or mask.dtype != bool or mask.shape != (height, width):
                 raise ValueError('SAM2 蒙版与原图尺寸不一致。')
@@ -805,7 +979,7 @@ class Documents:
                     self._object_previews.popitem(last=False)
         return {'revision': revision, 'token': token, 'preview': preview, 'pixels': int(mask.sum())}
 
-    def apply_object(self, doc, revision, token):
+    def apply_object(self, doc, revision, token, selection=None):
         with self._condition:
             state = self._lookup(doc)
             self._current(state, revision)
@@ -814,9 +988,18 @@ class Documents:
                 raise RevisionConflict('点选预览已过期，请重新生成。')
             if state['cursor'] >= 2000:
                 raise ValueError('编辑记录已超过上限。')
+            if selection is None:
+                edit = {'tool': 'sam_object', 'token': token}
+            else:
+                if set(selection) - {'stage', 'tool', 'module', 'strength', 'allow_protected', 'protected_parts'}:
+                    raise ValueError('SAM2 选区操作字段无效。')
+                _stage_tool(selection)
+                if selection['tool'] in ('reset', 'invert', 'resolve_unknown'):
+                    raise ValueError('此操作不能使用 SAM2 选区。')
+                edit = {**selection, 'shape': 'sam', 'token': token}
             path = self.root / doc / token / 'object_add_mask.png'
             _write_atomic(path, pending[2])
-            edits = [*state['edits'][:state['cursor']], {'tool': 'sam_object', 'token': token}]
+            edits = [*state['edits'][:state['cursor']], edit]
             updated = {**state, 'revision': revision + 1, 'edits': edits, 'cursor': len(edits),
                        'selection_revision': state['selection_revision'] + 1,
                        'status': 'queued', 'phase': 'queued', 'error': None, '_updated': time()}
@@ -849,13 +1032,16 @@ class Documents:
                 doc, revision = self._pending.popitem(last=False)
                 state = deepcopy(self._documents[doc])
             try:
-                with self._inference:
-                    self._render(doc, revision, state)
+                with self._inference, self.cache.processing():
+                    prepared = self._render(doc, revision, state)
+                if prepared is not None:
+                    self._publish_render(doc, revision, *prepared)
+                del prepared
             except Exception as error:
                 with self._condition:
                     current = self._documents[doc]
                     if not self._closed and current['revision'] == revision:
-                        failed = {**current, 'status': 'error', 'phase': 'error',
+                        failed = {**current, 'status': 'error', 'phase': 'error', 'failed_phase': current['phase'],
                                   'error': str(error) or type(error).__name__}
                         try:
                             self._store(failed)
@@ -876,6 +1062,8 @@ class Documents:
                           weight_cache=cache)
 
     def _render(self, doc, revision, state):
+        from ..filters import blend
+
         epoch = state.get('_source_epoch', 0)
         needs_analysis = self._resident_id != doc or self._resident_epoch != epoch
         settings = state['settings']
@@ -895,7 +1083,7 @@ class Documents:
             source = self._source_path(doc, state['_suffix'])
             if _sha(source) != doc:
                 raise ValueError('本地原图副本已更改，请重新打开源图。')
-            self._resident = self.opener(source, self.workspace / 'cases')
+            self._resident = self._open_session(source, state, on_stage=lambda name: self._stage(doc, revision, name))
             suspected = getattr(self._resident, 'suspected_objects', None)
             self._has_suspected_objects = suspected is not None and suspected.any()
             if self._has_suspected_objects:
@@ -916,6 +1104,7 @@ class Documents:
             if not self._stage(doc, revision, 'compose'):
                 return
             self._restored = _restore_candidate(session.editor.rgb, candidate, settings)
+            self._candidate_png = _png(np.rint(candidate * 255).astype(np.uint8), session.editor.alpha, session.icc)
             self._restored_key = restore_key
         selection_key = self._selection_cache_key(state)
         if selection_key != self._selection_key:
@@ -926,8 +1115,22 @@ class Documents:
         result = blend(session.editor.rgb, self._restored, mask.weight)
         if not self._stage(doc, revision, 'encoding'):
             return
-        data = {**images, 'result.png': _png(result, session.editor.alpha, session.icc)}
-        self._encode_corrections(data, state, session.editor, mask)
+        data = {**images, 'candidate.png': self._candidate_png,
+                'result.png': _png(result, session.editor.alpha, session.icc)}
+        correction_error = self._encode_corrections(data, state, session.editor, mask)
+        rendered = {'revision': revision, 'method': settings['method'], 'selection_revision': state['selection_revision']}
+        image_views = {name: True for name, available in (
+            ('suspected_objects', self._has_suspected_objects), ('unknown', 'unknown.png' in images)) if available}
+        if image_views:
+            rendered['images'] = image_views
+        publication = {'b': rendered, '_analysis_version': _ANALYSIS_VERSION,
+                       'status': 'ready', 'phase': 'done', 'error': None,
+                       'edit_feedback': mask.edit_feedback, 'correction_error': correction_error,
+                       'active_percent': round(float((mask.weight > 0).mean() * 100), 2)}
+        return data, publication
+
+    def _publish_render(self, doc, revision, data, publication):
+        # A ready revision can immediately serve GPU-backed tools or undergo cache maintenance.
         with self._condition:
             current = self._documents[doc]
             if self._closed or current['revision'] != revision:
@@ -936,16 +1139,7 @@ class Documents:
             folder.mkdir(exist_ok=True)
             for name, content in data.items():
                 (folder / name).write_bytes(content)
-            rendered = {'revision': revision, 'method': settings['method'],
-                        'selection_revision': state['selection_revision']}
-            image_views = {name: True for name, available in (
-                ('suspected_objects', self._has_suspected_objects), ('unknown', 'unknown.png' in images)) if available}
-            if image_views:
-                rendered['images'] = image_views
-            ready = {**current, 'b': rendered, '_analysis_version': _ANALYSIS_VERSION,
-                     'status': 'ready', 'phase': 'done', 'error': None,
-                     'edit_feedback': mask.edit_feedback,
-                     'active_percent': round(float((mask.weight > 0).mean() * 100), 2)}
+            ready = {**current, **publication}
             self._store(ready)
             self._prune(current, ready)
 
@@ -955,8 +1149,8 @@ class Documents:
 
         try:
             masks = binary_corrections(editor, mask, state['settings'])
-        except ValueError:
-            return
+        except ValueError as error:
+            return '当前设置不能导出为 CLI 二值校正。' + str(error)
         record = {'version': 2, 'source_sha256': state['id'], 'size': [state['width'], state['height']]}
         for key, value in masks.items():
             if key == 'module_overrides':
@@ -974,7 +1168,7 @@ class Documents:
 
     def _prune(self, previous, current):
         keep = {item['revision'] for item in (current['a'], current['b']) if item}
-        generated = ('result.png', 'parts.png', 'weight.png', 'unknown.png', 'corrections.json',
+        generated = ('result.png', 'parts.png', 'weight.png', 'unknown.png', 'candidate.png', 'labels.png', 'corrections.json',
                      *(key + '.png' for key in MASK_KEYS),
                      *('module-' + part + '.png' for part in MODULES if part != 'background'))
         for revision in {item['revision'] for item in (previous['a'], previous['b']) if item} - keep:

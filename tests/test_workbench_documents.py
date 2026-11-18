@@ -2,6 +2,7 @@ from base64 import b64decode
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import tempfile
 from threading import Event, current_thread
@@ -158,6 +159,9 @@ class DocumentsTest(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.workspace = Path(folder.name)
+        settings = patch.dict(os.environ, GAID_WORKBENCH_SETTINGS=str(self.workspace / 'preferences.json'))
+        settings.start()
+        self.addCleanup(settings.stop)
         self.rgb = np.full((24, 28, 3), 130, np.uint8)
         self.alpha = np.full(self.rgb.shape[:2], 128, np.uint8)
         self.alpha[:, :2] = 0
@@ -431,6 +435,9 @@ class DocumentsTest(unittest.TestCase):
         draft = json.loads(path.read_text(encoding='utf-8'))
         draft.pop('_analysis_version', None)
         path.write_text(json.dumps(draft), encoding='utf-8')
+        old_render = path.parent / f'render-{previous["revision"]}'
+        for filename in ('candidate.png', 'labels.png'):
+            (old_render / filename).unlink()
 
         def waiting_opener(source, workspace):
             self.release.wait(5)
@@ -450,6 +457,8 @@ class DocumentsTest(unittest.TestCase):
                 self.assertEqual(pending['settings'], previous['settings'])
                 self.assertEqual(recovered.asset(doc, 'a', download=True), pinned)
                 with self.assertRaises(RevisionConflict):
+                    recovered.asset(doc, 'candidate', revision=previous['revision'])
+                with self.assertRaises(RevisionConflict):
                     recovered.asset(doc, 'b', download=True)
             finally:
                 self.release.set()
@@ -457,6 +466,9 @@ class DocumentsTest(unittest.TestCase):
             self.assertEqual(current['a'], previous['a'])
             self.assertEqual(current['b']['revision'], pending['revision'])
             self.assertEqual(recovered.get(doc)['revision'], pending['revision'])
+            for view in ('candidate', 'labels'):
+                with Image.open(BytesIO(recovered.asset(doc, view, revision=current['revision']))) as image:
+                    self.assertEqual(image.size, (previous['width'], previous['height']))
 
     def test_version_three_refresh_replays_unknown_edits_without_unlocking_objects(self):
         self.unknown[12, 14:16] = True
@@ -528,24 +540,62 @@ class DocumentsTest(unittest.TestCase):
         return {'revision': state['revision'], 'settings': {**state['settings'], **settings},
                 'edits': state['edits'], 'cursor': state['cursor']}
 
+    def test_remove_part_edit_is_saved_with_its_source_part(self):
+        self.unknown[10, 11] = True
+        self.objects[10, 12] = True
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        state = self.ready(doc, opened['revision'])
+        edit = {'stage': 'parts', 'tool': 'remove_part', 'module': 'skin',
+                'shape': 'brush', 'points': [[10, 10]], 'radius': 3, 'feather': 0}
+        for invalid_source in ('unknown', 'missing'):
+            with self.assertRaises(ValueError):
+                self.docs.update(doc, {**self.update(state), 'edits': [{**edit, 'module': invalid_source}], 'cursor': 1})
+        queued = self.docs.update(doc, {**self.update(state), 'edits': [edit], 'cursor': 1})
+        ready = self.ready(doc, queued['revision'])
+        self.assertEqual(ready['edits'], [edit])
+        with Image.open(BytesIO(self.docs.asset(doc, 'labels', revision=ready['revision']))) as image:
+            self.assertEqual([image.getpixel((x, 10)) for x in (9, 11, 12, 14)], [255, 255, 7, 1])
+
     def test_original_is_available_during_analysis_and_stale_result_is_not_exported(self):
         state = self.docs.open(self.content.getvalue(), '测试.png')
         doc = state['id']
         with Image.open(BytesIO(self.docs.asset(doc, 'original'))) as image:
             np.testing.assert_array_equal(np.array(image), np.dstack((self.rgb, self.alpha)))
         state = self.ready(doc, state['revision'])
+        published = state['revision']
+        self.docs.pin(doc, published)
+        self.docs.change_preferences({'export_dir': str(self.workspace)})
         old = self.docs.asset(doc, 'b', download=True)
         state = self.docs.update(doc, self.update(state, l0=.001))
         self.assertTrue(self.entered.wait(3))
         next_state = self.docs.update(doc, self.update(state, l0=.002))
         latest = self.docs.update(doc, self.update(next_state, l0=.003))
         self.assertEqual(self.docs.asset(doc, 'b'), old)
+        for view in ('parts', 'weight', 'candidate', 'b'):
+            with Image.open(BytesIO(self.docs.thumbnail(doc, view, published))) as node:
+                self.assertEqual(node.size, (28, 24))
+        for view in ('candidate', 'labels', 'highlight'):
+            with Image.open(BytesIO(self.docs.asset(doc, view, revision=published, module='hair'))) as image:
+                self.assertEqual(image.size, (28, 24))
+        self.assertEqual(self.docs.export(doc, 'a', published).read_bytes(), old)
+        for revision in (published, latest['revision']):
+            with self.assertRaises(RevisionConflict):
+                self.docs.pin(doc, revision)
+            with self.assertRaises(RevisionConflict):
+                self.docs.export(doc, 'b', revision)
         with self.assertRaises(RevisionConflict):
             self.docs.asset(doc, 'b', download=True)
         with self.assertRaises(RevisionConflict):
             self.docs.update(doc, self.update(state, strength=.7))
         self.release.set()
         self.ready(doc, latest['revision'])
+        for view in ('parts', 'weight', 'candidate', 'b'):
+            with self.assertRaises(RevisionConflict):
+                self.docs.thumbnail(doc, view, published)
+        for view in ('candidate', 'labels', 'highlight'):
+            with self.assertRaises(RevisionConflict):
+                self.docs.asset(doc, view, revision=published, module='hair')
         self.assertEqual(len(self.opened), 1)
         self.assertEqual(self.strengths, [.0005, .001, .003])
 

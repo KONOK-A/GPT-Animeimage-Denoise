@@ -4,6 +4,7 @@ const byId = id => document.getElementById(id);
 const themeToggle = byId('theme-toggle');
 const themeRoot = document.documentElement;
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+const compactInspector = window.matchMedia('(max-width: 760px)');
 const themeOptions = [...document.querySelectorAll('button[data-theme-option]')];
 const themeLabels = { system: '跟随系统', light: '浅色', dark: '深色' };
 const themeIcons = { system: 'system', light: 'sun', dark: 'moon' };
@@ -18,17 +19,21 @@ function applyTheme() {
     button.setAttribute('aria-pressed', String(button.dataset.themeOption === preference));
   }
 }
-applyTheme();
-systemTheme.addEventListener('change', applyTheme);
-for (const button of themeOptions) button.addEventListener('click', () => {
-  const preference = button.dataset.themeOption;
+function setThemePreference(preference) {
   if (preference === 'system') delete themeRoot.dataset.themePreference;
   else themeRoot.dataset.themePreference = preference;
   applyTheme();
   try {
     if (preference === 'system') window.localStorage.removeItem('gaid-theme');
     else window.localStorage.setItem('gaid-theme', preference);
-  } catch { /* Keep the selection for this page. */ }
+  } catch { /* The host preference still applies to this page. */ }
+}
+applyTheme();
+systemTheme.addEventListener('change', applyTheme);
+for (const button of themeOptions) button.addEventListener('click', () => {
+  const preference = button.dataset.themeOption;
+  setThemePreference(preference);
+  preferences.update({ theme: preference }).catch(showError);
   byId('theme-panel').open = false;
   themeToggle.focus({ preventScroll: true });
 });
@@ -45,26 +50,40 @@ const MASK_VIEWS = ['weight', 'parts', 'suspected_objects'];
 const CHANGE_CATEGORIES = ['added', 'removed', 'stronger', 'weaker', 'reclassified'];
 const RANGE_VIEWS = [...MASK_VIEWS, 'changes'];
 const MAGNETIC_PIN_DISTANCE = 48;
-const MODE_VIEWS = { review: ['compare', 'original', 'result'], range: [...RANGE_VIEWS, 'original', 'result'],
-  effect: ['compare', 'original', 'result'] };
+const MODE_VIEWS = { review: ['compare', 'original', 'result'], flow: [],
+  parts: ['compare', 'parts', 'changes', 'suspected_objects'],
+  range: ['weight', 'original', 'result', 'changes'], effect: ['result', 'candidate', 'compare', 'original'] };
+const nodeNames = { parts: '部位分区', range: '处理范围', effect: '降噪效果' };
+const actions = {
+  parts: { classify: '归入目标部位', remove_part: '移出当前部位', erase: '擦除本步修改' },
+  range: { include: '加入处理范围', exclude: '移出处理范围', protect: '局部减弱', mix: '指定原图比例', erase: '擦除本步修改' },
+};
 const state = {
   options: null, doc: null, file: null, draft: null, dirty: false, save: null, saveFailed: false, conflict: null,
-  epoch: 0, opening: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0,
+  epoch: 0, opening: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0,
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
-  mode: 'review', tool: 'pan', brushSized: false, peek: false, space: false, gesture: null, cursor: null, polygon: [],
+  mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
   changesError: null, appliedHistory: null, historyLocation: null, historyDisplayKey: '',
-  displayedResult: null,
+  displayedResult: null, part: 'hair', protectedParts: new Set(), actions: { parts: 'classify', range: 'include' },
 };
 const isLasso = () => ['lasso', 'magnetic'].includes(state.tool);
+const editingMask = () => state.mode === 'parts' || state.mode === 'range';
+const isBrush = () => editingMask() && !['pan', 'sam_object', 'lasso', 'magnetic'].includes(state.tool);
+const activeAction = () => isBrush() ? state.tool : byId('lasso-action').value;
+const originalPreviewActive = () => state.peek || state.keyboardPeek;
+const partInspectionView = () => state.mode === 'parts' && state.view !== 'parts';
+const partEditsBlocked = () => partInspectionView() || (state.mode === 'parts' && originalPreviewActive());
 const clone = value => JSON.parse(JSON.stringify(value));
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const route = (suffix = '') => '/api/documents/' + encodeURIComponent(state.doc.id) + suffix;
 const visibleImage = view => state.images.get(view === 'result' ? 'b' : view)?.image;
+const usesPinnedComparison = () => state.mode !== 'parts' && Boolean(state.doc?.a);
 const viewAvailable = view => (view !== 'suspected_objects' && view !== 'unknown') || Boolean(state.doc?.b?.images?.[view]);
-const unknownOverlayAvailable = () => state.mode === 'range' && (state.view === 'parts' || state.view === 'weight')
+const unknownOverlayAvailable = () => editingMask() && (state.view === 'parts' || state.view === 'weight')
   && viewAvailable('unknown');
 const pendingKey = id => 'gaid-pending-' + id;
+const protectionKey = id => 'gaid-part-protection-' + id;
 function status(message, tone = 'neutral') {
   const label = byId('status');
   if (label.textContent !== message) label.textContent = message;
@@ -125,7 +144,8 @@ function presetMatches(name) {
 }
 function scopeModules(scope) {
   if (scope === 'empty') return [];
-  return scope === 'all' ? state.options.modules.map(item => item.id) : [...state.options.default_modules];
+  return scope === 'all' ? state.options.modules.map(item => item.id)
+    : [...(preferences.value?.defaults?.modules || state.options.default_modules)];
 }
 function renderIsCurrent() {
   return Boolean(state.doc?.b && state.doc.b.revision === state.doc.revision
@@ -135,7 +155,8 @@ function resultIsCurrent() {
   return renderIsCurrent() && state.displayedResult === state.doc.b.revision;
 }
 function comparing() {
-  return state.view === 'compare' && !state.peek && Boolean(visibleImage('b') && (visibleImage('a') || visibleImage('original')));
+  const reference = (usesPinnedComparison() && visibleImage('a')) || visibleImage('original');
+  return state.view === 'compare' && !originalPreviewActive() && Boolean(visibleImage('b') && reference);
 }
 function skippedUnknownCount(current) {
   if (!current || state.mode !== 'range' || state.tool !== 'include' || state.gesture?.edit) return 0;
@@ -145,19 +166,20 @@ function skippedUnknownCount(current) {
     && feedback?.tool === 'include' && Number.isInteger(count) && count > 0 ? count : 0;
 }
 function updateToolGuidance(current) {
-  const tool = isLasso() ? byId('lasso-action').value : state.tool;
+  const tool = state.tool === 'pan' ? 'pan' : activeAction();
   const region = isLasso() ? '圈住的区域' : '画过的区域';
   const descriptions = {
-    pan: '展开「自动选区起点」选部位，或用左侧工具直接在图上修。拖动画布只改变查看位置。',
+    pan: '拖动画布查看细节，选择左侧工具开始修改。',
+    classify: '把' + region + '中可编辑的像素归入目标部位。',
+    remove_part: '把' + region + '的' + partLabel(state.part) + '像素移到待确认。',
     include: byId('allow-protected').checked
       ? '把' + region + '加入处理范围，包括模型建议保留的像素。透明和手动保护仍生效。'
       : '把未选区域加入处理范围。可在下方允许手动补选模型建议保留的像素。',
     exclude: '把' + region + '移出处理范围，保留原像素。需要重新处理时可用补选。',
     protect: '保留部分原图，让这里少降噪。设为 100% 时，' + (isLasso() ? '圈内' : '笔画中心') + '完全保留。',
     mix: (isLasso() ? '圈内的已选区域' : '笔刷中心的已选区域') + '混合 ' + Number(byId('retention-percent').value)
-      + '% 原图。' + (isLasso() ? '' : '边缘柔和过渡。'),
-    erase: '擦掉手动画过的标记，恢复初始范围。想保留原像素可用「移出」。',
-    override: '圈出误判的外物或待确认区域，再指定它实际属于哪个部位。',
+      + '% 原图。',
+    erase: state.mode === 'parts' ? '擦掉这一步的分区修正，恢复原有归属。' : '擦掉本步手动标记。想保留原像素可用「移出」。',
   };
   const description = byId('tool-description');
   const help = descriptions[tool] || '';
@@ -166,19 +188,45 @@ function updateToolGuidance(current) {
 
   const output = byId('stroke-feedback');
   const feedback = state.doc?.edit_feedback;
+  const latest = state.doc?.edits?.[state.doc.cursor - 1];
+  const editedPart = partLabel(latest?.module || state.part);
+  const feedbackTool = tool === 'pan' && state.mode === 'parts' && latest?.shape === 'sam' ? latest.tool : tool;
   let message = '';
-  if (current && !state.gesture?.edit && feedback?.tool === tool) {
+  if (current && !state.gesture?.edit && feedback?.tool === feedbackTool && (!latest?.stage || latest.stage === state.mode)) {
     if (feedback.reason === 'changed' && Number.isInteger(feedback.changed_pixels) && feedback.changed_pixels > 0) {
       const count = feedback.changed_pixels.toLocaleString('zh-CN');
-      message = tool === 'include' ? '已补选 ' + count + ' 个像素。'
-        : tool === 'exclude' ? '已移出 ' + count + ' 个像素，保留原图。' : '已擦掉 ' + count + ' 个像素的手动标记。';
+      const pixels = count + ' 个像素';
+      message = {
+        include: '已补选 ' + pixels + '。',
+        erase: '已擦掉 ' + pixels + '的手动标记。',
+        classify: '已将 ' + pixels + '归入' + editedPart + '。',
+        remove_part: '已将 ' + pixels + '从' + editedPart + '移到待确认。',
+        protect: '已减弱 ' + pixels + '的处理。',
+        mix: '已更新 ' + pixels + '的原图比例。',
+      }[feedbackTool] || '';
+      if (feedbackTool === 'exclude') {
+        if (latest?.feather > 0 && feedback.partially_reduced_pixels === undefined) {
+          message = '已调整 ' + pixels + '的处理范围。';
+        } else {
+          const partial = feedback.partially_reduced_pixels ?? 0;
+          const removed = feedback.changed_pixels - partial;
+          if (removed) message = '已移出 ' + removed.toLocaleString('zh-CN') + ' 个像素，保留原图。';
+          if (partial) message += '羽化减弱 ' + partial.toLocaleString('zh-CN') + ' 个像素的处理。';
+        }
+      }
     } else if (feedback.reason === 'already_selected') message = '未新增：涂到的可编辑区域已选中。';
-    else if (feedback.reason === 'protected') message = '未新增：笔画落在受保护区域。';
-    else if (feedback.reason === 'no_marks') message = '这里没有手动标记，自动选区照常生效。';
+    else if (feedback.reason === 'protected' && feedbackTool !== 'classify') message = '未新增：笔画落在受保护区域。';
+    else if (feedback.reason === 'no_marks') message = {
+      classify: '这笔未改变分区。', remove_part: '本笔移出 0 个' + editedPart + '像素。',
+    }[feedbackTool] || '这里没有手动标记，自动选区照常生效。';
     else if (feedback.reason === 'already_excluded') message = '这里原本就没有选中，不会处理。';
+    const protectedCount = feedback.skipped_protected_pixels;
+    if (protectedCount > 0) message += '已跳过 ' + protectedCount.toLocaleString('zh-CN') + ' 个受保护像素。';
   }
   const skipped = skippedUnknownCount(current);
   byId('unknown-stroke-actions').hidden = !skipped;
+  byId('unknown-assignment').hidden = latest?.stage === 'range';
+  byId('open-unknown-parts').hidden = latest?.stage !== 'range';
   if (skipped) {
     const skippedMessage = '这笔跳过 ' + skipped.toLocaleString('zh-CN') + ' 个待确认像素。';
     message = feedback.changed_pixels > 0 ? message + skippedMessage : skippedMessage;
@@ -189,24 +237,26 @@ function updateToolGuidance(current) {
 function rangeToolName(tool) {
   return { pan: '移动画布', include: '画入处理范围', exclude: '移出处理范围', protect: '局部减弱',
     mix: '指定原图比例', erase: '擦除手动改动', override: '纠正部位', sam_object: '点选外物',
+    classify: '归入目标部位', remove_part: '移出当前部位',
     invert: '反选处理范围', reset: '按部位恢复', import: '导入校正' }[tool] || '编辑范围';
 }
 function suggestedRangeView() {
-  return isLasso() && byId('lasso-action').value === 'override' ? 'parts' : 'weight';
+  return state.mode === 'parts' ? 'parts' : 'weight';
 }
 function editHistoryLabel(edit) {
-  const module = state.options?.modules.find(item => item.id === edit.module)?.label || edit.module;
+  const module = partLabel(edit.module);
   if (edit.tool === 'resolve_unknown') return edit.module
     ? '待确认归为' + module
     : '加入本笔的待确认';
-  let label = edit.tool === 'override' && module ? '纠正为' + module : rangeToolName(edit.tool);
+  let label = ['override', 'classify'].includes(edit.tool) && module ? '归为' + module : rangeToolName(edit.tool);
+  if (edit.tool === 'remove_part') label = '从' + module + '移到待确认';
   if (['protect', 'mix'].includes(edit.tool) && Number.isFinite(edit.strength)) {
     label += ' ' + (edit.strength * 100).toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + '%';
   }
-  return label + (edit.shape === 'polygon' ? ' · 圈选' : '');
+  return label + (edit.shape === 'polygon' ? ' · 圈选' : edit.shape === 'sam' ? ' · SAM2' : '');
 }
 function updateRangeHistory(canEdit) {
-  if (state.mode !== 'range') return;
+  if (!editingMask()) return;
   const history = state.draft?.edits || [], cursor = state.draft?.cursor || 0;
   const audit = state.images.get('changes'), inAudit = state.view === 'changes';
   const current = renderIsCurrent(), now = state.doc?.revision;
@@ -265,8 +315,8 @@ function updateRangeHistory(canEdit) {
 }
 function updateStatus(current) {
   if (!state.doc || state.opening) return;
-  const rangeMode = state.mode === 'range';
-  const editing = rangeMode ? '，可继续编辑' : '';
+  const rangeMode = editingMask();
+  const editing = rangeMode && !partEditsBlocked() ? '，可继续编辑' : '';
   const phases = { queued: '等待处理', loading: '正在读取图片', analyzing: '正在识别分区', analysis: '正在识别分区',
     candidate: '正在生成降噪候选', rendering: '正在合成预览', compose: '正在合成预览',
     encoding: '正在保存结果', saving: '正在保存结果' };
@@ -274,13 +324,15 @@ function updateStatus(current) {
   else if (state.save) status('正在提交修改' + editing, 'pending');
   else if (state.saveFailed) status('修改保存失败，可重试。', 'error');
   else if (state.dirty) status('修改待更新' + editing, 'pending');
-  else if (state.doc.status === 'error') status(state.doc.error || '处理失败，请重试。', 'error');
-  else if (state.doc.status !== 'ready') status((phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
+  else if (state.doc.status === 'error') status(nodeNames[failedNode()] + '失败。' + (state.doc.error || '可重试此步。'), 'error');
+  else if (state.doc.status !== 'ready') status((state.doc.b ? '正在更新 · ' : '') + (phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
+  else if (state.mode === 'flow') status('当前流程已完成', 'ready');
+  else if (state.view === 'candidate') status(state.images.get('candidate')?.revision === state.doc.revision ? '全图降噪预览已就绪' : '正在载入全图降噪预览', state.images.get('candidate')?.revision === state.doc.revision ? 'ready' : 'pending');
   else if (rangeMode && RANGE_VIEWS.includes(state.view)) {
     const revision = state.doc.revision;
     if (state.view === 'changes' && state.changesError?.revision === revision) status('改动图读取失败，可在「核对改动」重试。', 'error');
     else if (state.images.get(state.view)?.revision === revision) {
-      const label = { changes: '改动图已更新', suspected_objects: '疑似外物已显示' };
+    const label = { changes: '改动图已更新', parts: '分区已更新', suspected_objects: '疑似外物已显示' };
       status(label[state.view] || '范围已更新', 'ready');
     } else status('正在显示当前图层' + editing, 'pending');
   } else if (current) status('当前成品已就绪', 'ready');
@@ -290,12 +342,18 @@ function updateStatus(current) {
 function updateSamControls() {
   const sam = state.sam;
   const positive = sam?.points.filter(item => !item.negative).length ?? 0;
-  const canPreview = Boolean(sam && !sam.busy && positive && renderIsCurrent());
+  const canPreview = Boolean(sam && !sam.busy && positive && !partEditsBlocked() && renderIsCurrent());
+  const action = state.mode === 'parts' ? activeAction() : '';
+  const classifying = action === 'classify', removingPart = action === 'remove_part';
+  const part = partLabel(state.part);
+  const previewHint = removingPart ? '确认后仅移出轮廓内的' + part + '像素。'
+    : classifying && state.protectedParts.size ? '核对高亮的轮廓。确认时会跳过受保护的分区。'
+      : '核对高亮的轮廓，确认后应用到当前步骤。';
   const text = !sam ? ''
     : sam.busy === 'preview' ? '正在生成预览，可继续缩放或移动画布。'
-    : sam.busy === 'apply' ? '正在标记外物…'
-    : sam.preview ? '橙色为待确认范围。若盖到手套或袖口，在那里加排除点，再生成预览。'
-    : sam.error || (!positive ? '先点一下杯身等道具内部。'
+    : sam.busy === 'apply' ? '正在应用选区…'
+    : sam.preview ? previewHint
+    : sam.error || (!positive ? '点一下想选中的区域。'
       : !renderIsCurrent() ? '当前选区更新后即可预览。'
       : positive + ' 个目标点，' + (sam.points.length - positive) + ' 个排除点。');
   byId('sam-panel').hidden = !sam;
@@ -306,39 +364,52 @@ function updateSamControls() {
   byId('sam-cancel').disabled = sam?.busy === 'apply';
   byId('sam-preview').disabled = !canPreview;
   byId('sam-apply').disabled = !canPreview || sam.preview?.revision !== state.doc.revision;
+  byId('sam-apply').textContent = removingPart ? '移出' + part : classifying ? '归为' + part : '应用选区';
   if (byId('sam-status').textContent !== text) byId('sam-status').textContent = text;
 }
 function updateControls() {
   const canEdit = Boolean(state.doc && state.draft && !state.opening && state.sam?.busy !== 'apply');
+  const inspectingParts = partInspectionView(), partBlocked = partEditsBlocked();
+  const canDraw = canEdit && !partBlocked;
   const hasImage = Boolean(state.file), current = resultIsCurrent();
   const method = state.options?.methods.find(item => item.id === state.draft?.settings.method);
-  byId('open').disabled = byId('empty-open').disabled = !state.options;
-  const rangeMode = state.mode === 'range';
+  byId('open').disabled = byId('empty-open').disabled = byId('open-settings').disabled = !state.options;
+  const rangeMode = editingMask();
+  const graph = state.mode === 'flow';
   const reviewMode = state.mode === 'review';
   document.body.dataset.mode = state.mode;
-  byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = byId('file-meta').hidden = !hasImage;
+  byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = !hasImage || graph;
+  byId('file-meta').hidden = !hasImage;
+  byId('flow-board').hidden = !graph;
+  stage.hidden = graph;
+  byId('tools').hidden = !rangeMode;
+  byId('edit-bar').hidden = !rangeMode;
+  byId('node-breadcrumb').hidden = !nodeNames[state.mode];
+  byId('node-breadcrumb').textContent = nodeNames[state.mode] || '';
+  byId('drawer-title').textContent = nodeNames[state.mode] || '成品检查';
+  byId('inspector-toggle').hidden = !state.doc || graph;
+  if (graph) updateFlow();
   const viewHint = comparing() ? '拖动分割线比较 · 空格拖动画布' : '滚轮缩放 · 空格拖动画布';
   const hint = byId('viewer-hint');
-  hint.hidden = !hasImage;
+  hint.hidden = !hasImage || graph;
   if (hint.textContent !== viewHint) hint.textContent = viewHint;
-  byId('inspector').hidden = !state.doc || state.opening;
-  byId('empty-title').textContent = state.opening ? '正在打开图片…' : '拖入图片开始精修';
+  byId('inspector').hidden = !state.doc || state.opening || graph;
+  byId('empty-title').textContent = state.exited ? '工作台已退出' : state.opening ? '正在打开图片…' : '拖入图片开始精修';
   byId('empty-help').hidden = state.opening;
-  byId('empty-open').hidden = state.opening;
+  byId('empty-open').hidden = state.opening || state.exited;
+  byId('recent-panel').hidden = state.exited;
   const drawingMagnetic = Boolean(state.magnetic?.segments.length || state.magnetic?.intent);
-  byId('undo').disabled = !canEdit || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === 0;
-  byId('redo').disabled = !canEdit || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === state.draft.edits.length;
-  byId('download-label').textContent = reviewMode ? '导出 PNG' : '去看成品';
-  byId('download').disabled = reviewMode ? !current : !canEdit;
+  byId('undo').disabled = !canDraw || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === 0;
+  byId('redo').disabled = !canDraw || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === state.draft.edits.length;
+  byId('download').disabled = !current;
+  byId('download').title = current ? '导出当前成品 B' : '当前成品显示后可导出';
   byId('pin').disabled = !current;
-  byId('export-panel').hidden = !state.doc || (!reviewMode && !rangeMode);
-  byId('more-actions').textContent = rangeMode ? '校正文件' : '⌄';
-  byId('more-actions').setAttribute('aria-label', rangeMode ? '校正文件' : '更多导出选项');
+  byId('export-panel').hidden = !state.doc;
   byId('correction-export').hidden = byId('correction-import').hidden = !rangeMode;
-  byId('download-a').hidden = !reviewMode;
+  byId('download-a').hidden = !state.doc?.a;
   byId('correction-export').disabled = !renderIsCurrent();
   byId('download-a').disabled = !state.doc?.a;
-  byId('correction-import').disabled = !canEdit || state.dirty || Boolean(state.save || state.conflict);
+  byId('correction-import').disabled = !canDraw || state.dirty || Boolean(state.save || state.conflict);
   byId('export-hint').textContent = reviewMode && !current ? '当前成品显示后，即可固定或导出。' : '';
   const a = state.doc?.a, b = state.images.get('b')?.meta;
   byId('comparison-a').textContent = !a ? '原图' : state.images.get('a')?.revision === a.revision
@@ -347,10 +418,17 @@ function updateControls() {
     + (current ? ' · 当前成品' : b.revision === state.doc?.revision && renderIsCurrent() ? ' · 待查看' : ' · 上一版');
   for (const id of ['zoom-out', 'zoom-in', 'fit', 'actual', 'peek']) byId(id).disabled = !hasImage;
   for (const [buttons, key, value, disabled] of [
-    [viewButtons, 'view', state.view, !hasImage], [toolButtons, 'tool', state.tool, !canEdit],
-    [modeButtons, 'mode', state.mode, !canEdit],
+    [viewButtons, 'view', state.view, !hasImage],
+    [toolButtons, 'tool', partBlocked ? 'pan' : isBrush() ? 'brush' : state.tool, !canDraw],
+    [modeButtons, 'mode', reviewMode ? 'review' : 'flow', !canEdit],
   ]) for (const button of buttons) {
-    if (key === 'view') button.hidden = !MODE_VIEWS[state.mode].includes(button.dataset.view) || !viewAvailable(button.dataset.view);
+    if (key === 'view') {
+      button.hidden = !MODE_VIEWS[state.mode].includes(button.dataset.view) || !viewAvailable(button.dataset.view);
+      if (button.dataset.view === 'compare') {
+        const label = state.mode === 'parts' ? '原图 / 成品' : '对比';
+        if (button.textContent !== label) button.textContent = label;
+      }
+    }
     button.disabled = key === 'tool' ? !rangeMode || (button.dataset.tool === 'pan' ? !hasImage : disabled)
       : disabled || (button.dataset.view === 'result' && !state.doc?.b);
     button.setAttribute('aria-pressed', String(button.dataset[key] === value));
@@ -358,7 +436,10 @@ function updateControls() {
   const unknownToggle = byId('show-unknown');
   unknownToggle.hidden = !unknownOverlayAvailable();
   unknownToggle.setAttribute('aria-pressed', String(state.showUnknown));
-  for (const mode of ['review', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode;
+  byId('edit-inspector').hidden = !rangeMode || inspectingParts;
+  byId('range-history').hidden = !rangeMode;
+  for (const mode of ['review', 'parts', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode;
+  if (inspectingParts) byId('parts-inspector').hidden = true;
   for (const button of presetButtons) {
     button.disabled = !canEdit || (button.dataset.preset === 'strong' && !method?.uses_l0);
     button.setAttribute('aria-pressed', String(Boolean(presetMatches(button.dataset.preset))));
@@ -371,21 +452,40 @@ function updateControls() {
       && expected.every(name => selected.includes(name))));
   }
   for (const field of document.querySelectorAll('#modules input, #part-strengths input')) field.disabled = !canEdit;
-  for (const id of ['method', ...numberFields, 'radius', 'protection', 'retention-percent', 'allow-protected', 'lasso-action', 'override-module', 'invert', 'reset']) {
-    byId(id).disabled = !canEdit || (id === 'l0' && !method?.uses_l0) || (id === 'downscale' && !method?.uses_downscale);
+  for (const id of ['method', ...numberFields, 'radius', 'feather', 'protection', 'retention-percent', 'allow-protected', 'lasso-action', 'invert', 'reset']) {
+    byId(id).disabled = !canDraw || (id === 'l0' && !method?.uses_l0) || (id === 'downscale' && !method?.uses_downscale);
   }
-  byId('lasso-options').hidden = !isLasso();
-  byId('brush-radius-row').hidden = isLasso() || state.tool === 'pan';
-  const operation = isLasso() ? byId('lasso-action').value : state.tool;
+  byId('lasso-options').hidden = !isLasso() || inspectingParts;
+  byId('brush-radius-row').hidden = !isBrush() || inspectingParts;
+  byId('feather-row').hidden = !isBrush() || state.mode !== 'range';
+  byId('action-field').hidden = state.tool === 'pan' || inspectingParts;
+  byId('pan-hint').hidden = state.tool !== 'pan' && !inspectingParts;
+  byId('pan-hint').textContent = inspectingParts ? '在「分区叠加」中修改部位。' : '拖动画布，滚轮缩放';
+  const operation = state.tool === 'pan' ? 'pan' : activeAction();
   byId('protect-row').hidden = !['protect', 'mix'].includes(operation);
-  byId('protection-label').textContent = operation === 'mix' ? '原图比例' : '保护比例';
-  byId('allow-protected-row').hidden = operation !== 'include';
-  byId('override-label').hidden = byId('lasso-action').value !== 'override';
+  const target = byId('target-shortcut');
+  const removingPart = operation === 'remove_part';
+  target.hidden = state.mode !== 'parts' || inspectingParts || !['classify', 'remove_part'].includes(operation);
+  target.style.setProperty('--part-color', partColor(state.part));
+  if (state.mode === 'parts') {
+    const selectLabel = removingPart ? '选择要移出的部位' : '选择目标部位';
+    target.title = selectLabel;
+    target.setAttribute('aria-label', selectLabel + '，当前' + partLabel(state.part));
+    byId('part-heading').textContent = removingPart ? '要移出的部位' : '目标部位';
+    byId('part-hint').textContent = removingPart ? '点选来源部位，移出的像素会归入待确认。'
+      : '点部位选目标，点锁切换原分区保护。待确认默认可改。';
+    const removeOption = [...byId('lasso-action').children].find(option => option.value === 'remove_part');
+    if (removeOption) removeOption.disabled = state.part === 'unknown';
+  }
+  byId('protection-label').textContent = operation === 'mix' ? '原图比例' : '减弱比例';
+  byId('allow-protected-row').hidden = state.mode !== 'range' || operation !== 'include';
+  byId('l0-field').hidden = !method?.uses_l0;
+  byId('downscale-field').hidden = !method?.uses_downscale;
+  byId('strong-preset').hidden = !method?.uses_l0;
   const mag = state.magnetic;
-  byId('range-scope').hidden = Boolean(state.sam || mag);
+  byId('current-tool-name').textContent = state.tool === 'pan' ? '移动画布'
+    : state.sam ? 'SAM2 点选' : mag ? '磁性套索' : isLasso() ? '套索' : '画笔';
   byId('brush-panel').hidden = Boolean(state.sam);
-  byId('current-tool-name').textContent = isLasso()
-    ? (mag ? '磁性套索' : '套索') + ' · ' + rangeToolName(operation) : rangeToolName(operation);
   const suggested = suggestedRangeView();
   const jump = byId('suggested-range-view');
   jump.hidden = !canEdit || state.tool === 'pan' || state.view === suggested;
@@ -394,8 +494,8 @@ function updateControls() {
   byId('scope-summary').textContent = !modules.length ? '当前从空范围开始'
     : modules.length === state.options?.modules.length ? '当前从整图开始'
       : '当前部位 · ' + modules.map(name => state.options?.modules.find(item => item.id === name)?.label || name).join('、');
-  if (mag) updateMagneticCloseButton(mag, canEdit);
-  else byId('close-lasso').disabled = !canEdit || state.polygon.length < 3;
+  if (mag) updateMagneticCloseButton(mag, canDraw);
+  else byId('close-lasso').disabled = !canDraw || state.polygon.length < 3;
   byId('magnetic-options').hidden = byId('magnetic-undo').hidden = !mag;
   byId('magnetic-undo').disabled = !canEdit || (!mag?.segments.length && mag?.intent?.kind !== 'anchor');
   byId('magnetic-radius').disabled = !canEdit || Boolean(mag?.intent);
@@ -409,10 +509,13 @@ function updateControls() {
   updateToolGuidance(renderIsCurrent());
   updateSamControls();
   updateRangeHistory(canEdit);
-  stage.dataset.tool = state.space ? 'pan' : state.tool;
+  stage.dataset.tool = state.space || partBlocked ? 'pan' : state.tool;
   byId('conflict-local').hidden = byId('conflict-remote').hidden = !state.conflict;
   byId('retry').hidden = !state.doc || Boolean(state.conflict || state.save)
     || (!state.saveFailed && (state.doc.status !== 'error' || state.dirty));
+  const failed = state.doc?.status === 'error' && !state.dirty && !state.conflict;
+  byId('error-node').hidden = !failed;
+  if (failed) byId('error-node').textContent = '打开' + nodeNames[failedNode()];
   updateStatus(current);
 }
 
@@ -441,7 +544,8 @@ function drawSam(box) {
 }
 function strokePath(edit, box, outline = false) {
   if (!edit?.points?.length) return;
-  const colors = { include: '#75badd', exclude: '#f3c87a', protect: '#ec879b', mix: '#62c8aa', erase: '#d5ded8', override: '#add4b7' };
+  const colors = { classify: partColor(edit.module), remove_part: partColor('unknown'), include: '#75badd',
+    exclude: '#f3c87a', protect: '#ec879b', mix: '#62c8aa', erase: '#d5ded8', override: '#add4b7' };
   const [first, ...rest] = edit.points;
   const x = box.x + first[0] * box.scale, y = box.y + first[1] * box.scale;
   const radius = Math.max(1, (edit.radius || 24) * box.scale);
@@ -496,7 +600,7 @@ function locateHistory(index) {
   refresh();
 }
 function drawHistoryLocation(box) {
-  if (state.historyLocation === null || state.mode !== 'range' || state.peek || state.sam) return;
+  if (state.historyLocation === null || !editingMask() || originalPreviewActive() || state.sam) return;
   const edit = historyGeometry(state.historyLocation);
   if (!edit?.points?.length) return;
   const screen = ([x, y]) => [box.x + x * box.scale, box.y + y * box.scale];
@@ -515,16 +619,18 @@ function drawHistoryLocation(box) {
   ctx.restore();
 }
 function draw() {
+  if (state.mode === 'flow') return;
   const box = layout(), showDivider = comparing();
-  byId('history-location-label').hidden = !box || state.historyLocation === null || state.mode !== 'range' || state.peek || Boolean(state.sam);
+  const peek = originalPreviewActive();
+  byId('history-location-label').hidden = !box || state.historyLocation === null || !editingMask() || peek || Boolean(state.sam);
   const maskView = MASK_VIEWS.includes(state.view), suspectedView = state.view === 'suspected_objects';
   const diffView = state.view === 'changes';
-  byId('overlay-legend').hidden = !box || state.peek || !maskView || suspectedView;
+  byId('overlay-legend').hidden = !box || peek || !maskView || suspectedView;
   byId('objects-legend').hidden = byId('protection-legend').hidden = state.view !== 'parts';
   byId('weight-legend').hidden = state.view !== 'weight';
-  byId('suspected-objects-legend').hidden = state.peek || !suspectedView || !visibleImage('suspected_objects');
+  byId('suspected-objects-legend').hidden = peek || !suspectedView || !visibleImage('suspected_objects');
   const unknown = state.images.get('unknown'), base = state.images.get(state.view);
-  const showUnknown = Boolean(box && !state.peek && state.showUnknown && unknownOverlayAvailable()
+  const showUnknown = Boolean(box && !peek && state.showUnknown && unknownOverlayAvailable()
     && unknown && unknown.revision === base?.revision);
   byId('unknown-legend').hidden = !showUnknown;
   const underlay = byId('art-underlay');
@@ -556,13 +662,13 @@ function draw() {
   ctx.imageSmoothingEnabled = box.scale < 1.75;
   const original = visibleImage('original');
   const b = state.images.get('b');
-  const showsResult = !state.peek && b && (state.view === 'result' || showDivider)
+  const showsResult = !peek && b && (state.view === 'result' || showDivider)
     && Math.max(box.x, showDivider ? cut : 0) < Math.min(box.x + box.w, box.width)
     && Math.max(box.y, 0) < Math.min(box.y + box.h, box.height);
   const firstResultFrame = showsResult && state.displayedResult !== b.revision;
   if (firstResultFrame) state.displayedResult = b.revision;
   if (showDivider) {
-    const a = visibleImage('a');
+    const a = usesPinnedComparison() ? visibleImage('a') : null;
     paintImage(a || original, box);
     ctx.save();
     ctx.beginPath(); ctx.rect(cut, 0, box.width - cut, box.height); ctx.clip();
@@ -575,36 +681,50 @@ function draw() {
     byId('right-badge').textContent = 'B  ' + methodLabel(bMeta?.method)
       + (bMeta ? ' / 选区 ' + (bMeta.selection_revision ?? bMeta.revision) : '')
       + (resultIsCurrent() && bMeta?.revision === state.doc.revision ? '' : ' · 待更新');
-  } else if (state.peek || state.view === 'original') paintImage(original, box);
+  } else if (peek || state.view === 'original') paintImage(original, box);
   else if (diffView) { paintImage(original, box); paintImage(visibleImage('changes'), box); }
   else paintImage(visibleImage(state.view) || original, box);
+  if (!peek && state.mode === 'parts' && state.view === 'parts') {
+    const highlight = state.images.get('highlight');
+    if (highlight?.part === state.part && highlight.revision === base?.revision) paintImage(highlight.image, box);
+  }
   if (showUnknown) paintImage(unknown.image, box);
 
-  if (!state.peek && state.sam) {
+  if (!peek && state.sam) {
     ctx.save(); drawSam(box); ctx.restore();
-  } else if (!state.peek && (maskView || state.tool !== 'pan')) {
+  } else if (!peek && !partInspectionView() && (maskView || state.tool !== 'pan')) {
     ctx.save();
     ctx.beginPath(); ctx.rect(box.x, box.y, box.w, box.h); ctx.clip();
     // The brush gesture is drawn on the current frame, independently of backend jobs.
     const overlay = state.images.get(maskView ? state.view : 'b');
     if (!diffView && state.draft && (state.dirty || state.save || overlay?.revision !== state.doc?.revision)) {
       const start = Math.max(overlay?.cursor ?? 0, state.draft.cursor - 32);
-      for (const edit of state.draft.edits.slice(start, state.draft.cursor)) strokePath(edit, box);
+      for (const edit of state.draft.edits.slice(start, state.draft.cursor)) {
+        if (!edit.stage || edit.stage === state.mode) strokePath(edit, box);
+      }
     }
     strokePath(state.gesture?.edit, box);
     if (state.polygon.length) strokePath({ tool: byId('lasso-action').value, shape: 'polygon', points: state.polygon }, box, true);
-    if (state.cursor && !state.space && ['include', 'exclude', 'protect', 'mix', 'erase'].includes(state.tool)) {
-      ctx.beginPath();
-      ctx.arc(state.cursor.x, state.cursor.y, Math.max(1.5, Number(byId('radius').value) * box.scale), 0, Math.PI * 2);
-      ctx.strokeStyle = '#1e2020'; ctx.lineWidth = 3; ctx.stroke();
-      ctx.strokeStyle = '#f4f6f1'; ctx.lineWidth = 1.2; ctx.stroke();
+    if (state.cursor && !state.space && isBrush()) {
+      const radius = Number(byId('radius').value);
+      const feather = state.mode === 'range' ? Math.min(Number(byId('feather').value), radius) : 0;
+      const ring = size => {
+        ctx.beginPath();
+        ctx.arc(state.cursor.x, state.cursor.y, Math.max(1, size * box.scale), 0, Math.PI * 2);
+        ctx.strokeStyle = '#18232c'; ctx.lineWidth = 2.7; ctx.stroke();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.1; ctx.stroke();
+      };
+      ring(radius);
+      if (feather > 0 && feather * box.scale >= 1) {
+        ctx.setLineDash([3, 3]);
+        ring(radius - feather);
+      }
     }
     ctx.restore();
   }
   drawHistoryLocation(box);
   const zoom = Math.round(box.scale * 100) + '%';
   if (byId('zoom-level').textContent !== zoom) byId('zoom-level').textContent = zoom;
-  if (!isLasso()) updateBrushReadout(box);
   drawMagneticLayer(box);
   if (firstResultFrame && resultIsCurrent()) updateControls();
 }
@@ -643,18 +763,20 @@ async function decodeImage(blob) {
   } finally { URL.revokeObjectURL(url); }
 }
 function loadAsset(view, revision, meta = null) {
-  if (state.images.get(view)?.revision === revision) return;
-  const key = view + ':' + revision;
+  const part = view === 'highlight' ? state.part : undefined;
+  const cached = state.images.get(view);
+  if (cached?.revision === revision && cached?.part === part) return;
+  const key = view + ':' + revision + (part ? ':' + part : '');
   if (state.loading.has(key)) return;
   const epoch = state.epoch;
   const cursor = state.doc.revision === revision ? state.doc.cursor : 0;
-  const query = typeof revision === 'number' ? '&revision=' + revision : '';
+  const query = (typeof revision === 'number' ? '&revision=' + revision : '') + (part ? '&module=' + encodeURIComponent(part) : '');
   const promise = request(route('/image?view=' + view + query))
     .then(reply => reply.blob()).then(decodeImage).then(image => {
       if (epoch !== state.epoch) return;
       const expected = view === 'original' ? revision : view === 'a' ? state.doc.a?.revision : state.doc.b?.revision;
-      if (revision !== expected || !viewAvailable(view)) return;
-      state.images.set(view, { image, revision, meta, cursor });
+      if (revision !== expected || !viewAvailable(view) || (part && part !== state.part)) return;
+      state.images.set(view, { image, revision, meta, cursor, part });
       if (view === 'original') prepareMagnetic();
       refresh();
     }).catch(error => {
@@ -702,53 +824,164 @@ function loadChanges() {
   state.loading.set(key, promise);
 }
 function ensureAssets() {
-  if (!state.doc) return;
+  if (!state.doc || state.mode === 'flow') return;
   loadAsset('original', 'normalized');
   if (state.doc.b && (state.mode === 'review' || ['compare', 'result'].includes(state.view))) {
     loadAsset('b', state.doc.b.revision, state.doc.b);
   }
-  if (state.doc.a && state.view === 'compare') loadAsset('a', state.doc.a.revision, state.doc.a);
+  if (usesPinnedComparison() && state.view === 'compare') loadAsset('a', state.doc.a.revision, state.doc.a);
   else if (!state.doc.a) state.images.delete('a');
   if (state.doc.b && MASK_VIEWS.includes(state.view) && viewAvailable(state.view)) loadAsset(state.view, state.doc.b.revision);
+  if (state.doc.b && state.view === 'candidate') loadAsset('candidate', state.doc.b.revision);
+  if (state.doc.b && state.mode === 'parts' && state.view === 'parts') loadAsset('highlight', state.doc.b.revision);
   if (state.showUnknown && unknownOverlayAvailable()) loadAsset('unknown', state.doc.b.revision);
   if (state.view === 'changes') loadChanges();
 }
+const graphViews = { source: 'original', parts: 'parts', range: 'weight', effect: 'candidate', result: 'b' };
+const graphEdges = [['source', 'parts'], ['parts', 'range'], ['source', 'effect'], ['range', 'result'], ['effect', 'result']];
+
+function failedNode() {
+  const phase = state.doc?.failed_phase || state.doc?.phase;
+  return { analysis: 'parts', analyzing: 'parts', candidate: 'effect', compose: 'range', encoding: 'effect' }[phase] || 'effect';
+}
+function updateFlow() {
+  if (!state.doc || !state.draft) return;
+  const doc = state.doc, settings = state.draft.settings, revision = doc.b?.revision;
+  const ready = renderIsCurrent();
+  const hint = doc.b && !ready ? '正在显示上一版预览。选择节点可继续调整。' : '选择节点，查看或修改这一步的结果。';
+  if (byId('flow-hint').textContent !== hint) byId('flow-hint').textContent = hint;
+  const captions = {
+    source: doc.width + ' × ' + doc.height,
+    parts: '部位、外物与待确认区域',
+    range: settings.modules.map(partLabel).join('、') || '从空范围开始',
+    effect: methodLabel(settings.method) + ' · 强度 ' + Math.round(settings.strength * 100) + '%',
+    result: ready ? '已完成 · 检查成品' : doc.status === 'error' ? '等待重试' : doc.b ? '上一版 · 正在更新' : '正在生成',
+  };
+  for (const [node, view] of Object.entries(graphViews)) {
+    const image = byId('thumb-' + node), wait = byId('wait-' + node);
+    const summary = byId('summary-' + node);
+    if (summary.textContent !== captions[node]) summary.textContent = summary.title = captions[node];
+    const url = node === 'source' ? route('/thumbnail') : revision == null ? ''
+      : route('/thumbnail?view=' + view + '&revision=' + revision);
+    const button = byId('node-' + node);
+    button.dataset.state = doc.status === 'error' && node === failedNode() ? 'error' : 'normal';
+    if (image.dataset.preview === url) continue;
+    image.dataset.preview = url;
+    image.hidden = true; wait.hidden = false;
+    wait.textContent = url ? '载入预览' : '等待计算';
+    if (!url) { image.removeAttribute('src'); continue; }
+    image.onload = () => {
+      if (image.dataset.preview !== url) return;
+      image.hidden = false; wait.hidden = true;
+    };
+    image.onerror = () => {
+      if (image.dataset.preview === url) { image.hidden = true; wait.hidden = false; wait.textContent = '预览暂不可用'; }
+    };
+    image.src = url;
+  }
+}
+function drawFlowWires() {
+  if (state.mode !== 'flow') return;
+  const map = byId('flow-map').getBoundingClientRect();
+  if (!map.width) return;
+  const vertical = compactInspector.matches;
+  for (const [from, to] of graphEdges) {
+    const a = byId('node-' + from).getBoundingClientRect(), b = byId('node-' + to).getBoundingClientRect();
+    let path;
+    if (vertical) {
+      const x = a.left - map.left, y = a.top - map.top + a.height / 2;
+      const next = b.top - map.top + b.height / 2;
+      const trail = from === 'effect' || to === 'effect' ? 4 : 16;
+      path = 'M' + x + ' ' + y + ' H' + trail + ' V' + next + ' H' + x;
+    } else {
+      const x = a.right - map.left, y = a.top - map.top + a.height / 2;
+      const end = b.left - map.left, next = b.top - map.top + b.height / 2;
+      const bend = (x + end) / 2;
+      path = 'M' + x + ' ' + y + ' C' + bend + ' ' + y + ' ' + bend + ' ' + next + ' ' + end + ' ' + next;
+    }
+    byId('wire-' + from + '-' + to).setAttribute('d', path);
+  }
+}
+for (const node of Object.keys(graphViews)) byId('node-' + node).addEventListener('click', () => {
+  if (node === 'source' || node === 'result') {
+    selectMode('review');
+    selectView(node === 'source' ? 'original' : 'compare');
+  } else selectMode(node);
+  stage.focus({ preventScroll: true });
+});
 function selectView(view) {
   if (!state.file || !MODE_VIEWS[state.mode].includes(view) || !viewAvailable(view)) return;
-  if (state.sam && view !== 'original') {
+  const leavingPartOverlay = state.mode === 'parts' && state.view === 'parts' && view !== 'parts';
+  if (state.sam && view !== (state.mode === 'parts' ? 'parts' : 'original')) {
     if (state.sam.busy === 'apply') return;
     leaveSam();
     state.tool = 'pan';
   }
+  setKeyboardPeek(false);
   state.view = view;
+  if (leavingPartOverlay) {
+    state.polygon = [];
+    state.cursor = null;
+    if (state.gesture?.edit) state.gesture = null;
+    if (state.magnetic) resetMagnetic();
+  }
   ensureAssets();
   refresh();
 }
+function setDrawer(open, restoreFocus = false, pointer = false) {
+  document.body.dataset.drawerMotion = String(open && pointer);
+  document.body.dataset.drawer = open ? 'open' : 'closed';
+  byId('inspector-toggle').setAttribute('aria-expanded', String(open));
+  byId('drawer-scrim').hidden = !open;
+  if (open) byId('drawer-close').focus({ preventScroll: true });
+  else if (restoreFocus) byId('inspector-toggle').focus({ preventScroll: true });
+}
 function selectMode(mode) {
-  if (!state.doc || !['review', 'range', 'effect'].includes(mode)) return;
-  if (state.sam) {
-    if (state.sam.busy === 'apply' || mode === 'range') return;
-    leaveSam();
-  }
-  if (state.magnetic && mode === 'range') return;
+  if (!state.doc || !Object.hasOwn(MODE_VIEWS, mode) || state.sam?.busy === 'apply') return;
+  if (mode === state.mode) return;
+  leaveSam();
   leaveMagnetic();
+  setKeyboardPeek(false);
   state.mode = mode;
   state.polygon = [];
-  if (mode !== 'range') { state.tool = 'pan'; state.historyLocation = null; }
-  if (mode === 'range' && !RANGE_VIEWS.includes(state.view)) selectView('weight');
-  else if (mode !== 'range' && RANGE_VIEWS.includes(state.view)) selectView('compare');
-  else { ensureAssets(); refresh(); }
+  state.gesture = state.cursor = state.historyLocation = null;
+  state.tool = 'pan';
+  setDrawer(false);
+  if (editingMask()) {
+    const list = byId('lasso-action');
+    list.replaceChildren(...Object.entries(actions[mode]).map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label;
+      return option;
+    }));
+    list.value = state.actions[mode];
+    state.tool = state.actions[mode];
+  }
+  state.view = { review: 'compare', parts: 'parts', range: 'weight', effect: 'result', flow: 'flow' }[mode];
+  ensureAssets();
+  refresh();
+  if (mode === 'flow') requestAnimationFrame(drawFlowWires);
+}
+function setEditAction(action) {
+  state.actions[state.mode] = action;
+  byId('lasso-action').value = action;
+  if (isBrush()) state.tool = action;
 }
 function selectTool(tool) {
-  if (tool !== 'pan' && (!state.doc || state.mode !== 'range')) return;
+  if (tool !== 'pan' && (!state.doc || !editingMask() || partEditsBlocked())) return;
+  if (tool === 'brush') tool = state.actions[state.mode];
   if (state.sam?.busy === 'apply') return;
+  if (editingMask() && Object.hasOwn(actions[state.mode], tool)) {
+    setEditAction(tool);
+  }
   if (state.magnetic && tool === 'magnetic') return;
   leaveMagnetic();
   if (tool === 'sam_object') {
     if (state.sam) return;
     state.sam = { points: [], negative: false, preview: null, busy: null, error: '', previousView: state.view };
     state.tool = tool;
-    selectView('original');
+    if (state.mode === 'parts') refresh();
+    else selectView('original');
     return;
   }
   leaveSam();
@@ -760,11 +993,12 @@ function selectTool(tool) {
       sequence: 0, generation: 0, sourceRevision,
       sourceKey: magneticSourceKey(state.draft.settings) };
     prepareMagnetic();
-  } else if (tool !== 'pan' && tool !== 'lasso') {
+  } else if (isBrush()) {
     const box = layout();
     const radius = byId('radius');
-    if (!state.brushSized && box && Number(radius.value) * box.scale < 6) {
+    if (!preferences.value?.remember_brush && !state.brushSized && box && Number(radius.value) * box.scale < 6) {
       radius.value = clamp(Math.round(9 / box.scale), 24, 256);
+      updateBrushReadout();
     }
     state.brushSized = true;
   }
@@ -791,7 +1025,7 @@ function applyMetadata(doc) {
   if (!viewAvailable('unknown')) state.images.delete('unknown');
   if (!viewAvailable('suspected_objects')) {
     state.images.delete('suspected_objects');
-    if (state.view === 'suspected_objects') state.view = 'weight';
+    if (state.view === 'suspected_objects') state.view = state.mode === 'parts' ? 'parts' : 'weight';
   }
   state.file = { name: doc.name, width: doc.width, height: doc.height };
   byId('image-name').textContent = state.file.name;
@@ -805,6 +1039,8 @@ function applyMetadata(doc) {
 function startDocument(doc) {
   state.dirty = state.saveFailed = false;
   state.conflict = null;
+  state.protectedParts = loadProtectedParts(doc.id);
+  updatePartTargets();
   installDraft(doc);
   applyMetadata(doc);
   storage('setItem', 'gaid-active-document', doc.id);
@@ -848,9 +1084,14 @@ function beginDocumentChange() {
   state.showUnknown = true;
   state.changesError = state.appliedHistory = state.historyLocation = null;
   state.historyDisplayKey = '';
+  state.part = 'hair';
+  state.actions = { parts: 'classify', range: 'include' };
+  updatePartTargets();
+  setDrawer(false);
   state.pendingUnknownResolution = null;
   state.fit = true; state.panX = state.panY = 0;
   state.view = 'compare'; state.mode = 'review'; state.tool = 'pan'; state.brushSized = false; state.peek = false;
+  setKeyboardPeek(false);
   byId('allow-protected').checked = false;
   byId('notice').hidden = true;
   byId('empty').hidden = false;
@@ -1058,9 +1299,13 @@ async function flushChanges() {
   return !state.conflict;
 }
 
-function updateBrushReadout(box = layout()) {
-  const value = Number(byId('radius').value);
-  byId('radius-value').textContent = value + ' px' + (box ? ' · 屏幕 ' + Math.max(1, Math.round(value * box.scale)) + ' px' : '');
+function updateBrushReadout() {
+  const radius = Number(byId('radius').value), feather = byId('feather');
+  byId('radius-value').textContent = radius * 2 + ' px';
+  byId('radius').setAttribute('aria-valuetext', '直径 ' + radius * 2 + ' 像素');
+  feather.max = radius;
+  if (Number(feather.value) > radius) feather.value = radius;
+  byId('feather-value').textContent = Number(feather.value) + ' px';
 }
 function updateReadouts() {
   for (const key of ['strength', 'restoration_gain', 'structure_protection', 'protection']) {
@@ -1078,6 +1323,49 @@ function syncSettings() {
     node.nextElementSibling.textContent = Math.round(Number(node.value) * 100) + '%';
   }
   updateReadouts();
+}
+function partLabel(id) {
+  return state.options?.modules.find(item => item.id === id)?.label || { object: '外物', unknown: '待确认' }[id] || id;
+}
+function partColor(id) {
+  return state.options?.modules.find(item => item.id === id)?.color || { object: '#e08844', unknown: '#89909d' }[id] || '#759bd9';
+}
+function partCategories() {
+  return [...state.options.modules.map(item => item.id), 'object', 'unknown'];
+}
+function loadProtectedParts(id) {
+  const parts = partCategories();
+  try {
+    const saved = JSON.parse(storage('getItem', protectionKey(id)) ?? 'null');
+    if (Array.isArray(saved) && saved.every(part => parts.includes(part))) return new Set(saved);
+  } catch { /* Use the defaults if the remembered switches cannot be read. */ }
+  return new Set(parts.filter(part => part !== 'unknown'));
+}
+function togglePartProtection(id) {
+  if (!state.doc || partEditsBlocked()) return;
+  if (!state.protectedParts.delete(id)) state.protectedParts.add(id);
+  storage('setItem', protectionKey(state.doc.id), JSON.stringify([...state.protectedParts]));
+  updatePartTargets();
+  if (state.sam) updateSamControls();
+}
+function updatePartTargets() {
+  for (const row of byId('part-targets').children) {
+    const [button, lock] = row.children;
+    const id = button.dataset.part, protectedPart = state.protectedParts.has(id);
+    button.setAttribute('aria-pressed', String(id === state.part));
+    lock.setAttribute('aria-pressed', String(protectedPart));
+    lock.title = (protectedPart ? '取消保护' : '保护') + partLabel(id);
+    lock.children[0].children[0].setAttribute('href', protectedPart ? '#icon-lock' : '#icon-unlock');
+  }
+  byId('active-part-name').textContent = partLabel(state.part);
+}
+function setPart(id) {
+  if (state.mode !== 'parts' || partEditsBlocked() || state.sam?.busy === 'apply') return;
+  state.part = id;
+  if (id === 'unknown' && state.actions.parts === 'remove_part') setEditAction('classify');
+  updatePartTargets();
+  ensureAssets();
+  refresh();
 }
 function installOptions(options) {
   state.options = options;
@@ -1113,15 +1401,31 @@ function installOptions(options) {
     row.append(item.label, range, output);
     byId('part-strengths').append(row);
     if (item.id !== 'background') {
-      const option = document.createElement('option');
-      option.value = item.id; option.textContent = item.label;
-      byId('override-module').append(option);
       const assignment = document.createElement('option');
       assignment.value = item.id; assignment.textContent = item.label;
       byId('unknown-stroke-module').append(assignment);
     }
   }
-  byId('override-module').value = 'hair';
+  for (const id of [...modules.map(module => module.id), 'object', 'unknown']) {
+    const row = document.createElement('div'), button = document.createElement('button');
+    const swatch = document.createElement('i'), lock = document.createElement('button');
+    row.className = 'part-target';
+    button.className = 'part-choice';
+    button.type = 'button'; button.dataset.part = id; swatch.className = id === 'unknown' ? 'hatch-key' : 'dot';
+    if (id !== 'unknown') swatch.style.backgroundColor = partColor(id);
+    button.append(swatch, partLabel(id));
+    button.addEventListener('click', () => setPart(id));
+    lock.type = 'button'; lock.className = 'part-lock'; lock.dataset.protectPart = id;
+    lock.setAttribute('aria-label', partLabel(id) + '分区保护');
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.append(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
+    lock.append(icon);
+    lock.addEventListener('click', () => togglePartProtection(id));
+    row.append(button, lock);
+    byId('part-targets').append(row);
+  }
+  updatePartTargets();
   byId('unknown-stroke-module').value = 'skin';
   for (const item of options.methods) {
     const option = document.createElement('option');
@@ -1154,7 +1458,7 @@ function chooseScope(scope) {
 
 
 function addEdit(edit) {
-  if (!state.draft || !state.doc) return;
+  if (!state.draft || !state.doc || partEditsBlocked()) return;
   const history = state.draft.edits.slice(0, state.draft.cursor);
   const points = history.reduce((sum, item) => sum + (item.points?.length || 0), 0);
   if (history.length >= 2000 || points + (edit.points?.length || 0) > 50000) {
@@ -1168,7 +1472,11 @@ function addEdit(edit) {
 function resolveUnknownStroke(module) {
   if (!skippedUnknownCount(renderIsCurrent())) return;
   if (module !== undefined && (module === 'background' || !state.options.modules.some(item => item.id === module))) return;
-  const edit = module === undefined ? { tool: 'resolve_unknown' } : { tool: 'resolve_unknown', module };
+  const last = state.draft.edits[state.draft.cursor - 1];
+  if (last.stage === 'range' && module !== undefined) return;
+  const edit = { tool: 'resolve_unknown' };
+  if (last.stage === 'range') edit.stage = 'range';
+  else if (module !== undefined) edit.module = module;
   addEdit(edit);
   if (state.draft.edits[state.draft.cursor - 1] !== edit) return;
   state.pendingUnknownResolution = edit;
@@ -1176,11 +1484,14 @@ function resolveUnknownStroke(module) {
   stage.focus({ preventScroll: true });
   saveDraft();
 }
-function undo() { if (state.draft?.cursor > 0) { state.draft.cursor--; edited(); } }
+function undo() {
+  if (!partEditsBlocked() && state.draft?.cursor > 0) { state.draft.cursor--; edited(); }
+}
 function redo() {
-  if (state.draft && state.draft.cursor < state.draft.edits.length) { state.draft.cursor++; edited(); }
+  if (!partEditsBlocked() && state.draft && state.draft.cursor < state.draft.edits.length) { state.draft.cursor++; edited(); }
 }
 function closeLasso(includePreview = true) {
+  if (partEditsBlocked()) return;
   const mag = state.magnetic;
   if (mag) {
     const tail = includePreview ? magneticClosingTail(mag) : null;
@@ -1192,14 +1503,15 @@ function closeLasso(includePreview = true) {
   state.polygon = [];
   addEdit({ ...lassoAction(), points });
 }
-function lassoAction() {
-  const tool = byId('lasso-action').value;
-  const edit = { tool, shape: 'polygon' };
+function editOperation() {
+  const tool = activeAction(), edit = { tool, stage: state.mode };
   if (tool === 'protect' || tool === 'mix') edit.strength = Number(byId('protection').value);
   if (tool === 'include' && byId('allow-protected').checked) edit.allow_protected = true;
-  if (tool === 'override') edit.module = byId('override-module').value;
+  if (tool === 'classify' || tool === 'remove_part') edit.module = state.part;
+  if (tool === 'classify') edit.protected_parts = [...state.protectedParts];
   return edit;
 }
+function lassoAction() { return { ...editOperation(), shape: 'polygon' }; }
 
 function leaveMagnetic() {
   state.magnetic?.worker?.terminate();
@@ -1315,7 +1627,7 @@ function canCloseMagnetic(mag, tail = null) {
 }
 function updateMagneticCloseButton(mag, canEdit = Boolean(state.doc && state.draft && !state.opening)) {
   const button = byId('close-lasso');
-  const disabled = !canEdit || !canCloseMagnetic(mag, magneticClosingTail(mag));
+  const disabled = !canEdit || partEditsBlocked() || !canCloseMagnetic(mag, magneticClosingTail(mag));
   if (button.disabled !== disabled) button.disabled = disabled;
 }
 function samePoint(a, b) { return Boolean(a && b && a[0] === b[0] && a[1] === b[1]); }
@@ -1487,11 +1799,11 @@ function resetMagnetic(undo = false) {
 }
 function hoverMagnetic(pos, straight = false, pointerMove = false) {
   const mag = state.magnetic;
-  if (!mag) return;
+  if (!mag || partInspectionView()) return;
   mag.straight = straight;
   if (straight) mag.motion = null;
   const point = pos && sourcePoint(pos, false, Math.floor);
-  if (point && !state.space && !state.peek) {
+  if (point && !state.space && !originalPreviewActive()) {
     const scale = layout().scale, start = mag.segments[0]?.[0];
     if (pointerMove && !straight) trackMagneticMotion(mag, point, scale);
     if (canCloseMagnetic(mag) && magneticDistance(point, start) * scale <= 9)
@@ -1514,7 +1826,7 @@ function drawMagneticFrame(mag) {
 }
 function drawMagneticLayer(box = layout()) {
   const mag = state.magnetic;
-  const hidden = !mag || !box || state.peek;
+  const hidden = !mag || !box || originalPreviewActive() || partInspectionView();
   if (magneticCanvas.hidden !== hidden) magneticCanvas.hidden = hidden;
   if (hidden) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1607,7 +1919,7 @@ function undoSamPoint() {
 }
 async function previewSamObject() {
   const sam = state.sam;
-  if (!sam || sam.busy || !renderIsCurrent()) return;
+  if (!sam || sam.busy || partEditsBlocked() || !renderIsCurrent()) return;
   const positive = sam.points.filter(item => !item.negative).map(item => item.point);
   const negative = sam.points.filter(item => item.negative).map(item => item.point);
   if (!positive.length) return;
@@ -1616,7 +1928,7 @@ async function previewSamObject() {
   sam.busy = 'preview'; sam.preview = null; sam.error = '';
   refresh();
   try {
-    const result = await post(route('/sam-object'), { revision, positive, negative });
+    const result = await post(route('/sam-selection'), { revision, positive, negative });
     if (!current() || result.revision !== revision) return;
     const image = new Image();
     image.src = result.preview;
@@ -1634,19 +1946,19 @@ async function previewSamObject() {
 async function applySamObject() {
   const sam = state.sam;
   const preview = sam?.preview;
-  if (!preview || sam.busy || !renderIsCurrent() || preview.revision !== state.doc.revision) return;
+  if (!preview || sam.busy || partEditsBlocked() || !renderIsCurrent() || preview.revision !== state.doc.revision) return;
   const epoch = state.epoch;
   sam.busy = 'apply'; sam.error = '';
   refresh();
   try {
-    const doc = await post(route('/sam-object/apply'), { revision: preview.revision, token: preview.token });
+    const doc = await post(route('/sam-selection/apply'), { revision: preview.revision, token: preview.token, ...editOperation() });
     if (state.epoch !== epoch || doc.revision < state.doc.revision) return;
     if (state.dirty || state.save) {
       state.conflict = doc;
     } else {
       state.sam = null;
       state.tool = 'pan';
-      state.view = 'parts';
+      state.view = suggestedRangeView();
       installDraft(doc);
       applyMetadata(doc);
     }
@@ -1663,8 +1975,12 @@ async function applySamObject() {
 }
 function startGesture(event) {
   if (!state.file || state.gesture || ![0, 1].includes(event.button)) return;
+  if (state.keyboardPeek && state.mode !== 'parts') {
+    setKeyboardPeek(false);
+    draw();
+  }
   const pos = position(event);
-  if (state.tool === 'pan' || state.space || event.button === 1) {
+  if (state.tool === 'pan' || state.space || event.button === 1 || partEditsBlocked()) {
     if (state.magnetic) state.magnetic.motion = null;
     state.gesture = { id: event.pointerId, start: pos, panX: state.panX, panY: state.panY };
   } else if (state.doc) {
@@ -1698,9 +2014,9 @@ function startGesture(event) {
       refresh();
       return;
     }
-    const edit = { tool: state.tool, shape: 'brush', points: [point], radius: Number(byId('radius').value) };
-    if (state.tool === 'protect' || state.tool === 'mix') edit.strength = Number(byId('protection').value);
-    if (state.tool === 'include' && byId('allow-protected').checked) edit.allow_protected = true;
+    const radius = Number(byId('radius').value);
+    const edit = { ...editOperation(), shape: 'brush', points: [point], radius,
+      feather: state.mode === 'parts' ? 0 : Math.min(radius, Number(byId('feather').value)) };
     state.gesture = { id: event.pointerId, edit };
     byId('stroke-feedback').hidden = true;
     byId('unknown-stroke-actions').hidden = true;
@@ -1720,6 +2036,11 @@ function moveGesture(event) {
   }
   if (gesture?.id === event.pointerId) {
     if (gesture.edit) {
+      if (partEditsBlocked()) {
+        state.gesture = null;
+        draw();
+        return;
+      }
       const point = sourcePoint(pos, true), points = gesture.edit.points, last = points.at(-1);
       if ((point[0] !== last[0] || point[1] !== last[1]) && points.length < 5000) points.push(point);
     } else {
@@ -1733,7 +2054,7 @@ function endGesture(event) {
   if (state.gesture?.id !== event.pointerId) return;
   const { edit } = state.gesture;
   state.gesture = null;
-  if (edit && event.type !== 'pointercancel') addEdit(edit);
+  if (edit && event.type !== 'pointercancel' && !partEditsBlocked()) addEdit(edit);
   else {
     updateToolGuidance(renderIsCurrent());
     draw();
@@ -1751,6 +2072,15 @@ async function download(view = 'b') {
   if (!target || (view === 'b' && !resultIsCurrent())) return;
   const epoch = state.epoch, name = state.file.name.replace(/\.[^.]*$/, '');
   try {
+    if (preferences.value?.export_dir) {
+      const result = await post(route('/export'), { revision: target.revision, view });
+      if (epoch === state.epoch) {
+        byId('notice').dataset.tone = 'ready';
+        byId('notice-text').textContent = '已导出到 ' + result.path;
+        byId('notice').hidden = false;
+      }
+      return;
+    }
     const result = await request(route('/download?view=' + view + '&revision=' + target.revision));
     const blob = await result.blob();
     if (epoch !== state.epoch) return;
@@ -1784,7 +2114,7 @@ async function exportCorrection() {
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
 async function importCorrection(files) {
-  if (!state.doc || !(await flushChanges())) return;
+  if (!state.doc || partEditsBlocked() || !(await flushChanges())) return;
   const epoch = state.epoch, revision = state.doc.revision;
   try {
     const selected = Array.from(files), records = selected.filter(file => /\.json$/i.test(file.name));
@@ -1798,7 +2128,7 @@ async function importCorrection(files) {
       }
       masks[file.name] = btoa(binary);
     }
-    if (epoch !== state.epoch) return;
+    if (epoch !== state.epoch || partEditsBlocked()) return;
     if (revision !== state.doc.revision || state.dirty || state.save) throw new Error('选区已修改，请重新导入校正。');
     const doc = await post(route('/corrections/import'), { revision, record, files: masks });
     if (epoch !== state.epoch) return;
@@ -1841,7 +2171,7 @@ window.addEventListener('click', event => {
 });
 byId('undo').addEventListener('click', undo);
 byId('redo').addEventListener('click', redo);
-byId('download').addEventListener('click', () => state.mode === 'review' ? download() : selectMode('review'));
+byId('download').addEventListener('click', () => download());
 byId('download-a').addEventListener('click', () => download('a'));
 byId('pin').addEventListener('click', pin);
 byId('notice-close').addEventListener('click', () => { byId('notice').hidden = true; });
@@ -1877,6 +2207,7 @@ byId('show-unknown').addEventListener('click', () => {
 });
 byId('include-unknown-stroke').addEventListener('click', () => resolveUnknownStroke());
 byId('assign-unknown-stroke').addEventListener('click', () => resolveUnknownStroke(byId('unknown-stroke-module').value));
+byId('open-unknown-parts').addEventListener('click', () => selectMode('parts'));
 for (const button of modeButtons) button.addEventListener('click', () => selectMode(button.dataset.mode));
 for (const button of scopeButtons) button.addEventListener('click', () => chooseScope(button.dataset.scope));
 for (const button of toolButtons) button.addEventListener('click', () => {
@@ -1894,7 +2225,7 @@ for (const key of ['method', ...numberFields]) {
     edited();
   });
 }
-for (const id of ['radius', 'protection']) byId(id).addEventListener('input', () => {
+for (const id of ['radius', 'feather', 'protection']) byId(id).addEventListener('input', () => {
   if (id === 'radius') state.brushSized = true;
   updateReadouts(); refresh();
 });
@@ -1906,7 +2237,17 @@ byId('retention-percent').addEventListener('change', event => {
   refresh();
 });
 byId('allow-protected').addEventListener('change', refresh);
-byId('lasso-action').addEventListener('change', refresh);
+byId('lasso-action').addEventListener('change', event => {
+  const tool = event.target.value;
+  if (partEditsBlocked() || !Object.hasOwn(actions[state.mode] || {}, tool)) return;
+  setEditAction(tool);
+  refresh();
+});
+for (const id of ['radius', 'feather']) byId(id).addEventListener('change', () => {
+  if (preferences.value?.remember_brush) preferences.update({
+    brush_radius: Number(byId('radius').value), brush_feather: Number(byId('feather').value),
+  }).catch(showError);
+});
 byId('close-lasso').addEventListener('click', () => closeLasso());
 byId('magnetic-undo').addEventListener('click', () => { resetMagnetic(true); stage.focus({ preventScroll: true }); });
 byId('magnetic-radius').addEventListener('input', () => {
@@ -1919,16 +2260,36 @@ byId('sam-undo-point').addEventListener('click', undoSamPoint);
 byId('sam-cancel').addEventListener('click', () => selectTool('pan'));
 byId('sam-preview').addEventListener('click', previewSamObject);
 byId('sam-apply').addEventListener('click', applySamObject);
-byId('invert').addEventListener('click', () => { addEdit({ tool: 'invert' }); selectView('weight'); });
-byId('reset').addEventListener('click', () => { addEdit({ tool: 'reset' }); selectView('weight'); });
+byId('invert').addEventListener('click', () => { addEdit({ tool: 'invert', stage: 'range' }); selectView('weight'); });
+byId('reset').addEventListener('click', () => { addEdit({ tool: 'reset', stage: 'range' }); selectView('weight'); });
 byId('zoom-in').addEventListener('click', () => { const box = layout(); if (box) zoomTo(box.scale * 1.25); });
 byId('zoom-out').addEventListener('click', () => { const box = layout(); if (box) zoomTo(box.scale / 1.25); });
 byId('fit').addEventListener('click', () => { state.fit = true; state.panX = state.panY = 0; draw(); });
 byId('actual').addEventListener('click', () => zoomTo(1));
 const peekButton = byId('peek');
-peekButton.addEventListener('pointerdown', event => { state.peek = true; peekButton.setPointerCapture(event.pointerId); draw(); });
-for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) peekButton.addEventListener(type, () => { state.peek = false; draw(); });
-peekButton.addEventListener('click', event => { if (event.detail === 0) selectView(state.view === 'original' ? 'compare' : 'original'); });
+function setKeyboardPeek(active) {
+  state.keyboardPeek = active;
+  peekButton.setAttribute('aria-pressed', String(active));
+}
+function redrawOriginalPreview() {
+  if (state.mode === 'parts') refresh();
+  else draw();
+}
+peekButton.addEventListener('pointerdown', event => {
+  state.peek = true;
+  peekButton.setPointerCapture(event.pointerId);
+  redrawOriginalPreview();
+});
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) peekButton.addEventListener(type, () => {
+  if (!state.peek) return;
+  state.peek = false;
+  redrawOriginalPreview();
+});
+peekButton.addEventListener('click', event => {
+  if (event.detail !== 0) return;
+  setKeyboardPeek(!state.keyboardPeek);
+  redrawOriginalPreview();
+});
 canvas.addEventListener('wheel', event => {
   const box = layout();
   if (!box) return;
@@ -1970,20 +2331,35 @@ divider.addEventListener('keydown', event => {
   state.split = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : clamp(state.split + (event.key === 'ArrowLeft' ? -.025 : .025), 0, 1);
   draw();
 });
-stage.addEventListener('dragover', event => {
+const viewer = byId('viewer');
+function indicateDrop(active) {
+  for (const area of [stage, byId('flow-board')]) {
+    if (active) area.classList.add('dragging');
+    else area.classList.remove('dragging');
+  }
+}
+viewer.addEventListener('dragover', event => {
   if (!event.dataTransfer.types.includes('Files')) return;
   event.preventDefault();
-  stage.classList.add('dragging');
+  indicateDrop(true);
 });
-stage.addEventListener('dragleave', event => {
-  if (!stage.contains(event.relatedTarget)) stage.classList.remove('dragging');
+viewer.addEventListener('dragleave', event => {
+  if (!viewer.contains(event.relatedTarget)) indicateDrop(false);
 });
-stage.addEventListener('drop', event => { event.preventDefault(); stage.classList.remove('dragging'); openFile(event.dataTransfer.files[0]); });
+viewer.addEventListener('drop', event => {
+  event.preventDefault();
+  indicateDrop(false);
+  openFile(event.dataTransfer.files[0]);
+});
 window.addEventListener('paste', event => {
   const file = event.clipboardData?.files[0];
-  if (file?.type.startsWith('image/')) { event.preventDefault(); openFile(file); }
+  if (!byId('settings-dialog').open && file?.type.startsWith('image/')) { event.preventDefault(); openFile(file); }
 });
 window.addEventListener('keydown', event => {
+  if (byId('settings-dialog').open) return;
+  if (event.key === 'Escape' && document.body.dataset.drawer === 'open') {
+    event.preventDefault(); setDrawer(false, true); return;
+  }
   const open = popovers.find(popover => popover.open);
   if (event.key === 'Escape') {
     if (open) {
@@ -1992,46 +2368,55 @@ window.addEventListener('keydown', event => {
       open.querySelector('summary').focus({ preventScroll: true });
       return;
     }
+    if (state.keyboardPeek) {
+      event.preventDefault();
+      setKeyboardPeek(false);
+      redrawOriginalPreview();
+      return;
+    }
   }
   if (open?.contains(event.target) || event.target.tagName === 'SUMMARY') return;
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) || event.target.isContentEditable) return;
   const key = event.key.toLowerCase();
-  if (state.mode === 'range' && (event.ctrlKey || event.metaKey) && key === 'z') {
+  if (editingMask() && !partEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'z') {
     event.preventDefault();
     if (state.sam) { if (!event.shiftKey) undoSamPoint(); }
     else if (state.magnetic?.segments.length || state.magnetic?.intent) { if (!event.shiftKey) resetMagnetic(true); }
     else (event.shiftKey ? redo : undo)();
     return;
   }
-  if (state.mode === 'range' && (event.ctrlKey || event.metaKey) && key === 'y') {
+  if (editingMask() && !partEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'y') {
     event.preventDefault();
     if (!state.sam && !state.magnetic?.segments.length && !state.magnetic?.intent) redo();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'o') { event.preventDefault(); byId('file').click(); return; }
-  if (key === 'alt' && state.magnetic) {
+  if (key === 'alt' && state.magnetic && !partEditsBlocked()) {
     event.preventDefault(); hoverMagnetic(state.cursor, true); return;
   }
   if (event.ctrlKey || event.metaKey || event.altKey || !state.file) return;
   if (key === ' ' && event.target.tagName !== 'BUTTON') { event.preventDefault(); state.space = true; refresh(); }
-  if (key === 'x') { state.peek = true; draw(); }
+  if (key === 'x' && state.mode !== 'flow' && !state.peek) { state.peek = true; redrawOriginalPreview(); }
   if (key === 'escape') {
     if (state.sam) selectTool('pan');
     else if (state.magnetic) { event.preventDefault(); resetMagnetic(); }
     else { state.polygon = []; refresh(); }
   }
-  if (key === 'backspace' && state.magnetic) { event.preventDefault(); resetMagnetic(true); }
-  if (key === 'enter' && event.target.tagName !== 'BUTTON' &&
+  if (key === 'backspace' && state.magnetic && !partEditsBlocked()) { event.preventDefault(); resetMagnetic(true); }
+  if (key === 'enter' && event.target.tagName !== 'BUTTON' && !partEditsBlocked() &&
       (state.polygon.length >= 3 || canCloseMagnetic(state.magnetic, magneticClosingTail(state.magnetic)))) {
     event.preventDefault(); closeLasso();
   }
   const tool = { b: 'include', d: 'exclude', p: 'protect', m: 'mix', e: 'erase', l: 'lasso', g: 'magnetic' }[key];
-  if (tool) selectTool(tool);
+  if (tool && editingMask()) {
+    if (key === 'b' && state.mode === 'parts') selectTool('classify');
+    else if (['lasso', 'magnetic'].includes(tool) || Object.hasOwn(actions[state.mode], tool)) selectTool(tool);
+  }
 });
 window.addEventListener('keyup', event => {
   if (event.key === ' ') { state.space = false; refresh(); }
   if (event.key === 'Alt' && state.magnetic) hoverMagnetic(state.cursor, false);
-  if (event.key.toLowerCase() === 'x') { state.peek = false; draw(); }
+  if (event.key.toLowerCase() === 'x' && state.peek) { state.peek = false; redrawOriginalPreview(); }
 });
 window.addEventListener('blur', () => {
   state.space = state.peek = false;
@@ -2040,7 +2425,49 @@ window.addEventListener('blur', () => {
 });
 window.addEventListener('pagehide', persistPending);
 new ResizeObserver(draw).observe(stage);
+new ResizeObserver(drawFlowWires).observe(byId('flow-map'));
+byId('error-node').addEventListener('click', () => selectMode(failedNode()));
+byId('inspector-toggle').addEventListener('click', event => {
+  setDrawer(document.body.dataset.drawer !== 'open', false, event.detail > 0);
+});
+byId('target-shortcut').addEventListener('click', event => {
+  if (compactInspector.matches) setDrawer(true, false, event.detail > 0);
+  else [...byId('part-targets').children].map(row => row.children[0]).find(button => button.dataset.part === state.part)?.focus();
+});
+compactInspector.addEventListener('change', () => { setDrawer(false); drawFlowWires(); });
+byId('drawer-close').addEventListener('click', () => setDrawer(false, true));
+byId('drawer-scrim').addEventListener('click', () => setDrawer(false, true));
 
+async function exitWorkbench() {
+  if (state.opening || state.sam?.busy === 'apply') throw new Error('请等待当前操作完成后再退出。');
+  if (!(await flushChanges())) throw new Error('请先处理页面上的保存提示，再退出。');
+  await post('/api/exit', {});
+  state.options = null;
+  beginDocumentChange();
+  state.opening = false;
+  state.exited = true;
+  byId('empty-help').textContent = '双击启动脚本可继续编辑。';
+  refresh();
+  status('已退出工作台');
+}
+
+const preferences = createWorkbenchSettings({
+  byId, request, post, options: () => state.options, draft: () => state.draft?.settings,
+  onExit: exitWorkbench,
+  onChange(value, fields) {
+    if (!fields || 'theme' in fields) setThemePreference(value.theme);
+    if (!fields || 'remember_brush' in fields || 'brush_radius' in fields || 'brush_feather' in fields) {
+      if (value.remember_brush) {
+        byId('radius').value = value.brush_radius;
+        byId('feather').max = value.brush_radius;
+        byId('feather').value = value.brush_feather;
+        state.brushSized = true;
+        updateBrushReadout();
+      }
+    }
+  },
+});
+preferences.load().catch(showError);
 request('/api/options').then(reply => reply.json()).then(options => {
   installOptions(options);
   const previous = storage('getItem', 'gaid-active-document');

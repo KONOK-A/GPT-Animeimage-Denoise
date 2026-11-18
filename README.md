@@ -18,10 +18,11 @@ py -3.12 -m venv .venv
 
 ```powershell
 & .\.venv\Scripts\python.exe -m tools.assets fetch
-.\start-workbench.cmd
 ```
 
-把图片拖进浏览器里的工作台。处理完成后，可以在「看成品」对比原图，在「改哪里」修选区，或在「调效果」更换算法和强度。 [工作台手册](docs/workbench.md)
+在 Windows 双击 [start-workbench.vbs](start-workbench.vbs) 即可在后台打开工作台。需要查看终端日志时，使用 [start-workbench.cmd](start-workbench.cmd)。
+
+把图片拖进浏览器里的工作台。默认成品会在后台生成，可在「成品检查」对比和导出。需要精修时，进入「编辑流程」调整部位分区、处理范围或降噪效果。 [工作台手册](docs/workbench.md)
 
 **命令行**支持单图和批量去噪。按人物部位去噪用 `gaid process`。想跳过模型下载，可以直接运行整图纯 L0。
 

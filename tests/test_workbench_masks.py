@@ -32,6 +32,176 @@ class WorkbenchMasksTests(unittest.TestCase):
         np.testing.assert_array_equal(result.labels, self.editor.labels)
         np.testing.assert_array_equal(result.selected, self.editor.selection(DEFAULT_MODULES))
 
+    def test_stage_erasers_keep_the_other_layers_and_classify_any_semantic_part(self):
+        region = {'shape': 'polygon', 'points': [[8, 18], [50, 18], [50, 23], [8, 23]]}
+        part = {**region, 'stage': 'parts', 'tool': 'classify', 'module': 'outfit'}
+        exclude = {**region, 'stage': 'range', 'tool': 'exclude'}
+        for name, code in {**MODULES, 'object': 0, 'unknown': 255}.items():
+            classified = self.selection([{**part, 'module': name}])
+            for x in (9, 19, 20, 21, 45):
+                self.assertEqual(classified.labels[20, x], code, name)
+                self.assertEqual(classified.objects[20, x], name == 'object')
+                self.assertEqual(classified.unknown[20, x], name == 'unknown')
+            self.assertEqual(classified.labels[20, 22], self.editor.labels[20, 22])
+        cleared_parts = self.selection([part, exclude, {**region, 'stage': 'parts', 'tool': 'erase'}])
+        np.testing.assert_array_equal(cleared_parts.labels, self.editor.labels)
+        np.testing.assert_array_equal(cleared_parts.objects, self.editor.objects)
+        np.testing.assert_array_equal(cleared_parts.unknown, self.editor.unknown)
+        self.assertFalse(cleared_parts.selected[20, 19])
+        cleared_range = self.selection([part, exclude, {**region, 'stage': 'range', 'tool': 'erase'}],
+                                       modules=['outfit'])
+        self.assertTrue(cleared_range.selected[20, 21])
+        self.assertEqual(cleared_range.labels[20, 21], MODULES['outfit'])
+
+    def test_fractional_range_brushes_reach_final_weights_and_replay(self):
+        from gpt_animeimage_denoise.workbench.masks import binary_corrections
+
+        brush = {'stage': 'range', 'shape': 'brush', 'points': [[50, 40]], 'radius': 8, 'feather': 4}
+        for tool, modules, extras, expected in (
+                ('include', [], {}, [1, .5, 0]), ('exclude', ['hair'], {}, [0, .5, 1]),
+                ('protect', ['hair'], {'strength': .8}, [.2, .6, 1]),
+                ('mix', ['hair'], {'strength': 1}, [0, .5, 1])):
+            edit = {**brush, **extras, 'tool': tool}
+            result = self.selection([edit], modules=modules, structure_protection=0)
+            np.testing.assert_allclose(result.weight[40, [50, 56, 58]], expected, atol=1e-6, err_msg=tool)
+            with self.assertRaises(ValueError):
+                binary_corrections(self.editor, result, {'modules': modules})
+            hard = self.selection([{**edit, 'feather': 0}], modules=modules, structure_protection=0)
+            self.assertNotEqual(result.weight[40, 56], hard.weight[40, 56], tool)
+        hard = {**brush, 'tool': 'exclude', 'feather': 0}
+        erase = {**brush, 'tool': 'erase'}
+        result = self.selection([hard, erase], structure_protection=0)
+        np.testing.assert_allclose(result.weight[40, [50, 56, 58]], [1, .5, 0])
+        inverted = self.selection([hard, erase, {'stage': 'range', 'tool': 'invert'}], structure_protection=0)
+        np.testing.assert_allclose(inverted.weight[40, [50, 56, 58]], [0, .5, 1])
+        undo = self.selection([hard, erase], cursor=1, structure_protection=0)
+        np.testing.assert_array_equal(undo.weight, self.selection([hard], structure_protection=0).weight)
+
+    def test_part_protection_filters_the_current_source_labels(self):
+        protected = [*MODULES, 'object']
+        first = {'stage': 'parts', 'tool': 'classify', 'module': 'outfit',
+                 'shape': 'polygon', 'points': [[8, 18], [50, 18], [50, 23], [8, 23]],
+                 'protected_parts': protected}
+        result = self.selection([first])
+        self.assertEqual(result.labels[20, 20], MODULES['outfit'])
+        self.assertEqual(result.labels[20, 19], MODULES['skin'])
+        self.assertEqual(result.labels[20, 45], MODULES['hair'])
+        self.assertEqual(result.labels[20, 9], MODULES['background'])
+        self.assertTrue(result.objects[20, 21])
+        self.assertEqual(result.edit_feedback['changed_pixels'], 1)
+        self.assertGreater(result.edit_feedback['skipped_protected_pixels'], 0)
+
+        second = {**first, 'module': 'mouth', 'protected_parts': [name for name in protected if name != 'skin']}
+        result = self.selection([first, second])
+        self.assertEqual(result.labels[20, 19], MODULES['mouth'])
+        self.assertEqual(result.labels[20, 20], MODULES['outfit'])
+        self.assertTrue(result.objects[20, 21])
+        undo = self.selection([first, second], cursor=1)
+        self.assertEqual(undo.labels[20, 19], MODULES['skin'])
+
+        all_protected = self.selection([{**first, 'protected_parts': [*protected, 'unknown']}])
+        np.testing.assert_array_equal(all_protected.labels, self.editor.labels)
+        self.assertEqual(all_protected.edit_feedback['reason'], 'protected')
+
+    def test_remove_part_brush_and_lasso_only_unassign_the_chosen_part(self):
+        geometries = [
+            {'shape': 'brush', 'points': [[36, 20]], 'radius': 5},
+            {'shape': 'polygon', 'points': [[8, 18], [50, 18], [50, 23], [8, 23]]},
+        ]
+        for geometry in geometries:
+            with self.subTest(shape=geometry['shape']):
+                edit = {**geometry, 'stage': 'parts', 'tool': 'remove_part', 'module': 'hair'}
+                result = self.selection([edit])
+                changed = result.labels != self.editor.labels
+                self.assertTrue(changed[20, 38])
+                self.assertFalse(changed[20, 34])
+                self.assertFalse(changed[20, 57])
+                self.assertTrue(np.all(self.editor.labels[changed] == MODULES['hair']))
+                self.assertTrue(np.all(result.labels[changed] == 255))
+                np.testing.assert_array_equal(result.unknown, self.editor.unknown | changed)
+                np.testing.assert_array_equal(result.objects, self.editor.objects)
+                self.assertEqual(result.edit_feedback['changed_pixels'], int(changed.sum()))
+                np.testing.assert_array_equal(self.selection([edit], cursor=0).labels, self.editor.labels)
+
+    def test_semantic_veto_override_in_new_range_keeps_labels_and_refuses_lossy_cli(self):
+        from gpt_animeimage_denoise.workbench.masks import binary_corrections
+
+        edit = {'stage': 'range', 'tool': 'include', 'allow_protected': True, 'radius': 2, 'points': [[21, 20]]}
+        selected = self.selection([edit])
+        self.assertTrue(selected.selected[20, 20:22].all())
+        self.assertTrue(selected.objects[20, 21])
+        self.assertTrue(selected.unknown[20, 20])
+        with self.assertRaisesRegex(ValueError, '二值'):
+            binary_corrections(self.editor, selected, {})
+        for name in ('unknown', 'background'):
+            classified = self.selection([{'stage': 'parts', 'tool': 'classify', 'module': name,
+                                          'radius': 2, 'points': [[50, 40]]}])
+            with self.assertRaisesRegex(ValueError, '二值'):
+                binary_corrections(self.editor, classified, {})
+
+    def test_feathered_exclusion_reports_partial_reduction_separately(self):
+        settings = {'modules': ['hair'], 'structure_protection': 0}
+        before = self.selection(**settings)
+        edit = {'stage': 'range', 'tool': 'exclude', 'points': [[52, 40]], 'radius': 12, 'feather': 12}
+        after = self.selection([edit], **settings)
+        fully_removed = int(np.count_nonzero((before.weight > 0) & (after.weight == 0)))
+        partially_reduced = int(np.count_nonzero((after.weight > 0) & (after.weight < before.weight)))
+        self.assertEqual((fully_removed, partially_reduced), (1, 436))
+        self.assertEqual(after.edit_feedback, {'tool': 'exclude', 'changed_pixels': 437,
+                                              'partially_reduced_pixels': 436, 'reason': 'changed'})
+        hard_result = self.selection([{**edit, 'feather': .0001}], **settings)
+        self.assertEqual(hard_result.edit_feedback.get('partially_reduced_pixels'), 0)
+
+    def test_upstream_edit_replays_existing_range_strokes_on_corrected_labels(self):
+        brush = {'radius': 2, 'points': [[21, 20]]}
+        include = {**brush, 'stage': 'range', 'tool': 'include'}
+        part = {**brush, 'stage': 'parts', 'tool': 'classify', 'module': 'outfit'}
+        sequence = self.selection([include, part])
+        np.testing.assert_array_equal(sequence.weight, self.selection([part, include]).weight)
+        self.assertTrue(sequence.selected[20, 20:22].all())
+        self.assertEqual(sequence.edit_feedback['tool'], 'classify')
+        self.assertFalse(self.selection([include, part], cursor=1).selected[20, 20:22].any())
+
+    def test_confirm_staged_unknown_preserves_class_vetoes_and_feather(self):
+        brush = {'stage': 'range', 'tool': 'include', 'radius': 4, 'feather': 4, 'points': [[18, 20]]}
+        confirm = {'stage': 'range', 'tool': 'resolve_unknown'}
+        before = self.selection([brush])
+        self.assertEqual(before.edit_feedback['skipped_unknown_pixels'], 1)
+        result = self.selection([brush, confirm], structure_protection=0)
+        self.assertEqual(result.labels[20, 20], 255)
+        self.assertTrue(result.unknown[20, 20])
+        self.assertTrue(result.selected[20, 20])
+        self.assertAlmostEqual(result.weight[20, 20], .5)
+        self.assertFalse(result.selected[20, 21:23].any())
+        with self.assertRaises(ValueError):
+            self.selection([brush, dict(confirm, module='hair')])
+
+    def test_staged_soft_protection_also_attenuates_absolute_mix(self):
+        brush = {'stage': 'range', 'points': [[50, 40]], 'radius': 8}
+        protect = {**brush, 'tool': 'protect', 'strength': .8, 'feather': 4}
+        mix = {**brush, 'tool': 'mix', 'strength': 0, 'feather': 0}
+        for edits in ([protect, mix], [mix, protect]):
+            result = self.selection(edits, structure_protection=0, strength=.25)
+            np.testing.assert_allclose(result.weight[40, [50, 56]], [.2, .6], atol=1e-6)
+
+    def test_generic_sam_applies_each_stage_tool_exactly_as_its_saved_outline(self):
+        from gpt_animeimage_denoise.workbench.masks import render_selection
+
+        outline = np.zeros(self.editor.labels.shape, bool)
+        outline[32:41, 15:53] = True
+        polygon = {'shape': 'polygon', 'points': [[15, 32], [52, 32], [52, 40], [15, 40]]}
+        for stage, tool, params in [('parts', 'classify', {'module': 'eyes'}), ('parts', 'erase', {}),
+                ('range', 'include', {}), ('range', 'exclude', {}), ('range', 'protect', {'strength': .6}),
+                ('range', 'mix', {'strength': .4}), ('range', 'erase', {})]:
+            edit = {'stage': stage, 'tool': tool, **params}
+            prefix = [{**polygon, 'stage': 'parts', 'tool': 'classify', 'module': 'mouth'},
+                      {**polygon, 'stage': 'range', 'tool': 'exclude'}] if tool == 'erase' else []
+            expected = self.selection([*prefix, {**edit, **polygon}], modules=['hair'])
+            records = [*prefix, {**edit, 'shape': 'sam', 'token': 'verified'}]
+            actual = render_selection(self.editor, {'modules': ['hair']}, records, len(records), object_mask=lambda _: outline)
+            for name in ('labels', 'objects', 'unknown', 'selected', 'weight', 'soft_protection'):
+                np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name), err_msg=stage + ' ' + tool)
+
     def test_workbench_weight_cache_reuses_lines_and_geometry_without_changing_weights(self):
         from gpt_animeimage_denoise.workbench import masks
 

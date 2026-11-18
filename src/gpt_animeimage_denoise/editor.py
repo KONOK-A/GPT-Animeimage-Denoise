@@ -5,8 +5,6 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .corrections import MODULES as PERSON_MODULES
-from .filters import (_bool_mask, _original_rgb, _radius, blend, build_weight,
-                      gradient_preserving_candidate, validate_unit_interval)
 
 MODULES = {'background': 0, **PERSON_MODULES}
 DEFAULT_MODULES = ('skin', 'face', 'hair')
@@ -16,6 +14,8 @@ class SelectionEditor:
     """Combine module choices and manual strokes under immutable vetoes."""
 
     def __init__(self, rgb, alpha, labels, objects, unknown):
+        from .filters import _bool_mask, _original_rgb
+
         self.rgb = _original_rgb(rgb)
         shape = rgb.shape[:2]
         if not isinstance(labels, np.ndarray) or labels.dtype != np.uint8 or labels.shape != shape:
@@ -40,6 +40,8 @@ class SelectionEditor:
 
     def paint_stroke(self, points_xy, radius, *, erase=False):
         """Set a round stroke in original pixel coordinates. The last stroke wins."""
+        from .filters import _radius
+
         points = np.asarray(points_xy, dtype=np.float64)
         if points.ndim != 2 or points.shape[1:] != (2,) or not len(points) or not np.isfinite(points).all():
             raise ValueError('Stroke points must be a nonempty list of finite [x, y] pairs')
@@ -79,6 +81,8 @@ class SelectionEditor:
         return (chosen | (self._strokes > 0)) & (self._strokes >= 0) & ~self.hard_protection
 
     def weights(self, modules, *, strength=1, structure_protection=.2):
+        from .filters import build_weight, validate_unit_interval
+
         strength = validate_unit_interval(strength, 'strength')
         weight = build_weight(self.selection(modules), self.hard_protection, self.rgb,
                               feather_radius=16 * self._scale, structure_radius=5 * self._scale,
@@ -89,6 +93,8 @@ class SelectionEditor:
 
     def render(self, candidate, modules, *, strength=1, structure_protection=.2,
                restoration_gain=.25, sigma=12):
+        from .filters import _radius, blend, gradient_preserving_candidate
+
         weight = self.weights(modules, strength=strength, structure_protection=structure_protection)
         effective_sigma = _radius(sigma, 'sigma', strictly_positive=True) * self._scale
         restored = gradient_preserving_candidate(self.rgb, candidate, effective_sigma,

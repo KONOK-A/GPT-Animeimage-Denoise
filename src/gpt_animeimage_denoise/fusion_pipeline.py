@@ -259,8 +259,12 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
                   lam=None, sigma=12, strength=1, edits_path=None, split='',
                   policy=None, policy_path=None, l0_fn=None, denoiser='l0',
                   sr_fn=None, downscale=.6, structure_protection=None,
-                  restoration_gain=None, _input_paths=()):
+                  restoration_gain=None, _input_paths=(), on_stage=None):
     """Preserve source bytes, alpha, ICC and every final W=0 pixel exactly."""
+    def stage(name):
+        if on_stage is not None:
+            on_stage(name)
+
     if profile not in ('fusion', 'reference'):
         raise ValueError('fusion_pipeline supports reference/fusion profiles only')
     denoiser, lam = resolve_denoiser(denoiser, lam)
@@ -290,6 +294,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
                        'fusion_models.py', 'grouping.py', 'filters.py', 'pipeline.py', 'denoisers.py', 'semantic_repair.py',
                        '../denoise.py', '../l0_cuda.py', '../tiled_inference.py'])
     device = str(getattr(models, 'device', 'cpu'))
+    stage('candidate')
     denoiser_config = describe_denoiser(denoiser, device, sr_fn=sr_fn, downscale=downscale)
     l0_implementation = (json.loads(json.dumps(_l0_callable_signature(l0_fn), allow_nan=False))
                          if uses_l0(denoiser) else None)
@@ -303,6 +308,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
             if model_digest != denoiser_config['model']['expected_sha256']:
                 raise ValueError('Denoiser model checksum differs from configured model')
             input_snapshots[str(sr_model_path)] = model_digest
+    stage('analysis')
     parameters = {'profile': profile, 'lambda': float(lam), 'sigma_at_2048': float(sigma),
                   'strength': float(strength), 'device': device, 'models': str(models.signature),
                   'structure_protection': structure_protection, 'restoration_gain': restoration_gain,
@@ -375,6 +381,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         feather_radius=16 * scale, structure_radius=5 * scale, gradient_threshold=4,
         structure_protection=structure_protection)
     weight *= np.float32(strength); weight[weight < 1 / 255] = 0
+    stage('candidate')
     sr_hit = None; sr_identity = None; candidate_input = rgb
     if uses_sr(denoiser):
         sr_config = {key: value for key, value in denoiser_config.items() if key != 'method'}
@@ -411,11 +418,13 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         if model_digest != denoiser_config['model']['expected_sha256']:
             raise ValueError('Denoiser model changed while processing')
         input_snapshots.setdefault(str(sr_model_path), model_digest)
+    stage('compose')
     restored = gradient_preserving_candidate(rgb, candidate, effective_sigma,
                                              restoration_gain=restoration_gain)
     result = blend(rgb, restored, weight)
     if not np.array_equal(result[weight == 0], rgb[weight == 0]):
         raise AssertionError('Protected or W=0 pixels changed')
+    stage('encoding')
     folder.mkdir(parents=True, exist_ok=True)
     _save_rgb(folder / 'original.png', rgb, original_alpha, icc)
     _save_rgb(folder / 'result.png', result, original_alpha, icc)

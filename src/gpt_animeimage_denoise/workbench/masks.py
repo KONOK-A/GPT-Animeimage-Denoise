@@ -1,5 +1,6 @@
 """Replay workbench edits and compute blend weights on the oriented source grid."""
 from dataclasses import dataclass
+from itertools import groupby
 from math import ceil
 
 import numpy as np
@@ -8,6 +9,19 @@ from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 from ..editor import DEFAULT_MODULES, MODULES
 from ..filters import _compose_weight, _line_weight, build_weight, validate_unit_interval
+
+
+PART_CODES = {**MODULES, 'object': 7, 'unknown': 255}
+PART_ASSIGNMENT_TOOLS = ('classify', 'remove_part')
+STAGE_TOOLS = {'parts': (*PART_ASSIGNMENT_TOOLS, 'erase'),
+               'range': ('include', 'exclude', 'protect', 'mix', 'erase', 'invert', 'reset', 'resolve_unknown')}
+
+
+def part_ids(labels, objects, unknown):
+    ids = labels.copy()
+    ids[unknown] = PART_CODES['unknown']
+    ids[objects] = PART_CODES['object']
+    return ids
 
 
 @dataclass
@@ -21,6 +35,8 @@ class Selection:
     edit_feedback: dict | None = None
     has_local_mix: bool = False
     has_unclassified_selection: bool = False
+    fractional_range: bool = False
+    legacy_parts_overlay: bool = True
 
 
 class WorkbenchWeightCache:
@@ -113,6 +129,14 @@ def _rasterize(edit, shape):
     else:
         draw.point(local[0], fill=1)
     distance = distance_transform_edt(~np.asarray(image))
+    if 'stage' in edit:
+        feather = edit.get('feather', 0)
+        if (type(feather) not in (int, float) or not 0 <= feather <= radius):
+            raise ValueError('羽化须在零到笔刷半径之间。')
+        if feather == 0:
+            return tile, (distance <= radius).astype(np.float32)
+        edge = np.clip((radius - distance) / feather, 0, 1).astype(np.float32)
+        return tile, edge * edge * (3 - 2 * edge)
     if edit['tool'] not in ('protect', 'mix'):
         return tile, (distance <= radius).astype(np.float32)
     # Flat within half the radius, easing to zero at the visible brush outline.
@@ -120,20 +144,58 @@ def _rasterize(edit, shape):
     return tile, edge * edge * (3 - 2 * edge)
 
 
-def _selected(labels, auto_labels, geometry, blocked):
-    return ((np.isin(labels, auto_labels) & (geometry == 0)) | (geometry > 0)) & ~blocked
+class _Geometry:
+    """Manual geometry composites over the current automatic part selection."""
+
+    def __init__(self, shape):
+        self.hard = np.zeros(shape, np.int8)
+        self.alpha = self.include = None
+
+    def coverage(self, labels, auto_labels, tile):
+        auto = np.isin(labels, auto_labels)
+        if self.alpha is None:
+            marks = self.hard[tile]
+            return (auto & (marks == 0)) | (marks > 0)
+        return self.include[tile] + (1 - self.alpha[tile]) * auto
+
+    def marked(self, tile):
+        return self.hard[tile] != 0 if self.alpha is None else self.alpha[tile] > 0
+
+    def paint(self, tile, hits, direction, brush=None):
+        amount = brush[hits] if brush is not None else None
+        if amount is not None and np.any(amount != 1) and self.alpha is None:
+            self.alpha = (self.hard != 0).astype(np.float32)
+            self.include = (self.hard > 0).astype(np.float32)
+        if self.alpha is None:
+            self.hard[tile][hits] = direction
+        elif amount is None:
+            self.alpha[tile][hits] = int(direction != 0)
+            self.include[tile][hits] = int(direction > 0)
+        else:
+            inverse = 1 - amount
+            self.alpha[tile][hits] = self.alpha[tile][hits] * inverse + amount * (direction != 0)
+            self.include[tile][hits] = self.include[tile][hits] * inverse + amount * (direction > 0)
+
+    def reset(self):
+        self.hard.fill(0)
+        self.alpha = self.include = None
 
 
 def _plain_include_brush(edit):
     return (isinstance(edit, dict) and edit.get('tool') == 'include'
+            and edit.get('stage') in (None, 'range')
             and edit.get('shape', 'brush') == 'brush' and not edit.get('allow_protected', False))
 
 
 def _resolution_module(edit, previous):
     module = edit.get('module')
-    if (set(edit) - {'tool', 'module'} or not _plain_include_brush(previous)
-            or ('module' in edit and (not isinstance(module, str) or not MODULES.get(module)))):
+    if not _plain_include_brush(previous):
         raise ValueError('待确认处理必须紧接普通补选笔画，并指定有效部位或仅加入处理范围。')
+    if previous.get('stage') == 'range':
+        if edit != {'stage': 'range', 'tool': 'resolve_unknown'}:
+            raise ValueError('处理范围只支持加入这笔待确认像素。更改分类请在部位分区操作。')
+    elif set(edit) - {'tool', 'module'} or ('module' in edit and (not isinstance(module, str) or not MODULES.get(module))):
+        raise ValueError('请选择有效的部位或仅加入处理范围。')
     return module
 
 
@@ -153,6 +215,17 @@ def _region_factor(labels, selected, active, strengths, scale):
     np.divide(numerator, denominator, out=field, where=selected)
     np.clip(field, 0, 1, out=field)
     return field
+
+
+def _ordered_edits(edits, cursor):
+    # Old records retain their exact order and form boundaries. In the two-step
+    # editor, replay downstream strokes against the latest upstream classification.
+    prefix = enumerate(edits[:cursor], start=1)
+    for staged, records in groupby(prefix, lambda item: isinstance(item[1], dict) and 'stage' in item[1]):
+        if staged:
+            yield from sorted(records, key=lambda item: item[1]['stage'] != 'parts')
+        else:
+            yield from records
 
 
 def render_selection(editor, settings, edits, cursor, *, correction=None, object_mask=None, weight_cache=None):
@@ -175,9 +248,17 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
     transparent = editor.alpha == 0 if editor.alpha is not None else np.zeros_like(objects)
     predicted = editor.objects | editor.unknown
     marked_objects = np.zeros_like(objects)
-    geometry = np.zeros(labels.shape, np.int8)
+    geometry = _Geometry(labels.shape)
     protection = np.zeros(labels.shape, np.float32)
+    kinds = {(edit.get('stage'), edit.get('tool')) for edit in edits[:cursor] if isinstance(edit, dict)}
+    mix_protection = None
+    if ('range', 'protect') in kinds and any(tool == 'mix' for _, tool in kinds):
+        # Legacy absolute mixes intentionally ignored legacy soft protection.
+        # Only a mixed old/new history needs a second protection channel.
+        mix_protection = (np.zeros_like(protection) if correction is not None or (None, 'protect') in kinds
+                          else protection)
     unlocked = mix_alpha = mix_value = None
+    range_unlocked = None
     if correction is not None:
         if correction.get('sam_regions'):
             raise ValueError('Workbench import requires binary corrections without SAM prompts')
@@ -187,26 +268,36 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
             hits = mask & ~transparent & ~objects
             labels[hits] = MODULES[name]
             unknown[hits] = False
-        geometry[correction['allow_mask'] & ~transparent & ~objects & ~unknown] = 1
+        geometry.paint(..., correction['allow_mask'] & ~transparent & ~objects & ~unknown, 1)
         protection[correction['protect_mask'] & ~transparent] = 1
 
     edit_feedback = None
     skipped_by_brush = None
-    for index, edit in enumerate(edits[:cursor], start=1):
+    staged = False
+    for index, edit in _ordered_edits(edits, cursor):
         if not isinstance(edit, dict):
             raise ValueError('Invalid edit')
         tool = edit.get('tool')
+        stage = edit.get('stage')
+        staged |= stage is not None
+        if 'stage' in edit and (stage not in STAGE_TOOLS or tool not in STAGE_TOOLS[stage]):
+            raise ValueError('此工具不适用于当前编辑阶段。')
         if tool == 'resolve_unknown':
             module = _resolution_module(edit, edits[index - 2] if index > 1 else None)
-            tile, hits = skipped_by_brush
-            if module is not None:
+            tile, hits, brush = skipped_by_brush
+            if stage == 'range' and hits.any():
+                if range_unlocked is None:
+                    range_unlocked = np.zeros(labels.shape, bool)
+                range_unlocked[tile][hits] = True
+                geometry.paint(tile, hits, 1, brush)
+            elif module is not None:
                 labels[tile][hits] = MODULES[module]
                 unknown[tile][hits] = False
             elif hits.any():
                 if unlocked is None:
                     unlocked = np.zeros(labels.shape, bool)
                 unlocked[tile][hits] = True
-                geometry[tile][hits] = 1
+                geometry.paint(tile, hits, 1)
             continue
         if tool == 'sam_object':
             if object_mask is None:
@@ -220,28 +311,98 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
                 unlocked[hits] = False
             continue
         if tool == 'reset':
-            geometry.fill(0)
-            unlocked = None
+            geometry.reset()
+            unlocked = range_unlocked = None
             continue
         if tool == 'invert':
             blocked = objects | unknown
             if unlocked is not None:
                 blocked &= ~unlocked
+            if range_unlocked is not None:
+                blocked &= ~range_unlocked
             blocked |= transparent | (protection == 1)
-            selected = _selected(labels, auto_labels, geometry, blocked)
-            geometry[~blocked & ~selected] = 1
-            geometry[selected] = -1
+            coverage = geometry.coverage(labels, auto_labels, ...)
+            if stage == 'range' and geometry.include is not None:
+                geometry.alpha[~blocked] = 1
+                geometry.include[~blocked] = 1 - coverage[~blocked]
+            else:
+                selected = (coverage > 0) & ~blocked
+                geometry.paint(..., ~blocked & ~selected, 1)
+                geometry.paint(..., selected, -1)
             continue
-        if tool not in ('include', 'exclude', 'protect', 'mix', 'erase', 'override'):
+        if tool not in ('include', 'exclude', 'protect', 'mix', 'erase', 'override', *PART_ASSIGNMENT_TOOLS):
             raise ValueError('Unknown edit tool')
-        tile, brush = _rasterize(edit, labels.shape)
+        if edit.get('shape') == 'sam' and stage:
+            if object_mask is None:
+                raise ValueError('SAM2 选区缺少已保存的蒙版。')
+            outline = object_mask(edit['token'])
+            rows, columns = np.flatnonzero(outline.any(axis=1)), np.flatnonzero(outline.any(axis=0))
+            if not len(rows):
+                raise ValueError('保存的 SAM2 选区为空。')
+            tile = (slice(rows[0], rows[-1] + 1), slice(columns[0], columns[-1] + 1))
+            brush = outline[tile].astype(np.float32)
+        else:
+            tile, brush = _rasterize(edit, labels.shape)
         hits = (brush > 0) & ~transparent[tile]
+        if stage == 'parts':
+            # A semantic label is discrete. Use the midpoint of a feathered edge.
+            hits &= brush >= .5
+            skipped = 0
+            target = None
+            if tool == 'remove_part':
+                source = edit.get('module')
+                if not isinstance(source, str) or source not in PART_CODES or source == 'unknown':
+                    raise ValueError('请选择要移出的部位。')
+                hits &= part_ids(labels[tile], objects[tile], unknown[tile]) == PART_CODES[source]
+                target = 'unknown'
+            elif tool == 'classify':
+                target = edit.get('module')
+                if target not in PART_CODES:
+                    raise ValueError('请选择有效的分区类别。')
+                protected = edit.get('protected_parts')
+                if protected:
+                    source_parts = part_ids(labels[tile], objects[tile], unknown[tile])
+                    locked = np.isin(source_parts, [PART_CODES[part] for part in protected])
+                    if index == cursor:
+                        skipped = int(np.count_nonzero(hits & locked & (source_parts != PART_CODES[target])))
+                    hits &= ~locked
+            if unlocked is not None:
+                # Preserve an earlier range override separately when a legacy
+                # pixel gains an explicit, independently editable semantic label.
+                transfer = unlocked[tile] & hits
+                if transfer.any():
+                    if range_unlocked is None:
+                        range_unlocked = np.zeros(labels.shape, bool)
+                    range_unlocked[tile][transfer] = True
+                    unlocked[tile][transfer] = False
+            if target is not None:
+                label = 0 if target == 'object' else PART_CODES[target]
+                changed = hits & ((labels[tile] != label) | (objects[tile] != (target == 'object'))
+                                  | (unknown[tile] != (target == 'unknown')))
+                labels[tile][hits] = label
+                objects[tile][hits] = marked_objects[tile][hits] = target == 'object'
+                unknown[tile][hits] = target == 'unknown'
+            else:
+                changed = hits & ((labels[tile] != editor.labels[tile]) | (objects[tile] != editor.objects[tile])
+                                  | (unknown[tile] != editor.unknown[tile]) | marked_objects[tile])
+                labels[tile][hits] = editor.labels[tile][hits]
+                objects[tile][hits] = editor.objects[tile][hits]
+                unknown[tile][hits] = editor.unknown[tile][hits]
+                marked_objects[tile][hits] = False
+            if index == cursor:
+                count = int(changed.sum())
+                edit_feedback = {'tool': tool, 'changed_pixels': count,
+                                 'reason': 'changed' if count else 'protected' if skipped else 'no_marks'}
+                if skipped:
+                    edit_feedback['skipped_protected_pixels'] = skipped
+            continue
+        amount = brush if stage == 'range' else None
         if tool == 'erase':
             if index == cursor:
-                manual = ((geometry[tile] != 0) | (protection[tile] > 0)
-                          | (labels[tile] != editor.labels[tile])
-                          | (objects[tile] != editor.objects[tile])
-                          | (unknown[tile] != editor.unknown[tile]) | marked_objects[tile])
+                manual = geometry.marked(tile) | (protection[tile] > 0)
+                if stage is None:
+                    manual |= ((labels[tile] != editor.labels[tile]) | (objects[tile] != editor.objects[tile])
+                               | (unknown[tile] != editor.unknown[tile]) | marked_objects[tile])
                 if unlocked is not None:
                     manual |= unlocked[tile]
                 if mix_alpha is not None:
@@ -249,16 +410,24 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
                 changed = int(np.count_nonzero(hits & manual))
                 edit_feedback = {'tool': tool, 'changed_pixels': changed,
                                  'reason': 'changed' if changed else 'no_marks'}
-            geometry[tile][hits] = 0
-            protection[tile][hits] = 0
-            labels[tile][hits] = editor.labels[tile][hits]
-            objects[tile][hits] = editor.objects[tile][hits]
-            unknown[tile][hits] = editor.unknown[tile][hits]
-            marked_objects[tile][hits] = False
+            geometry.paint(tile, hits, 0, amount)
+            inverse = 0 if amount is None else 1 - amount[hits]
+            protection[tile][hits] *= inverse
+            if mix_protection is not None and mix_protection is not protection:
+                mix_protection[tile][hits] *= inverse
+            full = hits if amount is None else hits & (amount == 1)
+            if stage is None:
+                labels[tile][hits] = editor.labels[tile][hits]
+                objects[tile][hits] = editor.objects[tile][hits]
+                unknown[tile][hits] = editor.unknown[tile][hits]
+                marked_objects[tile][hits] = False
             if unlocked is not None:
-                unlocked[tile][hits] = False
+                unlocked[tile][full] = False
+            if range_unlocked is not None:
+                range_unlocked[tile][full] = False
             if mix_alpha is not None:
-                mix_alpha[tile][hits] = mix_value[tile][hits] = 0
+                mix_alpha[tile][hits] *= inverse
+                mix_value[tile][hits] *= inverse
         elif tool == 'override':
             name = edit.get('module')
             if not isinstance(name, str) or name not in MODULES or name == 'background':
@@ -274,12 +443,20 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
                 blocked = objects[tile] | unknown[tile]
                 if unlocked is not None:
                     blocked &= ~unlocked[tile]
+                if range_unlocked is not None:
+                    blocked &= ~range_unlocked[tile]
                 blocked |= ~hits | (protection[tile] == 1)
-                selected_before = _selected(labels[tile], auto_labels, geometry[tile], blocked)
-                changed = int(np.count_nonzero(selected_before))
+                before = geometry.coverage(labels[tile], auto_labels, tile)
+            geometry.paint(tile, hits, -1, amount)
+            if index == cursor:
+                after = geometry.coverage(labels[tile], auto_labels, tile)
+                reduced = (after < before) & ~blocked
+                changed = int(np.count_nonzero(reduced))
                 edit_feedback = {'tool': tool, 'changed_pixels': changed,
                                  'reason': 'changed' if changed else 'already_excluded'}
-            geometry[tile][hits] = -1
+                partial = int(np.count_nonzero(reduced & (after > 0)))
+                if edit.get('feather', 0) > 0:
+                    edit_feedback['partially_reduced_pixels'] = partial
         elif tool == 'include':
             allow_protected = edit.get('allow_protected', False)
             if type(allow_protected) is not bool:
@@ -287,6 +464,8 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
             model_blocked = objects[tile] | unknown[tile]
             if unlocked is not None:
                 model_blocked &= ~unlocked[tile]
+            if range_unlocked is not None:
+                model_blocked &= ~range_unlocked[tile]
             hits &= protection[tile] < 1
             skipped = None
             if (_plain_include_brush(edit) and (index == cursor or
@@ -294,19 +473,26 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
                 skipped = hits & unknown[tile] & ~objects[tile]
                 if unlocked is not None:
                     skipped &= ~unlocked[tile]
-                skipped_by_brush = (tile, skipped)
+                if range_unlocked is not None:
+                    skipped &= ~range_unlocked[tile]
+                skipped_by_brush = (tile, skipped, brush)
             already_writable = hits & ~model_blocked
             if allow_protected:
                 hits &= ~marked_objects[tile]
                 new_unlock = hits & model_blocked
                 if new_unlock.any():
-                    if unlocked is None:
-                        unlocked = np.zeros(labels.shape, bool)
-                    unlocked[tile][new_unlock] = True
+                    if stage == 'range':
+                        if range_unlocked is None:
+                            range_unlocked = np.zeros(labels.shape, bool)
+                        range_unlocked[tile][new_unlock] = True
+                    else:
+                        if unlocked is None:
+                            unlocked = np.zeros(labels.shape, bool)
+                        unlocked[tile][new_unlock] = True
             else:
                 hits = already_writable
             if index == cursor:
-                selected_before = _selected(labels[tile], auto_labels, geometry[tile], ~already_writable)
+                selected_before = (geometry.coverage(labels[tile], auto_labels, tile) >= 1) & already_writable
                 writable = int(np.count_nonzero(hits))
                 changed = writable - int(np.count_nonzero(selected_before))
                 edit_feedback = {'tool': tool, 'changed_pixels': changed,
@@ -314,12 +500,14 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
                 skipped_count = int(np.count_nonzero(skipped)) if skipped is not None else 0
                 if skipped_count:
                     edit_feedback['skipped_unknown_pixels'] = skipped_count
-            geometry[tile][hits] = 1
+            geometry.paint(tile, hits, 1, amount)
         elif tool == 'mix':
             original = validate_unit_interval(edit.get('strength', .9), 'original fraction')
             blocked = objects[tile] | unknown[tile]
             if unlocked is not None:
                 blocked &= ~unlocked[tile]
+            if range_unlocked is not None:
+                blocked &= ~range_unlocked[tile]
             hits &= ~blocked & (protection[tile] < 1)
             if hits.any():
                 if mix_alpha is None:
@@ -333,15 +521,26 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
         else:
             opacity = validate_unit_interval(edit.get('strength', .9), 'brush protection')
             marks = protection[tile]
-            marks[hits] = np.maximum(marks[hits], brush[hits] * np.float32(opacity))
+            amount = brush[hits] * np.float32(opacity)
+            marks[hits] = np.maximum(marks[hits], amount)
+            if stage == 'range' and mix_protection is not None and mix_protection is not protection:
+                marks = mix_protection[tile]
+                marks[hits] = np.maximum(marks[hits], amount)
 
     unclassified = None
     if unlocked is not None:
         unclassified = unknown & unlocked
         objects &= ~unlocked
         unknown &= ~unlocked
-    blocked = transparent | objects | unknown | (protection == 1)
-    selected = _selected(labels, auto_labels, geometry, blocked)
+    blocked = objects | unknown
+    if range_unlocked is not None:
+        blocked &= ~(range_unlocked & ~marked_objects)
+    blocked |= transparent | (protection == 1)
+    fraction = geometry.coverage(labels, auto_labels, ...)
+    if range_unlocked is not None and geometry.include is not None:
+        lifted = range_unlocked & (objects | unknown)
+        fraction[lifted] = geometry.include[lifted]
+    selected = (fraction > 0) & ~blocked
     scale = min(labels.shape) / 2048
     if weight_cache is None:
         weight = build_weight(selected, blocked, editor.rgb, feather_radius=16 * scale,
@@ -358,15 +557,29 @@ def render_selection(editor, settings, edits, cursor, *, correction=None, object
     if mix_alpha is not None:
         mixed = selected & (mix_alpha > 0)
         has_local_mix = bool(mixed.any())
-        weight[mixed] = (1 - mix_alpha[mixed]) * weight[mixed] + mix_value[mixed]
+        target = mix_value[mixed]
+        if mix_protection is not None:
+            target *= 1 - mix_protection[mixed]
+        weight[mixed] = (1 - mix_alpha[mixed]) * weight[mixed] + target
         # Floating-point compositing can overshoot by a few ulps.
         np.clip(weight, 0, 1, out=weight)
+    fractional = geometry.alpha is not None and bool(((fraction > 0) & (fraction < 1) & selected).any())
+    if fractional:
+        weight *= fraction
     return Selection(weight, labels, objects, unknown, protection, selected, edit_feedback,
-                     has_local_mix, unclassified is not None and bool((unclassified & selected).any()))
+                     has_local_mix, unclassified is not None and bool((unclassified & selected).any()), fractional,
+                     not staged)
 
 
 def binary_corrections(editor, selection, settings):
     """Translate exactly representable workbench masks to CLI version 2."""
+    if selection.fractional_range:
+        raise ValueError('CLI 二值校正无法表示带羽化的处理范围。')
+    if np.any(selection.selected & (selection.objects | selection.unknown)):
+        raise ValueError('CLI 二值校正无法在保留外物或待确认标签的同时处理这些像素。')
+    if np.any((selection.unknown & ~editor.unknown) | ((selection.labels == 0) & ~selection.objects
+              & ((editor.labels != 0) | editor.unknown))):
+        raise ValueError('CLI 二值校正无法表示此次背景或待确认分类。')
     if selection.has_local_mix:
         raise ValueError('CLI edits cannot represent local mixing')
     if selection.has_unclassified_selection:

@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 import tempfile
+from time import monotonic, sleep
 import unittest
 from unittest import mock
 
@@ -20,6 +22,9 @@ class WorkbenchSessionTest(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        settings = mock.patch.dict(os.environ, GAID_WORKBENCH_SETTINGS=str(self.root / 'preferences.json'))
+        settings.start()
+        self.addCleanup(settings.stop)
         self.source = self.root / 'input.png'
         self.rgb = np.full((32, 40, 3), 96, np.uint8)
         self.alpha = np.full((32, 40), 255, np.uint8)
@@ -29,14 +34,65 @@ class WorkbenchSessionTest(unittest.TestCase):
         self.models = Models()
         self.models.release = mock.Mock()
 
-    def open_session(self, workspace=None):
+    def open_session(self, workspace=None, **options):
         from gpt_animeimage_denoise.workbench.session import WorkbenchSession
 
         with mock.patch('gpt_animeimage_denoise.fusion_models.FusionModels', return_value=self.models), \
              mock.patch.object(fusion_pipeline, 'fuse_evidence', side_effect=regions), \
              mock.patch.object(fusion_pipeline, 'refine_regions', side_effect=lambda rgb, ev, reg, models, **_: reg), \
              mock.patch.object(fusion_pipeline, 'smooth_candidate', return_value=self.baseline):
-            return WorkbenchSession.open(self.source, workspace or self.root / 'work', device='cpu')
+            return WorkbenchSession.open(self.source, workspace or self.root / 'work', device='cpu', **options)
+
+    def test_workbench_resumes_a_legacy_case_with_no_completed_report(self):
+        legacy = self.open_session(self.root / 'cases')
+        (legacy.case_dir / 'report.json').unlink()
+        notes = legacy.case_dir / 'notes.txt'
+        notes.write_text('keep', encoding='utf-8')
+        opener = mock.Mock(return_value=legacy)
+        with Documents(self.root, opener) as docs:
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            doc, revision = opened['id'], opened['revision']
+            test_workbench_documents.DocumentsTest.ready(self, doc, revision, docs=docs)
+            opener.assert_called_once()
+            self.assertGreater(docs.cache_info()['bytes'], 0)
+            self.assertEqual(docs.clear_cache()['bytes'], 0)
+            self.assertEqual(notes.read_text(encoding='utf-8'), 'keep')
+            self.assertTrue(docs.asset(doc, 'b', revision=revision, download=True).startswith(b'\x89PNG'))
+
+    def test_first_denoiser_failure_identifies_the_candidate_stage(self):
+        model_path = self.root / 'esrgan.pth'
+        model_path.write_bytes(b'fixture with an invalid checksum')
+        identity = {'method': 'esrgan', 'model': {'path': str(model_path), 'expected_sha256': '0' * 64}}
+        with mock.patch('gpt_animeimage_denoise.fusion_models.FusionModels', return_value=self.models), \
+             mock.patch.object(fusion_pipeline, 'describe_denoiser', return_value=identity), \
+             Documents(self.root / 'workbench') as docs:
+            docs.change_preferences({'defaults': {'method': 'esrgan'}})
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                state = docs.get(opened['id'])
+                if state['status'] == 'error':
+                    break
+                sleep(.01)
+            self.assertEqual(state['status'], 'error')
+            self.assertIn('Denoiser model checksum', state['error'])
+            self.assertEqual(state['failed_phase'], 'candidate')
+
+    def test_non_l0_default_generates_its_candidate_once_and_skips_l0(self):
+        from gpt_animeimage_denoise.workbench import session as workbench_session
+
+        sr = np.full(self.rgb.shape, 179, np.uint8)
+        identity = {'method': 'esrgan', 'model': {'path': str(self.root / 'mock-model'), 'expected_sha256': '0' * 64}}
+        with mock.patch.object(fusion_pipeline, 'describe_denoiser', return_value=identity), \
+             mock.patch.object(fusion_pipeline, 'super_resolve', return_value=sr) as generate, \
+             mock.patch.object(workbench_session, 'super_resolve', side_effect=AssertionError('duplicate SR')), \
+             mock.patch.object(workbench_session, 'smooth_candidate', side_effect=AssertionError('unwanted L0')):
+            session = self.open_session(method='esrgan', downscale=.75)
+            report = json.loads((session.case_dir / 'report.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['parameters']['denoiser'], 'esrgan')
+            self.assertFalse(report['parameters']['l0_enabled'])
+            np.testing.assert_array_equal(session.candidate('esrgan', downscale=.75), sr.astype(np.float32) / 255)
+            generate.assert_called_once()
 
     def test_magnetic_source_uses_verified_l0_cache_after_reopen(self):
         session = self.open_session(self.root / 'cases')
