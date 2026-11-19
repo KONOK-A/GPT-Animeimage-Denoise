@@ -51,7 +51,7 @@ py -3.12 -m venv .venv
 
 调用时一起给出原图和处理要求，例如「给 `D:\images\插画.png` 去鱼鳞纹，尽量保留发丝和背景，交付原尺寸 PNG」。也可以使用同一会话中生图工具返回的原图。默认结果位于调用时的工作目录下的 `outputs/agent-denoise/`。
 
-在安装命令末尾加 `--agent codex` 或 `--agent claude` 可选择客户端。安装会记录 GAID 路径、所用的 Python 和模型目录，支持 [复用本机模型](docs/models.md#复用本机模型)。移动项目、更换环境或更新 skill 后，重新运行安装命令。
+在安装命令末尾加 `--agent codex` 或 `--agent claude` 可选择客户端。安装会记录 GAID 路径、所用的 Python 和模型目录，支持 [复用本机模型](docs/models.md#复用本机模型)。移动项目后，先按[安装步骤](#安装)在新位置重建 Python 环境，再重新安装 skill。更换已可用的环境、模型目录或更新 skill 时，重新运行 skill 安装命令。
 
 维护时以 [`.agents` 中的 SKILL.md](.agents/skills/gpt-animeimage-denoise/SKILL.md) 为源文件。更新后在项目根目录同步 [Claude Code 项目入口](.claude/skills/gpt-animeimage-denoise/SKILL.md)。
 

@@ -21,12 +21,12 @@ description: Use the local GPT AnimeImage Denoise tool to reduce fish-scale arti
 
 遇到模型缺失或校验失败时，查阅 GAID 仓库的 `docs/models.md`。分区模型完整下载约 3.3 GB。
 
-默认纯 L0（`0.0005`）处理皮肤、面部和头发，保留选区外的像素。按用户指定的输出位置保存，每次处理使用独立目录，原图保持原位。以下 PowerShell 7 示例通过已定位的 Python 以 UTF-8 调用 `gaid`，在当前任务目录的 `outputs/agent-denoise/` 下创建案例。将示例中的三个路径替换为实际值。
+默认纯 L0（`0.0005`）处理皮肤、面部和头发，保留选区外的像素。按用户指定的输出位置保存，每次处理使用独立目录，原图保持原位。以下 PowerShell 7 示例通过已定位的 Python 以 UTF-8 调用 `gaid`，在当前任务目录的 `outputs/agent-denoise/` 下创建案例。加上 Python 的 `-P` 参数，避免任务目录里的同名文件影响模块加载。将示例中的三个路径替换为实际值。
 
 ```powershell
 $python = '<已定位的 GAID Python 绝对路径>'
 $gaidModels = '<已定位的模型目录绝对路径>'
-$gaidArgs = @('-X', 'utf8', '-m', 'gpt_animeimage_denoise.cli')
+$gaidArgs = @('-P', '-X', 'utf8', '-m', 'gpt_animeimage_denoise.cli')
 $source = (Resolve-Path -LiteralPath 'D:\images\原图.png').Path
 $runDir = Join-Path (Get-Location).Path ('outputs\agent-denoise\' + [guid]::NewGuid().ToString('N'))
 $previousModelDir = $env:GPT_ANIMEIMAGE_DENOISE_MODEL_DIR
@@ -73,4 +73,4 @@ $result = Join-Path $case.output 'result.png'
 
 命令行处理或预览时核对单图状态 `complete`，工作台导出时确认当前成品 B 已更新。给出选定的原尺寸 PNG 路径或可点击链接，说明处理的部位和采用的设置。若只能检查文件和权重，或某处仍有明显纹理，说明实际核对范围和剩余问题。默认保留源文件和案例，用户需要时再附报告和权重图。
 
-用户明确希望整图平滑时，先检查源图的 EXIF 方向。带旋转或镜像方向标记时，用 `PIL.ImageOps.exif_transpose` 将方向写入像素并另存副本，再把副本作为输入。用同一个解释器调用整图入口 `& $python -X utf8 -m denoise $source --out $runDir --method l0_0.0005`，无需分区和超分模型。输出 `<输入文件名去掉扩展名>_l0_0.0005.png` 后，核对宽高与定向后的原图一致。此方法输出 RGB，去掉透明通道和 ICC。整图处理仍需保留这些信息时，在工作台手动设定处理范围并导出。其他参数见 GAID 仓库的 `docs/cli.md`。
+用户明确希望整图平滑时，先检查源图的 EXIF 方向。带旋转或镜像方向标记时，用 `PIL.ImageOps.exif_transpose` 将方向写入像素并另存副本，再把副本作为输入。用同一个解释器调用整图入口 `& $python -P -X utf8 -m denoise $source --out $runDir --method l0_0.0005`，无需分区和超分模型。输出 `<输入文件名去掉扩展名>_l0_0.0005.png` 后，核对宽高与定向后的原图一致。此方法输出 RGB，去掉透明通道和 ICC。整图处理仍需保留这些信息时，在工作台手动设定处理范围并导出。其他参数见 GAID 仓库的 `docs/cli.md`。
