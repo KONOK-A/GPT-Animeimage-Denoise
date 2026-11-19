@@ -65,9 +65,12 @@ function installDockableTools({ workspace, stage, toolbar, grip, compact }) {
     }
     const area = drag.area;
     const x = event.clientX - area.originX, y = event.clientY - area.originY;
-    drag.snap = compact.matches ? y <= area.top + snapDistance : x <= area.left + snapDistance;
-    if (drag.snap) stage.dataset.toolsDock = 'true';
-    else delete stage.dataset.toolsDock;
+    const snap = compact.matches ? y <= area.top + snapDistance : x <= area.left + snapDistance;
+    if (snap !== drag.snap) {
+      drag.snap = snap;
+      if (snap) stage.dataset.toolsDock = 'true';
+      else delete stage.dataset.toolsDock;
+    }
     place({ x: x - drag.offsetX, y: y - drag.offsetY }, area);
   }
   grip.addEventListener('pointermove', move);

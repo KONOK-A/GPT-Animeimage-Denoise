@@ -34,6 +34,11 @@ class Element {
   checkValidity() { return true; }
   reportValidity() { return this.checkValidity(); }
   setPointerCapture() {}
+  animate(frames, timing) {
+    const animation = { frames, timing, cancel() { this.cancelled = true; } };
+    (this.animations ||= []).push(animation);
+    return animation;
+  }
   focus() { this.focused = true; }
   fire(type, event = {}) { return this.handlers.get(type)?.({ target: this, type, ...event }); }
   getBoundingClientRect() { return { left: 100, top: 50, width: this.clientWidth, height: this.clientHeight }; }
@@ -62,13 +67,13 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-function harness({ theme, prefersDark = false, draftLink } = {}) {
+function harness({ theme, prefersDark = false, prefersReducedMotion = false, draftLink } = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const nodes = {};
   for (const [key, values] of [
     ['view', [...html.matchAll(/<button data-view="([^"]+)"/g)].map(([, view]) => view)],
     ['tool', [...html.matchAll(/<button data-tool="([^"]+)"/g)].map(([, tool]) => tool)],
-    ['mode', ['review', 'flow']],
+    ['mode', [...html.matchAll(/<button\b[^>]*\bdata-mode="([^"]+)"/g)].map(([, mode]) => mode)],
     ['scope', ['auto', 'empty', 'all']], ['theme-option', ['system', 'light', 'dark']],
   ]) {
     nodes[key] = values.map(value => {
@@ -103,8 +108,9 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
     ready: () => { doc = { ...doc, status: 'ready', b: { revision: doc.revision, method: doc.settings.method } }; },
   };
   const body = new Element('body'), win = new Element();
-  const root = new Element('html'), scheme = new Element(), compact = new Element();
+  const root = new Element('html'), scheme = new Element(), compact = new Element(), motion = new Element();
   compact.matches = false;
+  motion.matches = prefersReducedMotion;
   if (theme) root.dataset.themePreference = theme;
   scheme.matches = prefersDark;
   const storage = new Map();
@@ -125,10 +131,11 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
       location: { origin: 'http://127.0.0.1:1790', pathname: '/', search: '', hash: draftLink ? '#draft=' + draftLink : '' },
       history: { replaceState: (...args) => { api.lastHistoryReplace = args; } },
       close: () => { win.closed = true; },
-      matchMedia: query => query.includes('color-scheme') ? scheme : compact,
+      matchMedia: query => query.includes('color-scheme') ? scheme : query.includes('reduced-motion') ? motion : compact,
       localStorage: { setItem: (key, value) => preferences.set(key, value), removeItem: key => preferences.delete(key) },
       sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     }, file,
+    getComputedStyle: () => ({ getPropertyValue: () => 'cubic-bezier(0.23, 1, 0.32, 1)' }),
     Image: class {
       constructor() { this.naturalWidth = 640; this.naturalHeight = 480; }
       async decode() { await api.beforeDecode?.(this.src); }
@@ -701,7 +708,7 @@ test('brush mode has explicit controls and only fetches the visible mask after e
   assert.ok(legacyLegend, 'a composite weight preview has its own legend');
   assert.equal(legacyLegend.hidden, false);
   assert.equal(h.elements.get('weight-ramp').hidden, true);
-  assert.match(h.elements.get('status').textContent, /范围已更新/);
+  assert.match(h.elements.get('status-message').textContent, /范围已更新/);
   h.run("selectMode('review')");
   await tick();
   assert.equal(h.run('state.tool'), 'pan');
@@ -736,7 +743,7 @@ test('suspected objects load on demand and keep part edits in the overlay view',
   assert.ok(h.api.requests.some(item => item.route.endsWith('/image?view=suspected_objects&revision=0')));
   assert.equal(h.elements.get('suspected-objects-legend').hidden, false);
   assert.equal(h.elements.get('overlay-legend').hidden, true);
-  assert.match(h.elements.get('status').textContent, /疑似外物已显示/);
+  assert.match(h.elements.get('status-message').textContent, /疑似外物已显示/);
   stroke(h, [[200, 120]]);
   assert.equal(h.run('state.draft.cursor'), 0);
   assert.equal(h.run('state.view'), 'suspected_objects');
@@ -891,7 +898,7 @@ test('the comparison can switch between original and pinned A and remember the c
   await tick();
   assert.equal(group.hidden, false);
   assert.equal(pinned['aria-pressed'], 'true');
-  assert.match(h.elements.get('left-badge').textContent, /^A  /);
+  assert.match(h.elements.get('left-badge').textContent, /^对照 A · /);
   h.run('zoomTo(1.6); state.split = .37; draw()');
   const viewport = h.run('JSON.stringify([state.zoom, state.fit, state.panX, state.panY, state.split])');
   original.click();
@@ -905,7 +912,7 @@ test('the comparison can switch between original and pinned A and remember the c
   assert.equal(h.elements.get('left-badge').textContent, '原图');
   pinned.click();
   await tick();
-  assert.match(h.elements.get('left-badge').textContent, /^A  /);
+  assert.match(h.elements.get('left-badge').textContent, /^对照 A · /);
   assert.equal(h.api.requests.filter(item => item.route.endsWith('/pin')).length, 1);
 });
 
@@ -953,7 +960,7 @@ for (const [mode, editable] of [['parts', 'parts'], ['range', 'weight']]) {
 
     h.run("selectMode('review')");
     await tick();
-    assert.match(h.elements.get('left-badge').textContent, /^A  /);
+    assert.match(h.elements.get('left-badge').textContent, /^对照 A · /);
     h.run(`selectMode('${mode}'); selectView('compare')`);
     assert.equal(h.elements.get('left-badge').textContent, '原图');
   });
@@ -1619,6 +1626,76 @@ test('clicking the starting anchor closes directly without appending the last ho
     [[300, 200], [320, 255], [355, 262]]);
 });
 
+test('first B signals readiness once after its decoded frame is displayed, with immediate export', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const waitForB = deferred();
+  h.api.beforeDecode = url => url.endsWith('view=b&revision=0') ? waitForB.promise : undefined;
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  const dot = h.elements.get('status-dot');
+  assert.equal((dot.animations || []).length, 0);
+  assert.equal(h.elements.get('download').disabled, true);
+
+  waitForB.resolve();
+  await tick();
+  assert.equal(h.elements.get('download').disabled, false);
+  assert.equal(dot.animations.length, 1);
+  assert.equal(dot.animations[0].timing.duration, 150);
+  h.run('refresh(); refresh()');
+  assert.equal(dot.animations.length, 1);
+
+  h.run("choosePreset('soft')");
+  await h.run('saveDraft()');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(dot.animations.length, 1);
+  await h.run("openRecent('source')");
+  await tick();
+  assert.equal(dot.animations.length, 1);
+});
+
+test('a pointer pin signals success only after the matching A is displayed', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  const waitForA = deferred();
+  h.api.beforeDecode = url => url.endsWith('view=a&revision=0') ? waitForA.promise : undefined;
+  await h.elements.get('pin').fire('click', { detail: 1 });
+  await tick();
+  const icon = h.elements.get('pin-icon');
+  assert.equal((icon.animations || []).length, 0);
+  waitForA.resolve();
+  await tick();
+  assert.equal(icon.animations.length, 1);
+  assert.equal(icon.animations[0].timing.duration, 140);
+  await h.elements.get('pin').fire('click', { detail: 0 });
+  await tick();
+  assert.equal(icon.animations.length, 1);
+});
+
+test('pointer disclosure uses reduced-motion opacity and keyboard disclosure stays native', async () => {
+  const h = harness({ prefersReducedMotion: true });
+  await tick();
+  const trigger = h.elements.get('recent-toggle'), menu = h.elements.get('recent-menu');
+  trigger.fire('click', { detail: 0, preventDefault() { assert.fail('keyboard disclosure must remain native'); } });
+  assert.equal((menu.animations || []).length, 0);
+  trigger.fire('click', { detail: 1, preventDefault() {} });
+  assert.equal(h.elements.get('recent-panel').open, true);
+  const [entry] = menu.animations;
+  assert.equal(entry.timing.duration, 80);
+  assert.ok(entry.frames.every(frame => !Object.hasOwn(frame, 'transform')));
+  h.elements.get('recent-panel').open = false;
+  h.elements.get('recent-panel').fire('toggle');
+  assert.equal(entry.cancelled, true);
+});
+
 test('new B cannot be exported or pinned until its decoded frame replaces the old preview', async () => {
   const h = harness();
   await tick();
@@ -1686,7 +1763,7 @@ test('selection previews advance during encoding and never unlock a result that 
   await tick();
   assert.equal(h.run("viewAsset('parts').revision"), 2);
   assert.equal(h.run("viewAsset('parts').cursor"), 2);
-  assert.match(h.elements.get('status').textContent, /分区已更新.*成品 B/);
+  assert.match(h.elements.get('status-message').textContent, /分区已更新.*成品 B/);
   assert.equal(h.run('state.doc.b.revision'), 0);
   old.resolve();
   await tick();
@@ -1694,7 +1771,7 @@ test('selection previews advance during encoding and never unlock a result that 
   h.run("selectMode('range')");
   await tick();
   assert.equal(h.run("viewAsset('weight').revision"), 2);
-  assert.match(h.elements.get('status').textContent, /范围已更新.*成品 B/);
+  assert.match(h.elements.get('status-message').textContent, /范围已更新.*成品 B/);
 
   h.run("selectMode('review')");
   await h.run('download()');
@@ -2014,7 +2091,7 @@ test('manual scope, deliberate override and typed local retention are separate e
   h.run("selectMode('range'); chooseScope('empty'); selectTool('include')");
   assert.equal(h.run('state.draft.settings.modules.length'), 0);
   assert.equal(h.run('state.view'), 'weight');
-  assert.equal(h.elements.get('review-inspector').hidden, true);
+  assert.equal(h.elements.get('review-actions').hidden, true);
   assert.equal(h.elements.get('range-inspector').hidden, false);
   h.elements.get('allow-protected').checked = true;
   stroke(h, [[190, 125]]);
@@ -2033,6 +2110,31 @@ test('manual scope, deliberate override and typed local retention are separate e
   assert.equal(payload.edits[1].tool, 'mix');
   assert.equal(payload.edits[1].strength, .675);
   assert.equal(payload.edits[2].tool, 'exclude');
+});
+
+test('review leaves the canvas full width and editor shortcuts switch nodes in place', async () => {
+  const h = harness();
+  await tick();
+  assert.equal(h.elements.get('workspace-modes').hidden, true);
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.elements.get('inspector').hidden, true);
+  assert.equal(h.elements.get('review-actions').hidden, false);
+  assert.equal(h.elements.get('pin').disabled, false);
+
+  h.elements.get('node-parts').click();
+  h.run('zoomTo(2, 350, 275)');
+  const viewport = h.run('JSON.stringify([state.zoom, state.panX, state.panY])');
+  assert.equal(h.elements.get('node-switcher').hidden, false);
+  assert.equal(h.elements.get('inspector').hidden, false);
+  const range = h.nodes.mode.find(button => button.dataset.mode === 'range');
+  range.click();
+  assert.equal(h.run('state.mode'), 'range');
+  assert.equal(h.run('state.view'), 'weight');
+  assert.equal(range['aria-pressed'], 'true');
+  assert.equal(h.run('JSON.stringify([state.zoom, state.panX, state.panY])'), viewport);
 });
 
 
@@ -2386,7 +2488,7 @@ test('part eyes hide independently of classification and ignore outdated filtere
   hair.click();
   await tick();
   assert.equal(h.run("visibleImage('parts')?.src"), displayed);
-  assert.match(h.elements.get('status').textContent, /正在更新分区显示/);
+  assert.match(h.elements.get('status-message').textContent, /正在更新分区显示/);
   skin.click();
   await tick();
   assert.equal(hair['aria-pressed'], 'false');
@@ -2573,7 +2675,7 @@ test('a processing failure links to its stage and offers a retry without enablin
   await h.run('openFile(file)');
   h.api.mutate({ status: 'error', phase: 'error', failed_phase: 'candidate', error: '模型计算失败' });
   await h.run('pollDocument()');
-  assert.match(h.elements.get('status').textContent, /降噪效果失败/);
+  assert.match(h.elements.get('status-message').textContent, /降噪效果失败/);
   assert.equal(h.elements.get('retry').hidden, false);
   assert.equal(h.elements.get('download').disabled, true);
   h.elements.get('error-node').click();

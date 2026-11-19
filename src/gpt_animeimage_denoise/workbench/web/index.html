@@ -65,7 +65,7 @@
         <button id="open" class="button" type="button" title="打开图片（Ctrl+O）" aria-keyshortcuts="Control+O Meta+O" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
         <details id="recent-panel" class="popover">
           <summary id="recent-toggle" class="button"><svg aria-hidden="true"><use href="#icon-recent"/></svg>近期</summary>
-          <div class="recent-menu">
+          <div id="recent-menu" class="recent-menu">
             <h2 id="recent-heading">近期图片</h2>
             <div id="recent" class="recent-list" role="group" aria-labelledby="recent-heading"><p class="recent-message">正在读取近期图片…</p></div>
           </div>
@@ -83,17 +83,17 @@
         <summary id="theme-toggle" class="button theme-toggle" aria-label="外观，跟随系统" title="外观">
           <svg aria-hidden="true"><use id="theme-icon" href="#icon-system"/></svg>
         </summary>
-        <div class="theme-list" role="group" aria-label="外观偏好">
+        <div id="theme-menu" class="theme-list" role="group" aria-label="外观偏好">
           <button type="button" data-theme-option="system" aria-pressed="true"><svg aria-hidden="true"><use href="#icon-system"/></svg>跟随系统</button>
           <button type="button" data-theme-option="light" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-sun"/></svg>浅色</button>
           <button type="button" data-theme-option="dark" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-moon"/></svg>深色</button>
         </div>
       </details>
-      <div class="top-export">
+      <div id="export-actions" class="top-export" hidden>
         <button id="download" class="button primary" type="button" aria-keyshortcuts="Control+S Meta+S" disabled><svg aria-hidden="true"><use href="#icon-download"/></svg><span>导出 PNG</span></button>
         <details id="export-panel" class="popover export-panel" hidden>
-          <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
-          <div class="export-list">
+          <summary id="more-actions" class="button" aria-label="更多导出选项"></summary>
+          <div id="export-menu" class="export-list">
             <button id="download-a" type="button" disabled>导出固定方案 A</button>
             <button id="correction-export" type="button" disabled>导出命令行校正</button>
             <button id="correction-import" type="button" disabled>导入命令行校正</button>
@@ -105,16 +105,21 @@
   </header>
   <main id="workspace" class="workspace">
     <div class="workspace-navigation">
-      <nav id="workspace-modes" class="workspace-modes" aria-label="工作台视图">
-        <button id="back-to-flow" class="node-back" type="button" title="返回编辑流程（F）" hidden>返回流程</button>
-        <h1 id="node-title" class="node-title" aria-current="page" tabindex="-1" hidden></h1>
+      <nav id="workspace-modes" class="workspace-modes" aria-label="工作台视图" hidden>
+        <button id="back-to-flow" class="node-back" type="button" aria-label="返回编辑流程" title="返回编辑流程（F）" hidden>流程</button>
+        <h1 id="node-title" class="visually-hidden" tabindex="-1" hidden></h1>
         <button type="button" data-mode="review" aria-pressed="true" title="成品检查（R）" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品检查</button>
         <button type="button" data-mode="flow" aria-pressed="false" title="编辑流程（F）" disabled><svg aria-hidden="true"><use href="#icon-flow"/></svg>编辑流程</button>
+        <div id="node-switcher" class="node-switcher" role="group" aria-label="切换编辑节点" hidden>
+          <button type="button" data-mode="parts" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-parts"/></svg>部位分区</button>
+          <button type="button" data-mode="range" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-range"/></svg>处理范围</button>
+          <button type="button" data-mode="effect" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-effect"/></svg>降噪效果</button>
+        </div>
         <button id="inspector-toggle" type="button" aria-controls="inspector" aria-expanded="false">参数</button>
       </nav>
       <div class="statusbar">
         <div class="status-group">
-          <span id="status" role="status" data-tone="pending">正在连接本机服务…</span>
+          <span id="status" role="status" data-tone="pending"><span id="status-dot" aria-hidden="true"></span><span id="status-message">正在连接本机服务…</span></span>
           <button id="retry" type="button" hidden>重试</button>
           <button id="error-node" type="button" hidden></button>
           <button id="conflict-local" type="button" hidden>保留本页修改</button>
@@ -222,13 +227,13 @@
           <div class="drop-zone">
             <div class="opening-icon" aria-hidden="true"><svg class="opening-glyph" viewBox="0 0 60 48"><use href="#icon-image"/></svg></div>
             <h1 id="empty-title">拖入图片开始精修</h1>
-            <p id="empty-help">也可以按 <kbd>Ctrl</kbd> <kbd>V</kbd> 粘贴剪贴板中的图片</p>
+            <p id="empty-help">也可以按 <kbd>Ctrl</kbd> <kbd>V</kbd> 粘贴图片</p>
             <button id="empty-open" class="button primary" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>选择图片</button>
             <small>PNG、JPEG、WebP、BMP、TIFF</small>
           </div>
         </div>
         <div id="compare-badges" class="compare-badges" hidden>
-          <span id="left-badge">原图</span><span id="right-badge">方案 B</span>
+          <span id="left-badge">原图</span><span id="right-badge">成品 B</span>
         </div>
         <button id="divider" class="divider" type="button" role="slider" aria-label="对比分割位置" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span><svg aria-hidden="true"><use href="#icon-split"/></svg></span></button>
         <div id="overlay-legend" class="overlay-legend" hidden>
@@ -255,6 +260,11 @@
         <div id="history-location-label" class="history-location-label" hidden>虚线 · 这次操作的位置</div>
       </div>
       <div id="viewer-footer" class="viewer-footer" hidden>
+        <div id="review-actions" class="review-actions" hidden>
+          <button id="pin" type="button" title="把画布上已显示的成品 B 固定为对照 A" disabled>
+            <svg id="pin-icon" aria-hidden="true"><use href="#icon-pin"/></svg><span id="pin-label">固定为对照 A</span>
+          </button>
+        </div>
         <div class="zoom-tools" id="zoom-tools" role="group" aria-label="缩放" hidden>
           <button id="zoom-out" type="button" aria-label="缩小" title="缩小（-）" disabled>−</button>
           <output id="zoom-level" aria-label="缩放比例">—</output>
@@ -272,25 +282,6 @@
     <aside id="inspector" class="inspector" aria-label="当前模式的设置" hidden>
       <div class="inspector-mobile-heading"><strong id="drawer-title">参数</strong><button id="drawer-close" type="button" aria-label="关闭参数面板">×</button></div>
       <div class="inspector-scroll">
-        <section id="review-inspector" aria-label="检查成品">
-          <div class="panel comparison-panel">
-            <div class="section-heading"><svg aria-hidden="true"><use href="#icon-compare"/></svg><h2>对照方案</h2></div>
-            <div class="comparison-versions">
-              <div><span class="version-letter" aria-hidden="true">A</span><span id="comparison-a">原图</span></div>
-              <div><span class="version-letter" aria-hidden="true">B</span><span id="comparison-b">等待第一份成品</span></div>
-            </div>
-            <button id="pin" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-pin"/></svg>固定当前成品为对照 A</button>
-            <p>固定后，可在画布上方切换左侧对照。</p>
-          </div>
-          <div class="panel view-help">
-            <h2>检查细节</h2>
-            <dl>
-              <div><dt>比较同一处</dt><dd>拖动分割线</dd></div>
-              <div><dt>暂看原图</dt><dd>按住 <kbd>X</kbd></dd></div>
-              <div><dt>移动画布</dt><dd><kbd>空格</kbd> + 拖动</dd></div>
-            </dl>
-          </div>
-        </section>
         <section id="parts-inspector" class="panel" aria-label="部位分区设置" hidden>
           <div class="section-heading"><h2 id="part-heading">目标部位</h2></div>
           <p id="part-hint" class="panel-hint">点部位选目标，Ctrl+点击独显。眼睛控制叠加，锁控制保护。</p>
@@ -418,9 +409,9 @@
               <button id="set-strength-65" class="text-button" type="button" aria-label="将整体强度设为 65%" disabled>设为 65%</button>
             </div>
           </div>
-          <details class="panel advanced">
-            <summary>高级设置</summary>
-            <div class="advanced-fields">
+          <details id="effect-advanced" class="panel advanced">
+            <summary id="effect-advanced-toggle">高级设置</summary>
+            <div id="effect-advanced-fields" class="advanced-fields">
               <div class="effect-algorithm-fields">
                 <div id="l0-field">
                   <div class="effect-field-actions">
@@ -460,9 +451,6 @@
             </div>
           </details>
         </section>
-      </div>
-      <div class="inspector-footer">
-        <p id="export-hint">完成第一份结果后即可导出。</p>
       </div>
     </aside>
   </main>

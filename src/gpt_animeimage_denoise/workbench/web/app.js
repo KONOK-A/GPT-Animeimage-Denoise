@@ -5,6 +5,28 @@ const themeToggle = byId('theme-toggle');
 const themeRoot = document.documentElement;
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 const compactInspector = window.matchMedia('(max-width: 760px)');
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const activeAnimations = new Map();
+function stopMotion(element) {
+  activeAnimations.get(element)?.cancel();
+  activeAnimations.delete(element);
+}
+function playMotion(element, { opacity, transform, duration }) {
+  if (typeof element.animate !== 'function') return;
+  stopMotion(element);
+  const reduce = reducedMotion.matches;
+  const from = reduce ? { opacity: .85 } : { opacity, transform };
+  const to = reduce ? { opacity: 1 } : { opacity: 1, transform: 'none' };
+  const easing = getComputedStyle(themeRoot).getPropertyValue('--ease-out').trim();
+  const animation = element.animate([from, to], { duration: reduce ? 80 : duration, easing });
+  activeAnimations.set(element, animation);
+  animation.onfinish = () => {
+    if (activeAnimations.get(element) === animation) activeAnimations.delete(element);
+  };
+}
+reducedMotion.addEventListener('change', () => {
+  for (const element of activeAnimations.keys()) stopMotion(element);
+});
 const themeOptions = [...document.querySelectorAll('button[data-theme-option]')];
 const themeLabels = { system: '跟随系统', light: '浅色', dark: '深色' };
 const themeIcons = { system: 'system', light: 'sun', dark: 'moon' };
@@ -39,6 +61,7 @@ for (const button of themeOptions) button.addEventListener('click', () => {
 });
 
 const canvas = byId('canvas'), stage = byId('stage'), ctx = canvas.getContext('2d');
+const statusDot = byId('status-dot'), statusMessage = byId('status-message'), pinIcon = byId('pin-icon');
 const magneticCanvas = byId('magnetic-canvas'), magneticCtx = magneticCanvas.getContext('2d');
 const viewButtons = [...document.querySelectorAll('[data-view]')];
 const comparisonButtons = [
@@ -82,7 +105,8 @@ const state = {
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
   changesErrors: new Map(), appliedHistory: null, historyLocation: null, historyDisplayKey: '', partFrame: null,
-  displayedResult: null, part: 'hair', protectedParts: new Set(), rangeProtectedParts: new Set(),
+  displayedResult: null, awaitingFirstResult: false, pinFeedback: null,
+  part: 'hair', protectedParts: new Set(), rangeProtectedParts: new Set(),
   hiddenParts: new Set(), partIsolation: null,
   actions: { parts: 'classify', range: 'include' },
 };
@@ -133,8 +157,11 @@ const visibilityKey = id => 'gaid-hidden-parts-' + id;
 const comparisonKey = id => 'gaid-left-reference-' + id;
 function status(message, tone = 'neutral') {
   const label = byId('status');
-  if (label.textContent !== message) label.textContent = message;
-  if (label.dataset.tone !== tone) label.dataset.tone = tone;
+  if (statusMessage.textContent !== message) statusMessage.textContent = message;
+  if (label.dataset.tone !== tone) {
+    label.dataset.tone = tone;
+    if (tone !== 'ready') stopMotion(statusDot);
+  }
 }
 function showError(error) {
   byId('notice').dataset.tone = 'error';
@@ -458,23 +485,25 @@ function updateControls() {
   const nodeName = nodeNames[state.mode] || '';
   document.body.dataset.mode = state.mode;
   byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = !hasImage || graph;
-  byId('file-meta').hidden = !hasImage;
+  byId('file-meta').hidden = byId('export-actions').hidden = !hasImage;
+  byId('workspace-modes').hidden = !state.doc;
+  byId('review-actions').hidden = !hasImage || !reviewMode;
   byId('flow-board').hidden = !graph;
   stage.hidden = graph;
   byId('tools').hidden = !rangeMode;
   byId('edit-bar').hidden = !rangeMode;
   const nodeTitle = byId('node-title');
-  byId('back-to-flow').hidden = nodeTitle.hidden = !nodeName;
+  byId('back-to-flow').hidden = byId('node-switcher').hidden = nodeTitle.hidden = !nodeName;
   byId('back-to-flow').disabled = !canEdit;
   if (nodeTitle.textContent !== nodeName) nodeTitle.textContent = nodeName;
-  byId('drawer-title').textContent = nodeName || '成品检查';
-  byId('inspector-toggle').hidden = !state.doc || graph;
+  if (nodeName && byId('drawer-title').textContent !== nodeName) byId('drawer-title').textContent = nodeName;
+  byId('inspector-toggle').hidden = !state.doc || !nodeName;
   if (graph) updateFlow();
   const viewHint = comparing() ? '拖动分割线比较 · 空格拖动画布' : '滚轮缩放 · 空格拖动画布';
   const hint = byId('viewer-hint');
   hint.hidden = !hasImage || graph;
   if (hint.textContent !== viewHint) hint.textContent = viewHint;
-  byId('inspector').hidden = !state.doc || state.opening || graph;
+  byId('inspector').hidden = !state.doc || state.opening || !nodeName;
   byId('empty-title').textContent = state.exited ? '工作台已退出' : state.opening ? '正在打开图片…' : '拖入图片开始精修';
   byId('empty-help').hidden = state.opening;
   byId('empty-open').hidden = state.opening || state.exited;
@@ -486,6 +515,8 @@ function updateControls() {
   byId('download').title = current ? '导出当前成品 B（Ctrl+S）' : '当前成品显示后可导出（Ctrl+S）';
   byId('pin').disabled = !current;
   const a = state.doc?.a, showCorrections = rangeMode && Boolean(state.doc);
+  const pinLabel = a ? '更新对照 A' : '固定为对照 A';
+  if (byId('pin-label').textContent !== pinLabel) byId('pin-label').textContent = pinLabel;
   const exportPanel = byId('export-panel');
   exportPanel.hidden = !a && !showCorrections;
   if (exportPanel.hidden) exportPanel.open = false;
@@ -493,17 +524,10 @@ function updateControls() {
   byId('download-a').hidden = byId('download-a').disabled = !a;
   byId('correction-export').disabled = !renderIsCurrent();
   byId('correction-import').disabled = !canDraw || state.dirty || Boolean(state.save || state.conflict);
-  byId('export-hint').textContent = reviewMode && !current ? '当前成品显示后，即可固定或导出。' : '';
-  const b = state.images.get('b')?.meta;
-  const waitingForA = usesPinnedComparison() && !pinnedComparisonAsset();
-  byId('comparison-a').textContent = !a ? '原图'
-    : waitingForA ? '正在载入固定对照' : '固定对照 · ' + methodLabel(a.method);
   byId('compare-reference').hidden = !canChooseComparisonReference();
   for (const [reference, button] of comparisonButtons) {
     button.setAttribute('aria-pressed', String(reference === state.leftReference));
   }
-  byId('comparison-b').textContent = !b ? '等待第一份成品' : methodLabel(b.method)
-    + (current ? ' · 当前成品' : b.revision === state.doc?.revision && renderIsCurrent() ? ' · 待查看' : ' · 上一版');
   for (const id of ['zoom-out', 'zoom-in', 'fit', 'actual', 'peek']) byId(id).disabled = !hasImage;
   for (const [buttons, key, value, disabled] of [
     [viewButtons, 'view', state.view, !hasImage],
@@ -531,7 +555,7 @@ function updateControls() {
   unknownToggle.setAttribute('aria-pressed', String(state.showUnknown));
   byId('edit-inspector').hidden = !rangeMode || inspecting;
   byId('range-history').hidden = !rangeMode;
-  for (const mode of ['review', 'parts', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode || inspecting;
+  for (const mode of Object.keys(nodeNames)) byId(mode + '-inspector').hidden = state.mode !== mode || inspecting;
   for (const [name, button] of effectActions) {
     button.disabled = !canEdit || (name === 'strong' && !method?.uses_l0) || Boolean(presetMatches(name));
   }
@@ -606,6 +630,10 @@ function updateControls() {
   byId('error-node').hidden = !failed;
   if (failed) byId('error-node').textContent = '打开' + nodeNames[failedNode()];
   updateStatus(current);
+  if (current && state.awaitingFirstResult) {
+    state.awaitingFirstResult = false;
+    playMotion(statusDot, { opacity: .55, transform: 'scale(.8)', duration: 150 });
+  }
 }
 
 function layout() {
@@ -780,11 +808,16 @@ function draw() {
     ctx.clearRect(cut, 0, box.width - cut, box.height);
     paintImage(visibleImage('b'), box);
     ctx.restore();
-    const aMeta = a?.meta, bMeta = state.images.get('b')?.meta;
-    byId('left-badge').textContent = aMeta ? 'A  ' + methodLabel(aMeta.method) + ' / 选区 ' + (aMeta.selection_revision ?? aMeta.revision) : '原图';
-    byId('right-badge').textContent = 'B  ' + methodLabel(bMeta?.method)
-      + (bMeta ? ' / 选区 ' + (bMeta.selection_revision ?? bMeta.revision) : '')
+    const aMeta = a?.meta, bMeta = b?.meta;
+    const leftLabel = aMeta ? '对照 A · ' + methodLabel(aMeta.method) : '原图';
+    const rightLabel = '成品 B · ' + methodLabel(bMeta?.method)
       + (resultIsCurrent() && bMeta?.revision === state.doc.revision ? '' : ' · 待更新');
+    if (byId('left-badge').textContent !== leftLabel) byId('left-badge').textContent = leftLabel;
+    if (byId('right-badge').textContent !== rightLabel) byId('right-badge').textContent = rightLabel;
+    if (state.pinFeedback?.ready && a?.revision === state.pinFeedback.revision && visible && cut > Math.max(0, box.x)) {
+      state.pinFeedback = null;
+      playMotion(pinIcon, { opacity: .65, transform: 'scale(.88)', duration: 140 });
+    }
   } else if (peek || state.view === 'original' || allPartsHidden) paintImage(original, box);
   else if (diffView) { paintImage(original, box); paintImage(visibleImage('changes'), box); }
   else if (base?.overlay) { paintImage(original, box); paintOverlay(base.image, box); }
@@ -1043,6 +1076,7 @@ function selectView(view) {
   if (!state.file || !MODE_VIEWS[state.mode].includes(view) || !viewAvailable(view)) return;
   const leavingMaskView = editingMask() && !maskInspectionView() && view !== state.view;
   if (leavingMaskView && state.sam?.busy === 'apply') return;
+  if (view !== 'compare') clearPinFeedback();
   setKeyboardPeek(false);
   state.view = view;
   if (leavingMaskView) {
@@ -1063,13 +1097,15 @@ function setDrawer(open, restoreFocus = false, pointer = false) {
   document.body.dataset.drawer = open ? 'open' : 'closed';
   byId('inspector-toggle').setAttribute('aria-expanded', String(open));
   byId('drawer-scrim').hidden = !open;
+  if (!open) stopEffectMotion();
   if (open) byId('drawer-close').focus({ preventScroll: true });
   else if (restoreFocus) byId('inspector-toggle').focus({ preventScroll: true });
 }
-function selectMode(mode) {
+function selectMode(mode, focusHeading = true) {
   if (!state.doc || !Object.hasOwn(MODE_VIEWS, mode) || state.sam?.busy === 'apply') return;
   if (mode === state.mode) return;
   const previousMode = state.mode;
+  clearPinFeedback();
   state.sam = null;
   leaveMagnetic();
   setKeyboardPeek(false);
@@ -1093,7 +1129,7 @@ function selectMode(mode) {
   }
   ensureAssets();
   refresh();
-  if (nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
+  if (focusHeading && nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
   if (mode === 'flow') {
     byId('node-' + (nodeNames[previousMode] ? previousMode : 'parts')).focus();
     requestAnimationFrame(drawFlowWires);
@@ -1216,6 +1252,9 @@ function beginDocumentChange() {
   state.loading.clear();
   state.partFrame = null;
   state.displayedResult = null;
+  state.awaitingFirstResult = false;
+  stopMotion(statusDot);
+  clearPinFeedback();
   state.polygon = [];
   state.sam = null;
   leaveMagnetic();
@@ -1269,6 +1308,7 @@ async function openFile(file) {
     const doc = await response.json();
     if (epoch === state.epoch) {
       state.opening = false;
+      state.awaitingFirstResult = doc.revision === 0 && !doc.b;
       startDocument(doc);
       if (byId('recent-panel').open) loadRecent();
     }
@@ -2418,7 +2458,7 @@ function downloadBlob(blob, name) {
   document.body.append(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-async function download(view = 'b') {
+async function download(view = 'b', pointer = false) {
   const target = state.doc?.[view];
   if (!target || (view === 'b' && !resultIsCurrent())) return;
   const epoch = state.epoch, name = state.file.name.replace(/\.[^.]*$/, '');
@@ -2427,6 +2467,7 @@ async function download(view = 'b') {
       const result = await post(route('/export'), { revision: target.revision, view });
       if (epoch === state.epoch) {
         byId('notice').dataset.tone = 'ready';
+        byId('notice').dataset.pointerEntry = String(pointer);
         byId('notice-text').textContent = '已导出到 ' + result.path;
         byId('notice').hidden = false;
       }
@@ -2448,30 +2489,43 @@ function setComparisonReference(reference) {
 }
 function chooseComparisonReference(reference) {
   if (!canChooseComparisonReference()) return;
+  clearPinFeedback();
   setComparisonReference(reference);
   setKeyboardPeek(false);
   ensureAssets();
   refresh();
 }
-async function pin() {
+function clearPinFeedback() {
+  state.pinFeedback = null;
+  stopMotion(pinIcon);
+}
+async function pin(pointer = false) {
   if (!resultIsCurrent()) return;
   const epoch = state.epoch, revision = state.doc.revision;
+  clearPinFeedback();
+  const feedback = pointer ? { revision, ready: false } : null;
+  state.pinFeedback = feedback;
   try {
     const doc = await post(route('/pin'), { revision });
     if (state.epoch === epoch && doc.revision >= state.doc.revision) {
+      if (feedback && state.pinFeedback === feedback) feedback.ready = doc.a?.revision === revision;
       setComparisonReference('a');
       applyMetadata(doc);
       selectView('compare');
     }
   } catch (error) { if (epoch === state.epoch) showError(error); }
+  finally {
+    if (feedback && state.pinFeedback === feedback && !feedback.ready) clearPinFeedback();
+  }
 }
-async function exportCorrection() {
+async function exportCorrection(pointer = false) {
   if (!renderIsCurrent()) return;
   const epoch = state.epoch;
   try {
     const info = await post(route('/corrections/export'), { revision: state.doc.revision });
     if (epoch !== state.epoch) return;
     byId('notice').dataset.tone = 'ready';
+    byId('notice').dataset.pointerEntry = String(pointer);
     byId('notice-text').textContent = '命令行校正已保存到 ' + info.path;
     byId('notice').hidden = false;
   } catch (error) { if (epoch === state.epoch) showError(error); }
@@ -2522,21 +2576,39 @@ byId('correction-files').addEventListener('change', event => {
   importCorrection(files);
 });
 byId('correction-import').addEventListener('click', () => byId('correction-files').click());
-byId('correction-export').addEventListener('click', exportCorrection);
-const popovers = [byId('recent-panel'), byId('theme-panel'), byId('export-panel')];
-for (const popover of popovers) popover.addEventListener('toggle', () => {
-  if (!popover.open) return;
-  for (const other of popovers) if (other !== popover) other.open = false;
-  if (popover.id === 'recent-panel') loadRecent();
-});
+byId('correction-export').addEventListener('click', event => exportCorrection(event.detail > 0));
+function animateDisclosure(details, trigger, content, entrance) {
+  trigger.addEventListener('click', event => {
+    stopMotion(content);
+    if (details.open || !(event.detail > 0)) return;
+    event.preventDefault();
+    details.open = true;
+    playMotion(content, entrance);
+  });
+}
+const menuIds = [
+  ['recent-panel', 'recent-toggle', 'recent-menu'],
+  ['theme-panel', 'theme-toggle', 'theme-menu'],
+  ['export-panel', 'more-actions', 'export-menu'],
+];
+const popovers = menuIds.map(([id]) => byId(id));
+for (const [id, triggerId, menuId] of menuIds) {
+  const popover = byId(id), menu = byId(menuId);
+  animateDisclosure(popover, byId(triggerId), menu, { opacity: .6, transform: 'translateY(-4px)', duration: 150 });
+  popover.addEventListener('toggle', () => {
+    if (!popover.open) { stopMotion(menu); return; }
+    for (const other of popovers) if (other !== popover) other.open = false;
+    if (id === 'recent-panel') loadRecent();
+  });
+}
 window.addEventListener('click', event => {
   for (const popover of popovers) if (popover.open && !popover.contains(event.target)) popover.open = false;
 });
 byId('undo').addEventListener('click', undo);
 byId('redo').addEventListener('click', redo);
-byId('download').addEventListener('click', () => download());
-byId('download-a').addEventListener('click', () => download('a'));
-byId('pin').addEventListener('click', pin);
+byId('download').addEventListener('click', event => download('b', event.detail > 0));
+byId('download-a').addEventListener('click', event => download('a', event.detail > 0));
+byId('pin').addEventListener('click', event => pin(event.detail > 0));
 for (const [reference, button] of comparisonButtons) {
   button.addEventListener('click', () => chooseComparisonReference(reference));
 }
@@ -2574,25 +2646,37 @@ byId('include-unknown-stroke').addEventListener('click', () => resolveUnknownStr
 byId('assign-unknown-stroke').addEventListener('click', () => resolveUnknownStroke(byId('unknown-stroke-module').value));
 byId('open-unknown-parts').addEventListener('click', () => selectMode('parts'));
 byId('back-to-flow').addEventListener('click', () => selectMode('flow'));
-for (const button of modeButtons) button.addEventListener('click', () => selectMode(button.dataset.mode));
+for (const button of modeButtons) button.addEventListener('click', () => selectMode(button.dataset.mode, false));
 for (const button of scopeButtons) button.addEventListener('click', () => chooseScope(button.dataset.scope));
 for (const button of toolButtons) button.addEventListener('click', () => {
   selectTool(button.dataset.tool);
   stage.focus({ preventScroll: true });
 });
 for (const [name, button] of effectActions) button.addEventListener('click', () => choosePreset(name));
+const advanced = byId('effect-advanced'), advancedFields = byId('effect-advanced-fields');
+const descriptionEntrance = { opacity: .75, transform: 'translateY(3px)', duration: 135 };
+animateDisclosure(advanced, byId('effect-advanced-toggle'), advancedFields, descriptionEntrance);
 const effectHelp = ['restoration_gain', 'structure_protection', 'sigma']
   .map(name => ({ button: byId(name + '-help-toggle'), description: byId(name + '-help') }));
+function stopEffectMotion() {
+  stopMotion(advancedFields);
+  for (const { description } of effectHelp) stopMotion(description);
+}
+advanced.addEventListener('toggle', () => {
+  if (!advanced.open) stopEffectMotion();
+});
 for (const { button, description } of effectHelp) {
   button.title = description.textContent;
   description.hidden = true;
-  button.addEventListener('click', () => {
+  button.addEventListener('click', event => {
     const opening = description.hidden;
+    stopEffectMotion();
     for (const item of effectHelp) {
       const open = opening && item.description === description;
       item.description.hidden = !open;
       item.button.setAttribute('aria-expanded', String(open));
     }
+    if (opening && event.detail > 0) playMotion(description, descriptionEntrance);
   });
 }
 for (const key of ['method', ...numberFields]) {
