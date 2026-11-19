@@ -65,11 +65,36 @@ def _validate_l0_strength(lam):
         raise ValueError("L0 strength must be a finite positive value")
 
 
+def _l0_divergence_spectrum(value, threshold, spectrum):
+    height = value.shape[0]
+    rows_per_band = 64
+    for top in range(0, height, rows_per_band):
+        bottom = min(top + rows_per_band, height)
+        # The first row supplies the preceding vertical gradient, including
+        # the wrap from the bottom of the image into the top row.
+        rows = np.arange(top - 1, bottom)
+        band = value[rows]
+        h = np.roll(band, -1, axis=1)
+        h -= band
+        v = value[(rows + 1) % height]
+        v -= band
+        np.square(h, out=band)
+        band += np.square(v)
+        remove = band.sum(axis=2) < threshold
+        h[remove] = 0
+        v[remove] = 0
+        div = np.roll(h[1:], 1, axis=1)
+        div -= h[1:]
+        div += v[:-1] - v[1:]
+        np.fft.rfft(div, axis=1, out=spectrum[top:bottom])
+    np.fft.fft(spectrum, axis=0, out=spectrum)
+
+
 def l0_smooth(img, lam, kappa=2.0, beta_max=1e5, *, device="cpu"):
     """L0 gradient minimization (Xu et al. 2011) on an HxWx3 float image in [0, 1].
 
     Flattens small ripples inside flat colour areas while keeping lines and colour edges; invents no new detail.
-    device="cpu" preserves the NumPy path; CUDA uses a float64 whole-image real FFT.
+    Both devices use a float64 whole-image real FFT.
     """
     _validate_l0_strength(lam)
     if not np.isfinite(kappa) or kappa <= 1:
@@ -78,23 +103,31 @@ def l0_smooth(img, lam, kappa=2.0, beta_max=1e5, *, device="cpu"):
         raise ValueError("L0 beta_max must be a finite positive value")
     if torch.device(device).type == "cuda":
         return l0_smooth_cuda(img, lam, kappa, beta_max, device)
-    S = img.astype(np.float64)
-    H, W, _ = S.shape
-    fx = np.zeros((H, W)); fx[0, 0], fx[0, -1] = -1, 1
-    fy = np.zeros((H, W)); fy[0, 0], fy[-1, 0] = -1, 1
-    otf = np.abs(np.fft.fft2(fx)) ** 2 + np.abs(np.fft.fft2(fy)) ** 2
-    N1 = np.fft.fft2(S, axes=(0, 1))
+    value = img.astype(np.float64, order="C")
+    height, width, channels = value.shape
+    fx = np.zeros(width)
+    fy = np.zeros(height)
+    fx[0], fx[-1] = -1, 1
+    fy[0], fy[-1] = -1, 1
+    # The horizontal and vertical kernels each vary along just one axis.
+    otf = np.abs(np.fft.rfft(fx))[None, :] ** 2 + np.abs(np.fft.fft(fy))[:, None] ** 2
+    initial = np.empty((height, width // 2 + 1, channels), dtype=np.complex128)
+    np.fft.rfft2(value, axes=(0, 1), out=initial)
+    spectrum = np.empty_like(initial)
+    denominator = np.empty_like(otf)
     beta = 2 * lam
     while beta < beta_max:
-        h = np.roll(S, -1, 1) - S
-        v = np.roll(S, -1, 0) - S
-        t = (h ** 2 + v ** 2).sum(2) < lam / beta
-        h[t] = 0
-        v[t] = 0
-        div = (np.roll(h, 1, 1) - h) + (np.roll(v, 1, 0) - v)
-        S = np.real(np.fft.ifft2((N1 + beta * np.fft.fft2(div, axes=(0, 1))) / (1 + beta * otf)[..., None], axes=(0, 1)))
+        _l0_divergence_spectrum(value, lam / beta, spectrum)
+        spectrum *= beta
+        np.add(initial, spectrum, out=spectrum)
+        np.multiply(otf, beta, out=denominator)
+        denominator += 1
+        spectrum /= denominator[..., None]
+        # Invert the vertical transform in place, then restore the exact width.
+        np.fft.ifft(spectrum, axis=0, out=spectrum)
+        np.fft.irfft(spectrum, n=width, axis=1, out=value)
         beta *= kappa
-    return S.clip(0, 1)
+    return value.clip(0, 1, out=value)
 
 
 def to_arr(im):

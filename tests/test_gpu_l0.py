@@ -30,6 +30,49 @@ class L0RoutingTest(unittest.TestCase):
                 denoise.l0_smooth(image, 0.0005, kappa=kappa, device='cpu')
 
 
+def _full_spectrum_l0(image, lam, kappa, beta_max):
+    """Reference CPU solve using full complex spectra and whole-image gradients."""
+    height, width, _ = image.shape
+    fx = np.zeros((height, width))
+    fy = np.zeros_like(fx)
+    fx[0, 0], fx[0, -1] = -1, 1
+    fy[0, 0], fy[-1, 0] = -1, 1
+    otf = np.abs(np.fft.fft2(fx)) ** 2 + np.abs(np.fft.fft2(fy)) ** 2
+    initial = np.fft.fft2(image, axes=(0, 1))
+    beta = 2 * lam
+    while beta < beta_max:
+        h = np.roll(image, -1, axis=1) - image
+        v = np.roll(image, -1, axis=0) - image
+        remove = (h ** 2 + v ** 2).sum(axis=2) < lam / beta
+        h[remove] = 0
+        v[remove] = 0
+        div = (np.roll(h, 1, axis=1) - h) + (np.roll(v, 1, axis=0) - v)
+        spectrum = (initial + beta * np.fft.fft2(div, axes=(0, 1))) / (1 + beta * otf)[..., None]
+        image = np.fft.ifft2(spectrum, axes=(0, 1)).real
+        beta *= kappa
+    return image.clip(0, 1)
+
+
+class L0CpuTest(unittest.TestCase):
+    def test_bounded_real_fft_matches_full_spectrum_on_periodic_borders(self):
+        rng = np.random.default_rng(29)
+        for height, width in ((131, 123), (136, 128), (1, 9), (9, 1)):
+            with self.subTest(height=height, width=width):
+                pixels = 0.45 + rng.normal(0, 0.009, (height, width, 3))
+                pixels[height // 2:, width // 2:] += 0.22
+                image = pixels[:, ::-1]
+                before = image.copy()
+                params = (0.0005, 2.0, 1e5)
+                expected = _full_spectrum_l0(image, *params)
+
+                with patch.object(np.fft, 'fft2', side_effect=AssertionError('full complex spectrum')):
+                    actual = denoise.l0_smooth(image, *params, device='cpu')
+
+                self.assertEqual(actual.dtype, np.float64)
+                np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-12)
+                np.testing.assert_array_equal(image, before)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware required')
 class L0GpuTest(unittest.TestCase):
     def test_gpu_matches_cpu_for_odd_even_and_flat_images(self):
