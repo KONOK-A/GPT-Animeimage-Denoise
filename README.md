@@ -1,10 +1,14 @@
 # GPT AnimeImage Denoise
 
-在本机清理二次元插画的鱼鳞纹。工作台会自动识别人物部位，默认只对皮肤、面部和头发降噪。可以用画笔或套索修改选区，调节局部强度，对比原图后导出原尺寸 PNG。
+GPT AnimeImage Denoise（GAID）在本机清理二次元插画的鱼鳞纹和重复颗粒。可以在网页工作台对比和精修单张图，用命令行批量处理，也可以交给 Codex 或 Claude Code 调用。
+
+[安装](#安装) · [工作台](#工作台) · [命令行](#命令行) · [AI Agent](#ai-agent) · [模型](#使用的模型)
 
 ## 安装
 
-在 Windows 安装 Python 3.12，把仓库下载到本机，再在项目根目录打开 PowerShell。下面以 CUDA 12.8 版 PyTorch 为例。使用 CPU 时，把下载地址末尾的 `cu128` 改成 `cpu`。 [PyTorch 安装说明](https://pytorch.org/get-started/previous-versions/#v2110)
+在 Windows 安装 Python 3.12，下载项目源码并解压，或克隆仓库。在包含 `pyproject.toml` 的目录打开 PowerShell。
+
+以下命令安装 NVIDIA CUDA 12.8 版 PyTorch。使用 CPU 时，把下载地址末尾的 `cu128` 改成 `cpu`。 [PyTorch 版本说明](https://pytorch.org/get-started/previous-versions/#v2110)
 
 ```powershell
 py -3.12 -m venv .venv
@@ -12,56 +16,74 @@ py -3.12 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-## 使用
+### 首次出图
 
-**工作台和人物分区**需要先准备模型，首次下载约 3.3 GB。已有模型可直接复用。 [模型准备](docs/models.md)
+把 `image.png` 放到项目根目录，运行整图纯 L0。`--whole` 跳过部位分区，此命令无需模型权重。
+
+```powershell
+.\.venv\Scripts\gaid.exe process .\image.png --out .\outputs\whole --whole
+```
+
+成品 `result.png` 位于 `outputs/whole/` 下的案例子目录。`process` 和 `batch` 输出的成品保留定向后的原尺寸、Alpha 和 ICC。
+
+### 准备分区模型
+
+工作台和按人物部位去噪需要分区模型，首次下载约 3.3 GB，默认保存在项目的 `models/`。已有模型可以复用。 [模型准备](docs/models.md)
 
 ```powershell
 & .\.venv\Scripts\python.exe -m tools.assets fetch
 ```
 
-在 Windows 双击 [start-workbench.vbs](start-workbench.vbs) 即可在后台打开工作台。需要查看终端日志时，使用 [start-workbench.cmd](start-workbench.cmd)。
+## 使用
 
-把图片拖进浏览器里的工作台。默认成品会在后台生成，可在「成品检查」对比和导出。需要精修时，进入「编辑流程」调整部位分区、处理范围或降噪效果。 [工作台手册](docs/workbench.md)
+### 工作台
 
-**命令行**支持单图和批量去噪。`process` 和 `batch` 默认按人物部位处理。加 `--whole` 会跳过部位分区，直接做全图降噪。整图纯 L0 无需模型权重。
+准备好分区模型后，双击 [start-workbench.vbs](start-workbench.vbs)，浏览器会打开本地工作台。需要查看终端日志时运行 [start-workbench.cmd](start-workbench.cmd)。
+
+1. 打开、拖入或粘贴图片。工作台会在后台生成成品，默认处理皮肤、面部和头发。
+2. 在「成品检查」拖动分割线查看差异，也可以把当前成品固定为对照 A。
+3. 在「编辑流程」修正部位分区、调整处理范围和降噪效果。使用画笔、套索或 SAM2 修改选区，确认后导出原尺寸 PNG。
+
+[工作台手册](docs/workbench.md)
+
+### 命令行
+
+准备好分区模型后，可按人物部位处理单张图或整个目录。`batch --directory` 会递归扫描输入目录，`--out` 要放在输入目录之外。
 
 ```powershell
-# 单张分区去噪
 .\.venv\Scripts\gaid.exe process .\image.png --out .\outputs\single
-
-# 整图纯 L0
-.\.venv\Scripts\gaid.exe process .\image.png --out .\outputs\whole --whole
+.\.venv\Scripts\gaid.exe batch --directory .\images --out .\outputs\batch
 ```
 
-[命令行手册](docs/cli.md) · [开发说明](docs/development.md)
+`process` 和 `batch` 都接受 `--whole`。案例目录包含成品 `result.png`、权重图 `weight.png` 和参数报告 `report.json`。保留同级 `.cache` 后，可以用 `preview` 调整混合强度。 [命令行手册](docs/cli.md)
 
-### 在任意项目用 AI Agent 去噪
+```powershell
+.\.venv\Scripts\gaid.exe --version
+.\.venv\Scripts\gaid.exe process --help
+```
 
-按上文安装 GAID 后，在 GAID 仓库运行一次用户级安装。按部位去噪前需准备分区模型。
+### AI Agent
+
+安装 GAID 后，在仓库根目录运行一次用户级 skill 安装。只需安装一个客户端时，在命令末尾加 `--agent codex` 或 `--agent claude`。
 
 ```powershell
 & .\.venv\Scripts\python.exe -X utf8 .\tools\install_agent_skill.py
 ```
 
-安装后，从任意本地工作目录启动 Agent，即可调用同一份降噪 skill。
+| 客户端 | 调用方式 | 用户级 skill 目录 |
+| --- | --- | --- |
+| Codex | `$gpt-animeimage-denoise` | `~/.agents/skills/` |
+| Claude Code | `/gpt-animeimage-denoise` | `~/.claude/skills/` |
 
-- **Codex** 从 `~/.agents/skills/` 发现用户级 skill。输入 `$gpt-animeimage-denoise`。
-- **Claude Code** 从 `~/.claude/skills/` 发现用户级 skill。输入 `/gpt-animeimage-denoise`。若设有 `CLAUDE_CONFIG_DIR`，安装器会使用该目录下的 `skills/`。
+Claude Code 设置了 `CLAUDE_CONFIG_DIR` 时，安装器使用该目录下的 `skills/`。
 
-调用时一起给出原图和处理要求，例如「给 `D:\images\插画.png` 去鱼鳞纹，尽量保留发丝和背景，交付原尺寸 PNG」。也可以使用同一会话中生图工具返回的原图。默认结果位于调用时的工作目录下的 `outputs/agent-denoise/`。
+在任意本地工作目录打开 Agent，给它原图路径和处理要求。也可以用当前会话中生图工具返回的原图。例如「跳过部位分区，给 `D:\images\插画.png` 整图去噪，交付原尺寸 PNG」。成品默认写入任务目录下的 `outputs/agent-denoise/`。
 
-在安装命令末尾加 `--agent codex` 或 `--agent claude` 可选择客户端。安装会记录 GAID 路径、所用的 Python 和模型目录，支持 [复用本机模型](docs/models.md#复用本机模型)。移动项目后，先按[安装步骤](#安装)在新位置重建 Python 环境，再重新安装 skill。更换已可用的环境、模型目录或更新 skill 时，重新运行 skill 安装命令。
-
-维护时以 [`.agents` 中的 SKILL.md](.agents/skills/gpt-animeimage-denoise/SKILL.md) 为源文件。更新后在项目根目录同步 [Claude Code 项目入口](.claude/skills/gpt-animeimage-denoise/SKILL.md)。
-
-```powershell
-Copy-Item -LiteralPath '.agents/skills/gpt-animeimage-denoise/SKILL.md' -Destination '.claude/skills/gpt-animeimage-denoise/SKILL.md'
-```
+安装器会记录 GAID、Python 和模型的路径。更新 skill 或更换环境和模型目录后，重新运行安装命令。移动项目目录后，先在新位置重建 Python 环境，再安装 skill。 [Skill 说明](.agents/skills/gpt-animeimage-denoise/SKILL.md) · [复用本机模型](docs/models.md#复用本机模型)
 
 ## 使用的模型
 
-| 模型 | 用途 | 许可 |
+| 模型 | 用途 | 上游许可与说明 |
 | --- | --- | --- |
 | [SkyTNT ISNet](https://github.com/SkyTNT/anime-segmentation) | 人物与背景分割 | 源码 Apache-2.0，权重未单列许可 |
 | [AnimeSeg Mask2Former v4](https://huggingface.co/suzukimain/AnimeSeg) | 人物部位分割 | 未声明通用许可证 |
@@ -70,8 +92,16 @@ Copy-Item -LiteralPath '.agents/skills/gpt-animeimage-denoise/SKILL.md' -Destina
 | [Real-ESRGAN x4plus Anime 6B](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.2.4) | 可选降噪模型 | [源码 BSD-3-Clause](https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE) |
 | [APISR 2× RRDB](https://github.com/Kiteretsu77/APISR#license) | 可选降噪模型 | 源码 GPL-3.0，作者注明学术用途，[权重镜像](https://huggingface.co/camenduru/APISR)未声明许可 |
 
+## 开发
+
+测试、wheel 构建和调试工具见[开发说明](docs/development.md)。编辑 `.agents/skills/gpt-animeimage-denoise/SKILL.md` 后，从项目根目录同步 Claude Code 的项目入口。
+
+```powershell
+Copy-Item -LiteralPath '.agents/skills/gpt-animeimage-denoise/SKILL.md' -Destination '.claude/skills/gpt-animeimage-denoise/SKILL.md'
+```
+
 ## 致谢与许可证
 
-整图降噪方案参考了 [CXP-2024/gpt-anime-denoise](https://github.com/CXP-2024/gpt-anime-denoise)。
+项目源码采用 [MIT 许可证](LICENSE)，其中收录 KONOK-A 和 CXP-2024 的版权声明。模型的许可信息见上表和各自的上游页面。
 
-Copyright © 2026 KONOK-A · [MIT](LICENSE)
+整图降噪方案参考了 [CXP-2024/gpt-anime-denoise](https://github.com/CXP-2024/gpt-anime-denoise)。
