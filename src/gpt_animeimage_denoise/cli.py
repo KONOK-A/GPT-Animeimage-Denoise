@@ -124,11 +124,13 @@ def main(argv=None):
         if device != 'cpu' and not device.startswith('cuda'):
             raise ValueError('device must be auto/cpu/cuda/cuda:N')
         if device.startswith('cuda'):
-            index = torch.device(device).index
+            parsed_device = torch.device(device)
             if not torch.cuda.is_available():
                 raise RuntimeError('CUDA is unavailable. Select --device cpu.')
-            if index is not None and index >= torch.cuda.device_count():
-                raise ValueError(f'CUDA device {index} is unavailable')
+            if ':' in device:
+                index = int(device.split(':', 1)[1])
+                if index != parsed_device.index or index >= torch.cuda.device_count():
+                    raise ValueError(f'CUDA device {index} is unavailable')
 
         from .fusion_pipeline import process_batch, process_image, write_records
 

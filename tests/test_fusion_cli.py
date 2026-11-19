@@ -92,7 +92,7 @@ class FusionCLITest(unittest.TestCase):
               mock.patch.object(torch.cuda, 'device_count', return_value=1),
               mock.patch('gpt_animeimage_denoise.fusion_pipeline.process_batch', return_value=[]) as batch,
               redirect_stderr(StringIO())):
-            for device in ('cuda:bad', 'cuda:3'):
+            for device in ('cuda:bad', 'cuda:3', 'cuda:128', 'cuda:255', 'cuda:256'):
                 with self.subTest(device=device):
                     code = cli.main(['batch', '--directory', 'images', '--out', 'out', '--whole', '--device', device])
                     self.assertEqual(code, 1)
