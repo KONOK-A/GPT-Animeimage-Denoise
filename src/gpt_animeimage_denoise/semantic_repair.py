@@ -20,8 +20,18 @@ def _radius(shape, pixels):
 
 
 def _near(anchor, radius):
-    if not anchor.any():return np.zeros_like(anchor)
-    return distance_transform_edt(~anchor)<=radius
+    nearby = np.zeros_like(anchor)
+    rows = np.flatnonzero(anchor.any(axis=1))
+    if not rows.size:
+        return nearby
+    columns = np.flatnonzero(anchor.any(axis=0))
+    # The rectangle contains every anchor and every pixel within the radius
+    # of an anchor. Integer offsets beyond the padding cannot be in range.
+    padding = int(radius)
+    window = (slice(max(0, rows[0] - padding), min(anchor.shape[0], rows[-1] + padding + 1)),
+              slice(max(0, columns[0] - padding), min(anchor.shape[1], columns[-1] + padding + 1)))
+    nearby[window] = distance_transform_edt(~anchor[window]) <= radius
+    return nearby
 
 
 def _outfit_reference_mask(regions, shape, policy):

@@ -165,7 +165,7 @@ def _prompt_pixels(prompt, h, w):
 
 
 class FusionModels:
-    def __init__(self, assets=None, device='cuda', anime_assets=None):
+    def __init__(self, assets=None, device='cuda', anime_assets=None, *, defer_checkpoint_checks=False):
         root = model_root()
         self.assets = Path(assets or root/'v2').resolve()
         self.anime_assets = Path(anime_assets or root/'AnimeSeg').resolve()
@@ -175,7 +175,7 @@ class FusionModels:
         self.sky = self.parts = self.m2f = self.sam = None
         self._sam_image_key = None
         self._m2f_info = {}
-        self.identities = self._verify_assets()
+        self.identities = self._verify_assets(defer_checkpoint_checks=defer_checkpoint_checks)
         self._signature_base = {'assets': self.identities, 'precision': PRECISION, 'device': self.device,
                                 'adapter_sha256': _digest(__file__)}
 
@@ -190,13 +190,24 @@ class FusionModels:
     def _tf32_flags():
         return {'matmul': bool(torch.backends.cuda.matmul.allow_tf32), 'cudnn': bool(torch.backends.cudnn.allow_tf32)}
 
-    def _verify_assets(self):
+    def _verify_assets(self, *, defer_checkpoint_checks=False):
+        def identity(path, expected):
+            if defer_checkpoint_checks and path.suffix in ('.pt', '.safetensors'):
+                # Builders still verify every checkpoint before loading it.
+                if not path.is_file():
+                    raise FileNotFoundError(path)
+                if (not isinstance(expected, str) or len(expected) != 64
+                        or any(char not in '0123456789abcdef' for char in expected)):
+                    raise ValueError('Invalid checkpoint hash: ' + str(path))
+                return expected
+            return _verified_hash(path, expected)
+
         recorded = {k.replace('\\', '/'): v for k, v in json.loads((self.assets/'asset_hashes.json').read_text()).items()}
         result = {}
         for name in ['skytnt/isnet.py', 'skytnt/model.safetensors', 'see_through/checkpoint-18000.pt', 'sam2/sam2.1_hiera_large.pt']:
-            result['v2/'+name] = _verified_hash(self.assets/name, recorded[name])
+            result['v2/'+name] = identity(self.assets/name, recorded[name])
         for name, expected in PINNED_ANIME.items():
-            result['anime/'+name] = _verified_hash(self.anime_assets/name, expected)
+            result['anime/'+name] = identity(self.anime_assets/name, expected)
         for root, prefix in [(self.assets, 'v2/'), (self.anime_assets/'base-configs/large', 'anime/base-configs/large/')]:
             for path in sorted(root.rglob('*')):
                 if path.is_file() and path.suffix in ['.py', '.yaml', '.yml', '.json'] and path.name != 'asset_hashes.json':
@@ -292,6 +303,8 @@ class FusionModels:
             if value is not None:
                 value.reset_predictor()
             self._sam_image_key = None
+        if value is None:
+            return
         setattr(self, name, None)
         del value
         gc.collect()
@@ -299,8 +312,12 @@ class FusionModels:
             torch.cuda.empty_cache()
 
     def release(self):
+        had_model = any(value is not None for value in (self.sky, self.parts, self.m2f, self.sam))
         for name in ['sky', 'parts', 'm2f', 'sam']:
             self._clear(name)
+        if not had_model and self.device.startswith('cuda'):
+            # The denoiser can also leave free blocks in the CUDA allocator.
+            torch.cuda.empty_cache()
 
     def segment_evidence(self, rgb_uint8, *, dual_view=True):
         h0, w0 = _validate_rgb(rgb_uint8)

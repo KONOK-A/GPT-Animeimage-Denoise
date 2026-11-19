@@ -1,14 +1,26 @@
 """Production wiring contracts for anchored See evidence and legacy policies."""
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
-from gpt_animeimage_denoise import fusion, fusion_pipeline, auto_sam
+from gpt_animeimage_denoise import fusion, fusion_pipeline, auto_sam, semantic_repair
 from test_fusion import evidence
 from test_auto_sam import CandidateProvider
 
 
 class SemanticRepairIntegration(unittest.TestCase):
+    def test_distance_check_keeps_exact_edges_using_only_the_reachable_grid(self):
+        anchor = np.zeros((31, 47), bool)
+        anchor[0, 6] = anchor[4, 11] = True
+        radius = np.sqrt(8)
+        distance = semantic_repair.distance_transform_edt
+        expected = distance(~anchor) <= radius
+        with patch.object(semantic_repair, 'distance_transform_edt', wraps=distance) as transform:
+            np.testing.assert_array_equal(semantic_repair._near(anchor, radius), expected)
+            self.assertTrue(expected[6, 13])
+            self.assertEqual(transform.call_args.args[0].shape, (7, 10))
+
     @staticmethod
     def weaken(ev, x, favored, runner_up):
         for key in ('m2f_white', 'm2f_original'):

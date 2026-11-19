@@ -125,13 +125,15 @@ def _validate_evidence(evidence, *, scores=True):
 def _view(log_scores, shape, policy, *, return_scores=False):
     """Resize every native log score before computing labels/confidence."""
     h, w = shape
-    if log_scores.shape[1:] == shape:
-        up = log_scores
-    else:
-        up = np.stack([cv2.resize(plane, (w, h), interpolation=cv2.INTER_LINEAR)
-                       for plane in log_scores]).astype(np.float32)
     # Re-normalize interpolated log probabilities, retaining all twelve classes.
-    probabilities = np.exp(up - up.max(axis=0, keepdims=True))
+    if log_scores.shape[1:] == shape:
+        probabilities = np.exp(log_scores - log_scores.max(axis=0, keepdims=True))
+    else:
+        probabilities = np.empty((len(log_scores), h, w), dtype=np.float32)
+        for plane, target in zip(log_scores, probabilities, strict=True):
+            cv2.resize(plane, (w, h), dst=target, interpolation=cv2.INTER_LINEAR)
+        np.subtract(probabilities, probabilities.max(axis=0, keepdims=True), out=probabilities)
+        np.exp(probabilities, out=probabilities)
     probabilities /= probabilities.sum(axis=0, keepdims=True)
     raw = probabilities.argmax(axis=0).astype(np.uint8)
     grouped = V4_TO_GROUP[raw]

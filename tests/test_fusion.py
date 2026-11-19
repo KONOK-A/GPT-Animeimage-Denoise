@@ -1,6 +1,7 @@
 """Probability fusion behavior, using tiny original-grid fixtures (no models)."""
 import importlib
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -74,6 +75,23 @@ class FusionTests(unittest.TestCase):
                 self.assertEqual(result['person_labels'][0, 0], group)
                 self.assertEqual(result['_m2f_labels'][0, 0], raw)
                 self.assertFalse(result['uncertain'][0, 0])
+
+    def test_upsampled_view_keeps_exact_confidence_with_one_resize_buffer(self):
+        module = self.module
+        native = np.random.default_rng(32).normal(size=(12, 5, 7)).astype(np.float32)
+        native[4] = native[5]  # Keep ties within the same business group.
+        unmodified = native.copy()
+        shape = (13, 19)
+        resize = module.cv2.resize
+        scores = np.stack([resize(plane, shape[::-1], interpolation=module.cv2.INTER_LINEAR) for plane in native])
+        expected = module._view(scores, shape, module._policy(), return_scores=True)
+        with patch.object(module.cv2, 'resize', wraps=resize) as resize_into:
+            actual = module._view(native, shape, module._policy(), return_scores=True)
+            for reference, result in zip(expected, actual, strict=True):
+                np.testing.assert_array_equal(result, reference)
+            self.assertEqual(resize_into.call_count, 12)
+            self.assertTrue(all(call.kwargs.get('dst') is not None for call in resize_into.call_args_list))
+        np.testing.assert_array_equal(native, unmodified)
 
     def test_different_group_probability_competition_stays_unknown(self):
         ev = evidence([[4]])

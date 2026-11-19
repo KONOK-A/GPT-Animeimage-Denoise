@@ -139,6 +139,33 @@ class StrictLoadingContracts(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'See source'):
                 models._build_see()
 
+    def test_deferred_checkpoints_are_hashed_before_a_model_can_load_them(self):
+        module = adapter()
+        with tempfile.TemporaryDirectory() as folder:
+            v2, anime = Path(folder) / 'v2', Path(folder) / 'anime'
+            content = b'checkpoint'
+            expected = hashlib.sha256(content).hexdigest()
+            manifest = dict.fromkeys(('skytnt/isnet.py', 'skytnt/model.safetensors',
+                                      'see_through/checkpoint-18000.pt', 'sam2/sam2.1_hiera_large.pt'), expected)
+            pinned = {'models/mask2former.safetensors': expected}
+            for directory, entries in ((v2, manifest), (anime, pinned)):
+                for name in entries:
+                    path = directory / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+            (v2 / 'asset_hashes.json').write_text(json.dumps(manifest), encoding='utf-8')
+            with (patch.object(module, 'PINNED_ANIME', pinned),
+                  patch.object(module, '_verified_hash', wraps=module._verified_hash) as verify):
+                models = module.FusionModels(v2, 'cpu', anime, defer_checkpoint_checks=True)
+                self.assertEqual(models.identities['v2/skytnt/model.safetensors'], expected)
+                self.assertEqual(models.identities['anime/models/mask2former.safetensors'], expected)
+                self.assertEqual([call.args[0].suffix for call in verify.call_args_list], ['.py'])
+                path = v2 / 'skytnt/model.safetensors'
+                path.write_bytes(b'bad weights')
+                with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+                    models._build_sky()
+                self.assertEqual(verify.call_args.args, (path, expected))
+
     def test_see_rejects_foreign_cached_dependencies_with_local_entry_module(self):
         module = adapter()
         models = fixture_models()
@@ -434,6 +461,23 @@ class FakeSAM:
 
 
 class SAMContracts(unittest.TestCase):
+    def test_empty_model_slots_do_not_trigger_garbage_collection(self):
+        models = fixture_models()
+        module = adapter()
+        with patch.object(module.gc, 'collect') as collect:
+            models.release()
+            collect.assert_not_called()
+            models.sam = FakeSAM()
+            models.sam.set_image(np.zeros((4, 5, 3), np.uint8))
+            models._sam_image_key = 'active'
+            models._ensure_sam()
+            collect.assert_not_called()
+            models.release()
+            models.release()
+            collect.assert_called_once()
+            self.assertIsNone(models.sam)
+            self.assertIsNone(models._sam_image_key)
+
     def test_candidates_stability_and_image_embedding_identity(self):
         models = fixture_models()
         sam = FakeSAM()

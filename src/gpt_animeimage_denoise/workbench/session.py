@@ -111,7 +111,7 @@ class WorkbenchSession:
         if device.startswith('cuda') and not torch.cuda.is_available():
             raise RuntimeError('CUDA is unavailable; select --device cpu')
 
-        models = FusionModels(device=device)
+        models = FusionModels(device=device, defer_checkpoint_checks=True)
         try:
             report = process_image(source, output, models, case_id='analysis', profile='fusion',
                                    denoiser=method, lam=lam, downscale=downscale, on_stage=on_stage, _workbench=True)
@@ -183,7 +183,7 @@ class WorkbenchSession:
         if self._models is None:
             from ..fusion_models import FusionModels
 
-            self._models = FusionModels(device=self._inference_device())
+            self._models = FusionModels(device=self._inference_device(), defer_checkpoint_checks=True)
         try:
             prediction = self._models.predict_candidates(rgb, prompt)
             mask, _ = select_manual_candidate(prediction, prompt)
