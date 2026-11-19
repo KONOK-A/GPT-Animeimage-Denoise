@@ -76,6 +76,7 @@ with create_server(Path.cwd()) as server:
                     assert settings['defaults']['method'] == 'esrgan'
                     assert settings['defaults']['strength'] == .4
         assert 'scipy' not in sys.modules, 'image-processing dependencies loaded at startup'
+        assert 'torch' not in sys.modules, 'the inference runtime loaded at startup'
     finally:
         server.shutdown()
         service.join(timeout=5)
@@ -164,6 +165,41 @@ class WorkbenchHTTPTest(unittest.TestCase):
         status, body = self.request('GET', '/api/documents')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), [])
+
+    def test_model_prewarm_yields_to_an_upload_and_reuses_prepared_weights(self):
+        from gpt_animeimage_denoise.editor import SelectionEditor
+        from gpt_animeimage_denoise.workbench.session import WorkbenchSession
+
+        rgb = np.full((16, 24, 3), 167, np.uint8)
+        labels = np.ones(rgb.shape[:2], np.uint8)
+        empty = np.zeros(labels.shape, bool)
+        editor = SelectionEditor(rgb, None, labels, empty, empty)
+        session = SimpleNamespace(editor=editor, icc=None, candidate=Mock(return_value=rgb.astype(np.float32) / 255))
+        entered = Event()
+        prepared = object()
+
+        def prewarm(stop):
+            entered.set()
+            if not stop.wait(4):
+                raise AssertionError('an upload did not stop optional prewarming')
+            return prepared
+
+        image = BytesIO()
+        Image.fromarray(rgb).save(image, 'PNG')
+        with (patch.object(WorkbenchSession, 'prewarm', create=True, side_effect=prewarm) as warm,
+              patch.object(WorkbenchSession, 'open', return_value=session) as render):
+            self.assertEqual(self.post('/api/prepare-models', {'unexpected': 1})[0], 400)
+            self.assertEqual(self.post('/api/prepare-models', {}), (200, {}))
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(self.post('/api/prepare-models', {}), (200, {}))
+            self.assertEqual(self.request('GET', '/api/options')[0], 200)
+            status, body = self.request('POST', '/api/documents', image.getvalue(),
+                                        **{'X-GAID-Request': '1', 'Content-Type': 'application/octet-stream',
+                                           'X-GAID-Filename': 'warmup.png'})
+            self.assertEqual(status, 200)
+            self.ready('/api/documents/' + json.loads(body)['id'])
+            warm.assert_called_once()
+            self.assertIs(render.call_args.kwargs['preloaded_sky'], prepared)
 
     def test_document_poll_reuses_snapshot_until_metadata_changes(self):
         from gpt_animeimage_denoise.editor import SelectionEditor

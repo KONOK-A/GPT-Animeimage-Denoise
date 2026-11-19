@@ -11,7 +11,7 @@ from math import inf, isfinite
 from numbers import Real
 from pathlib import Path, PureWindowsPath
 import re
-from threading import Condition, Lock, Thread
+from threading import Condition, Event, Lock, Thread, Timer
 from time import time
 import traceback
 from types import SimpleNamespace
@@ -49,6 +49,7 @@ _OBJECT_COLOR = (224, 136, 68)
 _WEIGHT_STOPS = ((100, 226, 250), (111, 119, 247), (241, 72, 169))
 _LEGACY_WEIGHT_PALETTE = bytes((79, 159, 232)) * 256
 _MAX_RETAINED_RESULT_BYTES = 32 * 1024 * 1024
+_PRELOADED_SKY_SECONDS = 60
 _SELECTION_ASSETS = ('parts', 'weight', 'weight_overlay', 'unknown', 'suspected_objects', 'labels')
 _CHANGE_KINDS = ('added', 'removed', 'stronger', 'weaker', 'reclassified')
 _CHANGE_STAGES = {None: _CHANGE_KINDS, 'parts': ('reclassified',), 'range': _CHANGE_KINDS[:-1]}
@@ -460,6 +461,10 @@ class Documents:
         self._pending = OrderedDict()
         self._pending_results = OrderedDict()
         self._prepare_request = None
+        self._warmup_stop = Event()
+        self._warmup_thread = None
+        self._preloaded_sky = None
+        self._preload_expiry = None
         self._object_previews = OrderedDict()
         self._closed = False
         self._drop_resident()
@@ -478,10 +483,14 @@ class Documents:
     def close(self):
         with self._condition:
             self._closed = True
+            self._warmup_stop.set()
+            self._take_preloaded_sky()
             self._pending_results.clear()
             self._condition.notify_all()
         self._worker.join(timeout=2)
         self._encoder.join(timeout=2)
+        if self._warmup_thread is not None:
+            self._warmup_thread.join(timeout=2)
 
     def _restore(self):
         if not self.root.is_dir():
@@ -521,6 +530,7 @@ class Documents:
 
     def _queue(self, state):
         identifier = state['id']
+        self._warmup_stop.set()
         self._pending[identifier] = state['revision']
         self._pending_results.pop(identifier, None)
         self._condition.notify_all()
@@ -580,8 +590,47 @@ class Documents:
             if (self.opener is None and state['status'] == 'ready' and state.get('b')
                     and ((self._resident_id, self._resident_epoch) != (doc, state.get('_source_epoch', 0))
                          or self._selection_key != self._selection_cache_key(state))):
+                self._warmup_stop.set()
                 self._prepare_request = (doc, revision)
                 self._condition.notify_all()
+
+    def prepare_models(self):
+        with self._condition:
+            if (self._closed or self.opener is not None or self._warmup_thread is not None
+                    or self._warmup_stop.is_set() or self._pending or self._prepare_request is not None
+                    or self._resident is not None):
+                return
+            self._warmup_thread = Thread(target=self._warm_model_cache, name='gaid-model-warmup', daemon=True)
+            self._warmup_thread.start()
+
+    def _warm_model_cache(self):
+        if not self._inference.acquire(blocking=False):
+            return
+        try:
+            if self._warmup_stop.is_set():
+                return
+            from .session import WorkbenchSession
+
+            prepared = WorkbenchSession.prewarm(self._warmup_stop)
+            with self._condition:
+                if prepared is not None and not self._closed:
+                    self._preloaded_sky = prepared
+                    expiry = Timer(_PRELOADED_SKY_SECONDS, self._take_preloaded_sky)
+                    self._preload_expiry = expiry
+                    expiry.daemon = True
+                    expiry.start()
+        except Exception:
+            traceback.print_exc()  # An optional preload still leaves the regular render path available.
+        finally:
+            self._inference.release()
+
+    def _take_preloaded_sky(self):
+        with self._condition:
+            prepared, self._preloaded_sky = self._preloaded_sky, None
+            if self._preload_expiry is not None:
+                self._preload_expiry.cancel()
+                self._preload_expiry = None
+            return prepared
 
     @contextmanager
     def maintenance(self):
@@ -622,7 +671,8 @@ class Documents:
                 return saved
             settings = state['settings']
             return WorkbenchSession.open(source, root, method=settings['method'], lam=settings['l0'],
-                                         downscale=settings['downscale'], on_stage=on_stage)
+                                         downscale=settings['downscale'], on_stage=on_stage,
+                                         preloaded_sky=self._take_preloaded_sky())
 
     @staticmethod
     def _saved_session(source, root, state):
@@ -731,6 +781,7 @@ class Documents:
     def open(self, content, name):
         if not isinstance(content, bytes) or not content or len(content) > 64 * 1024 * 1024:
             raise ValueError('请选择不超过 64 MiB 的图片。')
+        self._warmup_stop.set()
         doc = hashlib.sha256(content).hexdigest()
         with self._condition:
             if doc in self._documents:

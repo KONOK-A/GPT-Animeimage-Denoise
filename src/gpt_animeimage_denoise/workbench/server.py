@@ -304,6 +304,11 @@ def create_server(workspace, *, port=0):
                     return self._json(_options())
                 if not post and path.path == '/api/instance':
                     return self._json({'instance': self.server.instance})
+                if post and path.path == '/api/prepare-models':
+                    if self._read_json():
+                        raise ValueError('预热模型的请求须为空。')
+                    self.server.documents.prepare_models()
+                    return self._json({})
                 if post and path.path == '/api/page':
                     value = self._read_json(512)
                     identifier, opened = value.get('id'), value.get('open')

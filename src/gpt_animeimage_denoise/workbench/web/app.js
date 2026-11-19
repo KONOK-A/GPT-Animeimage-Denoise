@@ -3002,13 +3002,21 @@ const preferences = createWorkbenchSettings({
     }
   },
 });
-preferences.load().catch(showError);
+const preferencesReady = preferences.load().catch(showError);
 request('/api/options').then(reply => reply.json()).then(options => {
   installOptions(options);
   const linkedDraft = /^#draft=([0-9a-f]{64})$/.exec(window.location.hash)?.[1];
   if (linkedDraft) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   const previous = linkedDraft || storage('getItem', 'gaid-active-document');
-  if (previous) openRecent(previous);
+  if (previous) {
+    openRecent(previous);
+    return;
+  }
+  preferencesReady.then(() => {
+    setTimeout(() => {
+      if (!state.doc && !state.opening && !state.exited) post('/api/prepare-models', {}).catch(() => {});
+    }, 800);
+  });
 }).catch(error => {
   status('无法连接本机服务，请确认工作台已启动后刷新页面。', 'error');
   showError(error);

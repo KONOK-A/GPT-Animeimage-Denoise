@@ -165,7 +165,7 @@ def _prompt_pixels(prompt, h, w):
 
 
 class FusionModels:
-    def __init__(self, assets=None, device='cuda', anime_assets=None, *, defer_checkpoint_checks=False):
+    def __init__(self, assets=None, device='cuda', anime_assets=None, *, defer_checkpoint_checks=False, preloaded_sky=None):
         root = model_root()
         self.assets = Path(assets or root/'v2').resolve()
         self.anime_assets = Path(anime_assets or root/'AnimeSeg').resolve()
@@ -173,6 +173,7 @@ class FusionModels:
         if torch.device(self.device).type not in ['cpu', 'cuda']:
             raise ValueError('FusionModels supports explicit cpu or cuda devices')
         self.sky = self.parts = self.m2f = self.sam = None
+        self._preloaded_sky = preloaded_sky
         self._sam_image_key = None
         self._m2f_info = {}
         self.identities = self._verify_assets(defer_checkpoint_checks=defer_checkpoint_checks)
@@ -214,13 +215,32 @@ class FusionModels:
                     result[prefix+path.relative_to(root).as_posix()] = _digest(path)
         return result
 
-    def _build_sky(self):
+    def _sky_identity(self):
+        name = 'skytnt/model.safetensors'
+        stat = (self.assets / name).stat()
+        return (self.assets, self.identities['v2/' + name], self.identities['v2/skytnt/isnet.py'],
+                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def preload_sky(self):
+        """Prepare an owned CPU copy with the same verification as a first inference."""
+        identity = self._sky_identity()
+        model = self._load_sky_cpu()
+        if self._sky_identity() != identity:
+            raise ValueError('SkyTNT checkpoint changed while preparing the model')
+        return identity, model
+
+    def _load_sky_cpu(self):
         from safetensors.torch import load_file
         _verified_hash(self.assets/'skytnt/model.safetensors', self.identities['v2/skytnt/model.safetensors'])
         module = _file_module('v21_isnet', self.assets/'skytnt/isnet.py')
         model = module.ISNetDIS().eval()
         state = load_file(str(self.assets/'skytnt/model.safetensors'), device='cpu')
         model.load_state_dict({k.removeprefix('net.'): v for k, v in state.items() if k.startswith('net.')}, strict=True)
+        return model
+
+    def _build_sky(self):
+        prepared, self._preloaded_sky = self._preloaded_sky, None
+        model = prepared[1] if prepared is not None and prepared[0] == self._sky_identity() else self._load_sky_cpu()
         return model.to(device=self.device, dtype=torch.float32)
 
     def _build_see(self):
@@ -311,7 +331,9 @@ class FusionModels:
         if self.device.startswith('cuda'):
             torch.cuda.empty_cache()
 
-    def release(self):
+    def release(self, *, keep_preloaded_sky=False):
+        if not keep_preloaded_sky:
+            self._preloaded_sky = None
         had_model = any(value is not None for value in (self.sky, self.parts, self.m2f, self.sam))
         for name in ['sky', 'parts', 'm2f', 'sam']:
             self._clear(name)
@@ -323,7 +345,7 @@ class FusionModels:
         h0, w0 = _validate_rgb(rgb_uint8)
         if type(dual_view) is not bool:
             raise ValueError('dual_view must be a bool')
-        self.release()
+        self.release(keep_preloaded_sky=True)
         provenance = {'input_shape': list(rgb_uint8.shape), 'grid': 'EXIF-oriented-original',
                       'model_hashes': self.identities, 'device': self.device, 'signature': self.signature}
         tensor, (h, w, top, left) = _prepare_sky(rgb_uint8)

@@ -94,7 +94,7 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
   let localSettings = { defaults: doc.settings, export_dir: '', cache_dir: '', theme: theme || 'system',
     remember_brush: false, brush_radius: 24, brush_feather: 0, exit_on_close: false };
   const frames = [];
-  const api = { requests: [], workers: [], beforeOpen: null, beforeEdit: null, beforeDecode: null, beforeSam: null,
+  const api = { requests: [], workers: [], timers: [], beforeOpen: null, beforeEdit: null, beforeDecode: null, beforeSam: null,
     beforeChanges: null, beforeSettings: null, changeCounts: { added: 0, removed: 0, stronger: 0, weaker: 0, reclassified: 0 },
     changeCountsByStage: {}, changedParts: [],
     manualFrames: false, beforeMagnetic: null, magneticStatus: 200,
@@ -144,7 +144,7 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
     createImageBitmap: async image => ({ width: image.naturalWidth, height: image.naturalHeight, source: image.src, close() {} }),
     requestAnimationFrame: callback => api.manualFrames ? frames.push(callback) : setImmediate(callback),
     URL: { createObjectURL: blob => 'blob:' + (typeof blob === 'string' ? blob : 'file'), revokeObjectURL() {} },
-    setTimeout: () => 1, clearTimeout() {},
+    setTimeout(callback, delay) { return api.timers.push({ callback, delay }); }, clearTimeout() {},
     fetch: async (route, args) => {
       api.requests.push({ route, args });
       const response = (data, status = 200, etag = null) => ({
@@ -210,6 +210,24 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
   run(script);
   return { elements, nodes, run, api, window: win, storage, root, scheme, preferences };
 }
+
+test('model prewarm is deferred until the empty workbench is ready', async () => {
+  const warmups = h => h.api.requests.filter(item => item.route === '/api/prepare-models');
+  const blank = harness();
+  await tick();
+  assert.equal(blank.elements.get('open').disabled, false);
+  assert.equal(warmups(blank).length, 0);
+  assert.equal(blank.api.timers.length, 1);
+  blank.api.timers[0].callback();
+  assert.equal(warmups(blank).length, 1);
+
+  const immediate = harness();
+  await tick();
+  const [warmup] = immediate.api.timers;
+  await immediate.run('openFile(file)');
+  warmup.callback();
+  assert.equal(warmups(immediate).length, 0);
+});
 
 test('polling an unchanged draft does not repaint the canvas', async () => {
   const h = harness();

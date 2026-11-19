@@ -1,6 +1,7 @@
 """Keep one analysed image and its denoising candidates available to the workbench."""
 from collections import OrderedDict
 import hashlib
+from importlib import import_module
 from io import BytesIO
 import json
 from pathlib import Path
@@ -95,7 +96,8 @@ class WorkbenchSession:
         self._sr_key = None
 
     @classmethod
-    def open(cls, source, workspace, *, device='auto', method='l0', lam=None, downscale=DOWNSCALE, on_stage=None):
+    def open(cls, source, workspace, *, device='auto', method='l0', lam=None, downscale=DOWNSCALE,
+             on_stage=None, preloaded_sky=None):
         """Run or resume a fusion case using the document's actual denoiser."""
         import torch
 
@@ -111,7 +113,8 @@ class WorkbenchSession:
         if device.startswith('cuda') and not torch.cuda.is_available():
             raise RuntimeError('CUDA is unavailable; select --device cpu')
 
-        models = FusionModels(device=device, defer_checkpoint_checks=True)
+        models = FusionModels(device=device, defer_checkpoint_checks=True, preloaded_sky=preloaded_sky)
+        del preloaded_sky  # Let the adapter release the moved model after the Sky pass.
         try:
             report = process_image(source, output, models, case_id='analysis', profile='fusion',
                                    denoiser=method, lam=lam, downscale=downscale, on_stage=on_stage, _workbench=True)
@@ -120,6 +123,24 @@ class WorkbenchSession:
         if _sha(source) != digest:
             raise ValueError('Source changed while preparing the workbench')
         return cls._load_completed_case(source, output, report, digest, downscale, models=models)
+
+    @staticmethod
+    def prewarm(stop):
+        """Prepare the first CPU model and import dependencies for the later stages."""
+        from ..fusion_models import FusionModels
+
+        if stop.is_set():
+            return None
+        import_module('..fusion_pipeline', __package__)
+        if stop.is_set():
+            return None
+        adapter = FusionModels(device='cpu', defer_checkpoint_checks=True)
+        prepared = adapter.preload_sky() if not stop.is_set() else None
+        for dependency in ('accelerate', 'transformers.models.mask2former.modeling_mask2former'):
+            if stop.is_set():
+                break
+            import_module(dependency)
+        return prepared
 
     @classmethod
     def from_cache(cls, source, workspace, digest, size, *, method='l0', lam=None, downscale=DOWNSCALE):

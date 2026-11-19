@@ -166,6 +166,28 @@ class StrictLoadingContracts(unittest.TestCase):
                     models._build_sky()
                 self.assertEqual(verify.call_args.args, (path, expected))
 
+    def test_preloaded_sky_is_used_once_and_rejected_if_the_checkpoint_changes(self):
+        models = fixture_models()
+        with tempfile.TemporaryDirectory() as folder:
+            models.assets = Path(folder)
+            checkpoint = models.assets / 'skytnt' / 'model.safetensors'
+            checkpoint.parent.mkdir()
+            checkpoint.write_bytes(b'original')
+            models.identities.update({'v2/skytnt/model.safetensors': 'checkpoint',
+                                      'v2/skytnt/isnet.py': 'implementation'})
+            first, second = FakeSky(), FakeSky()
+            with patch.object(models, '_load_sky_cpu', create=True, side_effect=[first, first, second]) as load:
+                models._preloaded_sky = models.preload_sky()
+                self.assertIs(models._build_sky(), first)
+                self.assertIsNone(models._preloaded_sky)
+                load.assert_called_once()
+
+                models._preloaded_sky = models.preload_sky()
+                checkpoint.write_bytes(b'replaced checkpoint')
+                self.assertIs(models._build_sky(), second)
+                self.assertIsNone(models._preloaded_sky)
+                self.assertEqual(load.call_count, 3)
+
     def test_see_rejects_foreign_cached_dependencies_with_local_entry_module(self):
         module = adapter()
         models = fixture_models()
