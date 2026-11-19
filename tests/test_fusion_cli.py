@@ -1,13 +1,39 @@
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from gpt_animeimage_denoise import cli
+from gpt_animeimage_denoise import __version__, cli
 
 
 class FusionCLITest(unittest.TestCase):
+    def test_version_works_without_a_command_or_models(self):
+        output = StringIO()
+        modules = {'gpt_animeimage_denoise.fusion_models': None, 'torch': None}
+        with (mock.patch.dict(sys.modules, modules),
+              mock.patch.object(sys, 'argv', ['gaid']),
+              redirect_stdout(output)):
+            with self.assertRaises(SystemExit) as result:
+                cli.main(['--version'])
+
+        self.assertEqual(result.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), f'gaid {__version__}')
+
+    def test_model_help_supports_redirected_gbk_output(self):
+        models = Path('models-\N{TEST TUBE}').resolve()
+        environment = {'GPT_ANIMEIMAGE_DENOISE_MODEL_DIR': str(models)}
+        with mock.patch.dict('os.environ', environment):
+            for command in ('process', 'batch'):
+                with (self.subTest(command=command),
+                      TextIOWrapper(BytesIO(), encoding='gbk') as output,
+                      redirect_stdout(output)):
+                    with self.assertRaises(SystemExit) as result:
+                        cli.main([command, '--help'])
+                    self.assertEqual(result.exception.code, 0)
+
     def test_preview_dispatches_without_importing_torch_or_models(self):
         preview = mock.Mock(return_value={'output': 'preview.png'})
         modules = {'gpt_animeimage_denoise.preview': SimpleNamespace(preview_case=preview),

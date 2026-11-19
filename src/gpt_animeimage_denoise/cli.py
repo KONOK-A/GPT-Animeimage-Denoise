@@ -1,9 +1,10 @@
-"""Run character-aware denoising, cached previews or dataset inventory."""
+"""Denoise anime illustrations, preview cached results, or open the workbench."""
 import argparse
 import json
 from pathlib import Path
 import sys
 
+from . import __version__
 from .denoisers import METHOD_CHOICES
 from .model_paths import model_root
 
@@ -17,9 +18,13 @@ def _fraction(value):
 
 def _model_args(parser):
     assets_root = model_root()
+    parser.epilog = ('Set GPT_ANIMEIMAGE_DENOISE_MODEL_DIR to choose the model root. '
+                     'It defaults to ./models relative to the current directory.')
     parser.add_argument('--device', default='auto', help='auto, cpu, cuda or cuda:N')
-    parser.add_argument('--assets', type=Path, default=assets_root / 'v2')
-    parser.add_argument('--anime-assets', type=Path, default=assets_root / 'AnimeSeg')
+    parser.add_argument('--assets', type=Path, default=assets_root / 'v2',
+                        help='Region model directory (defaults to <model root>/v2)')
+    parser.add_argument('--anime-assets', type=Path, default=assets_root / 'AnimeSeg',
+                        help='AnimeSeg model directory (defaults to <model root>/AnimeSeg)')
     parser.add_argument('--lambda', '--l0', dest='lam', type=float, default=None,
                         help='L0 strength; defaults to 0.0005 or the named L0 preset')
     parser.add_argument('--sigma', type=float, default=12, help='Residual sigma at short-edge 2048')
@@ -38,24 +43,30 @@ def _model_args(parser):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest='command', required=True)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     epilog='Run gaid <command> --help for command options.')
+    parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
+    commands = parser.add_subparsers(dest='command', required=True, title='commands')
 
-    inventory = commands.add_parser('inventory')
-    inventory.add_argument('input', type=Path)
-    inventory.add_argument('--out', type=Path, required=True)
-    inventory.add_argument('--seed', type=int, default=20261107)
-    inventory.add_argument('--prior-seen', action='append', default=[])
+    inventory = commands.add_parser('inventory', help='Create a manifest for repeatable batches',
+                                    description='Scan an image directory and write a dataset manifest.')
+    inventory.add_argument('input', type=Path, help='Source image directory to scan recursively')
+    inventory.add_argument('--out', type=Path, required=True,
+                           help='Directory for manifest.json and summaries. Must be outside the source directory.')
+    inventory.add_argument('--seed', type=int, default=20261107, help='Dataset split seed (defaults to %(default)s)')
+    inventory.add_argument('--prior-seen', action='append', default=[],
+                           help='Previously seen filename or task prefix (repeatable)')
 
-    process = commands.add_parser('process')
-    process.add_argument('input', type=Path)
-    process.add_argument('--out', type=Path, required=True)
-    process.add_argument('--edits', type=Path)
+    process = commands.add_parser('process', help='Denoise one image by character region',
+                                  description='Save result.png, weight.png, and report.json in a case directory.')
+    process.add_argument('input', type=Path, help='Source image to process')
+    process.add_argument('--out', type=Path, required=True, help='Output root for the case directory and cache')
+    process.add_argument('--edits', type=Path, help='Corrections JSON for this source image')
     _model_args(process)
 
     preview = commands.add_parser('preview', help='Recombine a completed case without model inference')
     preview.add_argument('case', type=Path, help='Completed case directory containing report.json')
-    preview.add_argument('--out', type=Path, required=True, help='New preview PNG path')
+    preview.add_argument('--out', type=Path, required=True, help='New PNG path outside the case and its cache')
     preview.add_argument('--strength', type=_fraction, help='Absolute blend strength in 0..1')
     preview.add_argument('--restoration-gain', type=_fraction, help='Gaussian residual restoration in 0..1')
     preview.add_argument('--sigma', type=float, help='Positive residual sigma at short-edge 2048')
@@ -64,14 +75,17 @@ def main(argv=None):
     ui.add_argument('--port', type=int, default=0, help='Local port (default: choose an available port)')
     ui.add_argument('--no-browser', action='store_true', help='Print the address without opening a browser')
 
-    batch = commands.add_parser('batch')
+    batch = commands.add_parser('batch', help='Denoise images from a directory or manifest',
+                                description='Process eligible images and write a summary.csv with per-image results.')
     batch_input = batch.add_mutually_exclusive_group(required=True)
-    batch_input.add_argument('--manifest', type=Path)
-    batch_input.add_argument('--directory', type=Path)
-    batch.add_argument('--edits-dir', type=Path)
-    batch.add_argument('--out', type=Path, required=True)
-    batch.add_argument('--split', choices=['tune', 'holdout', 'all'], default='all')
-    batch.add_argument('--limit', type=int)
+    batch_input.add_argument('--manifest', type=Path, help='Manifest JSON created by gaid inventory')
+    batch_input.add_argument('--directory', type=Path, help='Source image directory to scan recursively')
+    batch.add_argument('--edits-dir', type=Path, help='Directory of corrections JSON files matched by case ID')
+    batch.add_argument('--out', type=Path, required=True,
+                       help='Output root for cases and summary.csv. Keep it outside --directory.')
+    batch.add_argument('--split', choices=['tune', 'holdout', 'all'], default='all',
+                       help='Dataset split to process (defaults to %(default)s)')
+    batch.add_argument('--limit', type=int, help='Maximum number of cases to process after filtering by split')
     _model_args(batch)
 
     args = parser.parse_args(argv)

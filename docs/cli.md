@@ -2,6 +2,12 @@
 
 先按 [README](../README.md#安装) 安装项目。以下命令在项目根目录的 PowerShell 中运行。
 
+```powershell
+.\.venv\Scripts\gaid.exe --version
+.\.venv\Scripts\gaid.exe --help
+.\.venv\Scripts\gaid.exe process --help
+```
+
 ## 按人物部位去噪
 
 先 [准备分区模型](models.md)。
@@ -51,5 +57,3 @@
 ```
 
 预览在 CPU 上复用已保存的选区和浮点候选。可调 `--strength`、`--restoration-gain` 和 `--sigma`，省略时沿用案例参数。要自由调整整体强度，先以 `--strength 1` 生成案例。每次预览指定新的 PNG 路径。更换算法、L0 或选区需重新处理。
-
-在相应命令后加 `--help` 可查看完整参数。

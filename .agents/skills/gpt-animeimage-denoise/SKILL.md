@@ -17,6 +17,23 @@ description: Use the local GPT AnimeImage Denoise tool to reduce fish-scale arti
 
 使用源码仓库内的入口时，GAID 仓库是 `SKILL.md` 所在目录向上的第三级目录。使用这个仓库的 `.venv` 解释器和 `models/`，或机器上已配置的 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR`。用户级安装路径移动或失效时，用有效的 GAID 环境重新运行该仓库的 `tools/install_agent_skill.py`。
 
+GAID CLI 从 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR` 读取模型根目录。变量未设置时，默认用调用目录下的 `./models`。`process` 和 `batch` 的分区模型目录默认为 `<模型根目录>/v2` 与 `<模型根目录>/AnimeSeg`，可分别用 `--assets` 和 `--anime-assets` 指定。
+
+## 查询 CLI 和创建清单
+
+`--help` 列出子命令，在子命令后加 `--help` 可查看它的参数。`--version` 显示 GAID 版本。以下 PowerShell 7 示例使用上面定位的解释器。
+
+```powershell
+$python = '<已定位的 GAID Python 绝对路径>'
+$gaidArgs = @('-P', '-X', 'utf8', '-m', 'gpt_animeimage_denoise.cli')
+& $python @gaidArgs --help
+& $python @gaidArgs --version
+& $python @gaidArgs process --help
+& $python @gaidArgs inventory --help
+```
+
+需要固定批次清单时，用 `inventory` 生成 `manifest.json`，再传给 `batch --manifest`。`inventory --out` 必须位于输入目录之外。例如 `& $python @gaidArgs inventory .\images --out .\inventory` 将清单写到输入目录的同级目录。
+
 ## 默认按部位去噪
 
 遇到模型缺失或校验失败时，查阅 GAID 仓库的 `docs/models.md`。分区模型完整下载约 3.3 GB。
