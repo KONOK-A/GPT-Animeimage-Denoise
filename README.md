@@ -36,16 +36,24 @@ py -3.12 -m venv .venv
 
 [命令行手册](docs/cli.md) · [开发说明](docs/development.md)
 
-### 用 AI Agent 去噪
+### 在任意项目用 AI Agent 去噪
 
-按上文安装 GAID 并准备分区模型后，在本机从仓库根目录打开 Agent。
+按上文在本机安装 GAID 并准备分区模型，在 GAID 仓库运行一次用户级安装。
 
-- **Codex** 会发现仓库内的 skill。输入 `$gpt-animeimage-denoise` 选中它。[Codex skill](.agents/skills/gpt-animeimage-denoise/SKILL.md)
-- **Claude Code** 会从项目的 `.claude/skills/` 加载同一份 skill。运行 `claude`，在会话里输入 `/gpt-animeimage-denoise`。[Claude Code skill](.claude/skills/gpt-animeimage-denoise/SKILL.md)
+```powershell
+& .\.venv\Scripts\python.exe -X utf8 .\tools\install_agent_skill.py
+```
 
-调用时一起给出原图和处理要求，例如「给 `D:\images\插画.png` 去鱼鳞纹，尽量保留发丝和背景，交付原尺寸 PNG」。也可以使用同一会话中生图工具返回的原图。
+安装后，从任意本地工作目录启动 Agent，即可调用同一份降噪 skill。
 
-维护时以 `.agents/skills/` 下的 `SKILL.md` 为源文件。更新后在项目根目录执行以下 PowerShell 命令，同步 Claude Code 入口。
+- **Codex** 从 `~/.agents/skills/` 发现用户级 skill。输入 `$gpt-animeimage-denoise`。
+- **Claude Code** 从 `~/.claude/skills/` 发现用户级 skill。输入 `/gpt-animeimage-denoise`。若设有 `CLAUDE_CONFIG_DIR`，安装器会使用该目录下的 `skills/`。
+
+调用时一起给出原图和处理要求，例如「给 `D:\images\插画.png` 去鱼鳞纹，尽量保留发丝和背景，交付原尺寸 PNG」。也可以使用同一会话中生图工具返回的原图。默认结果位于调用时的工作目录下的 `outputs/agent-denoise/`。
+
+在安装命令末尾加 `--agent codex` 或 `--agent claude` 可选择客户端。安装会记录 GAID 路径、所用的 Python 和模型目录，支持 [复用本机模型](docs/models.md#复用本机模型)。移动项目、更换环境或更新 skill 后，重新运行安装命令。
+
+维护时以 [`.agents` 中的 SKILL.md](.agents/skills/gpt-animeimage-denoise/SKILL.md) 为源文件。更新后在项目根目录同步 [Claude Code 项目入口](.claude/skills/gpt-animeimage-denoise/SKILL.md)。
 
 ```powershell
 Copy-Item -LiteralPath '.agents/skills/gpt-animeimage-denoise/SKILL.md' -Destination '.claude/skills/gpt-animeimage-denoise/SKILL.md'
