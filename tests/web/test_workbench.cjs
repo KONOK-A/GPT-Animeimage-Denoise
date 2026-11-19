@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const web = path.resolve(__dirname, '../../src/gpt_animeimage_denoise/workbench/web');
 const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
-const script = ['settings.js', 'app.js'].map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
+const script = ['settings.js', 'tools.js', 'app.js'].map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
 
 class Element {
   constructor(tag = 'div') {
@@ -32,7 +32,7 @@ class Element {
   click() { return this.fire('click'); }
   remove() {}
   checkValidity() { return true; }
-  reportValidity() {}
+  reportValidity() { return this.checkValidity(); }
   setPointerCapture() {}
   focus() { this.focused = true; }
   fire(type, event = {}) { return this.handlers.get(type)?.({ target: this, type, ...event }); }
@@ -62,7 +62,7 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-function harness({ theme, prefersDark = false } = {}) {
+function harness({ theme, prefersDark = false, draftLink } = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const nodes = {};
   for (const [key, values] of [
@@ -79,22 +79,24 @@ function harness({ theme, prefersDark = false } = {}) {
     });
   }
   for (const name of ['strength', 'restoration_gain', 'structure_protection', 'radius', 'feather', 'protection']) elements.get(name).type = 'range';
-  elements.get('radius').value = '24';
+  Object.assign(elements.get('radius'), { min: '1', max: '256', value: '24' });
   elements.get('feather').value = '0';
   elements.get('magnetic-radius').value = '10';
   elements.get('protection').value = '.9';
   elements.get('lasso-action').value = 'include';
   elements.get('stage').dataset.tool = 'pan';
+  elements.get('tools').dataset.placement = /id="tools"[^>]*data-placement="([^"]+)"/.exec(html)?.[1];
   let doc = {
     id: 'source', name: file.name, width: 640, height: 480, revision: 0,
     settings: { ...options.defaults, modules: options.default_modules, part_strengths: {} },
     edits: [], cursor: 0, status: 'queued', phase: 'analysis', error: null, b: null, a: null,
   };
   let localSettings = { defaults: doc.settings, export_dir: '', cache_dir: '', theme: theme || 'system',
-    remember_brush: false, brush_radius: 24, brush_feather: 0 };
+    remember_brush: false, brush_radius: 24, brush_feather: 0, exit_on_close: false };
   const frames = [];
   const api = { requests: [], workers: [], beforeOpen: null, beforeEdit: null, beforeDecode: null, beforeSam: null,
-    beforeChanges: null, changeCounts: { added: 0, removed: 0, stronger: 0, weaker: 0, reclassified: 0 },
+    beforeChanges: null, beforeSettings: null, changeCounts: { added: 0, removed: 0, stronger: 0, weaker: 0, reclassified: 0 },
+    changeCountsByStage: {}, changedParts: [],
     manualFrames: false, beforeMagnetic: null, magneticStatus: 200,
     frame: () => { for (const callback of frames.splice(0)) callback(); },
     mutate: change => { doc = { ...doc, ...change }; },
@@ -123,6 +125,9 @@ function harness({ theme, prefersDark = false } = {}) {
     },
     window: {
       devicePixelRatio: 1, addEventListener: (...args) => win.addEventListener(...args),
+      location: { origin: 'http://127.0.0.1:1790', pathname: '/', search: '', hash: draftLink ? '#draft=' + draftLink : '' },
+      history: { replaceState: (...args) => { api.lastHistoryReplace = args; } },
+      close: () => { win.closed = true; },
       matchMedia: query => query.includes('color-scheme') ? scheme : compact,
       localStorage: { setItem: (key, value) => preferences.set(key, value), removeItem: key => preferences.delete(key) },
       sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
@@ -132,7 +137,7 @@ function harness({ theme, prefersDark = false } = {}) {
       async decode() { await api.beforeDecode?.(this.src); }
     },
     ResizeObserver: class { observe() {} },
-    AbortController,
+    AbortController, Blob, crypto: require('node:crypto').webcrypto,
     Worker: class {
       constructor(url) { this.url = url; this.messages = []; api.workers.push(this); }
       postMessage(message) { this.messages.push(message); }
@@ -151,15 +156,21 @@ function harness({ theme, prefersDark = false } = {}) {
       if (route === '/api/options') return response(options);
       if (route === '/api/exit') return response({ closing: true });
       if (route === '/api/settings') {
-        if (args.method === 'POST') localSettings = { ...localSettings, ...JSON.parse(args.body) };
+        if (args.method === 'POST') {
+          await api.beforeSettings;
+          localSettings = { ...localSettings, ...JSON.parse(args.body) };
+        }
         return response(localSettings);
       }
       if (route === '/api/cache') return response({ bytes: 0, path: 'G:/cache' });
       if (route.endsWith('/export')) return response({ path: 'G:/exports/export.png' });
       if (route.includes('/changes?revision=')) {
-        const revision = Number(route.split('=').at(-1)), counts = { ...api.changeCounts };
-        await api.beforeChanges;
-        return response({ revision, counts, overlay: Object.values(counts).some(Boolean) ? 'data:image/png;base64,AAAA' : null });
+        const query = new URLSearchParams(route.split('?')[1]);
+        const revision = Number(query.get('revision')), stage = query.get('stage');
+        const counts = { ...(api.changeCountsByStage[stage] || api.changeCounts) };
+        await (typeof api.beforeChanges === 'function' ? api.beforeChanges(stage) : api.beforeChanges);
+        return response({ revision, stage, counts, overlay: Object.values(counts).some(Boolean) ? 'data:image/png;base64,AAAA' : null,
+          ...(stage === 'parts' ? { parts: api.changedParts } : {}) });
       }
       if (route.includes('view=magnetic_source')) {
         await api.beforeMagnetic;
@@ -226,6 +237,47 @@ test('appearance follows the system, supports manual overrides and can return to
   assert.equal(reopened.nodes['theme-option'][1]['aria-pressed'], 'true');
 });
 
+test('the tool handle detaches, clamps, snaps and restores the active tool without editing', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  const toolbar = h.elements.get('tools'), grip = h.elements.get('tools-handle');
+  assert.ok(grip, 'the tools have a draggable handle');
+  const box = (left, top, width, height) => ({ left, top, width, height });
+  h.elements.get('workspace').getBoundingClientRect = () => box(0, 50, 960, 640);
+  h.elements.get('stage').getBoundingClientRect = () => box(100, 130, 600, 440);
+  toolbar.getBoundingClientRect = () => box(20, 100, 50, 220);
+  grip.getBoundingClientRect = () => box(20, 100, 50, 24);
+  const pointer = (type, clientX, clientY) => grip.fire(type, {
+    pointerId: 4, button: 0, clientX, clientY, preventDefault() {},
+  });
+
+  pointer('pointerdown', 45, 112);
+  pointer('pointermove', 47, 113);
+  assert.equal(toolbar.dataset.placement, 'docked');
+  pointer('pointermove', 380, 290);
+  assert.equal(toolbar.dataset.placement, 'floating');
+  assert.equal(toolbar.style.transform, 'translate(355px, 228px)');
+  pointer('pointermove', 900, 700);
+  assert.equal(toolbar.style.transform, 'translate(642px, 292px)');
+  pointer('pointerup', 900, 700);
+  grip.fire('click', { detail: 1 });
+  assert.equal(toolbar.dataset.placement, 'floating');
+  h.nodes.tool.find(button => button.dataset.tool === 'lasso').click();
+  assert.equal(h.run('state.tool'), 'lasso');
+  assert.equal(h.run('state.draft.cursor'), 0);
+
+  grip.fire('keydown', { key: 'ArrowLeft', preventDefault() {} });
+  assert.equal(toolbar.style.transform, 'translate(626px, 292px)');
+  pointer('pointerdown', 45, 112);
+  pointer('pointermove', 108, 180);
+  assert.equal(h.elements.get('stage').dataset.toolsDock, 'true');
+  pointer('pointerup', 108, 180);
+  assert.equal(toolbar.dataset.placement, 'docked');
+  assert.equal(h.run('state.tool'), 'lasso');
+});
+
 test('Space on a disclosure does not trigger the canvas pan shortcut', async () => {
   const h = harness();
   await tick();
@@ -258,16 +310,32 @@ test('manual changes are lazy, describe actual counts, and keep the selected too
   assert.equal(h.run('state.view'), 'changes');
   assert.equal(h.run('state.tool'), 'include');
   assert.match(h.elements.get('changes-status').textContent, /无手动改动/);
-  h.run("addEdit({tool:'include',points:[[10,10]],radius:5})");
+  const legend = h.elements.get('range-changes-legend');
+  assert.ok(legend, 'the range audit has a canvas legend');
+  assert.equal(legend.hidden, true);
+  h.run("selectView('weight'); addEdit({tool:'include',points:[[10,10]],radius:5})");
   assert.match(h.elements.get('change-history-list').children[0].children[1].textContent, /待更新/);
   assert.equal(h.api.requests.filter(x => x.route.includes('/changes?')).length, 1);
   await h.run('saveDraft()');
   h.api.changeCounts.added = 32;
+  h.api.changeCounts.stronger = 12;
   h.api.ready();
   await h.run('pollDocument()');
+  h.elements.get('show-manual-changes').click();
   await tick();
-  assert.equal(h.run("state.images.get('changes').revision"), 1);
+  assert.equal(h.run("state.images.get('changes:range').revision"), 1);
   assert.match(h.elements.get('changes-added').textContent, /32/);
+  assert.equal(legend.hidden, false);
+  assert.equal(h.elements.get('range-legend-added').hidden, false);
+  assert.equal(h.elements.get('range-legend-stronger').hidden, false);
+  assert.equal(h.elements.get('range-legend-removed').hidden, true);
+  assert.equal(h.elements.get('range-legend-weaker').hidden, true);
+  h.window.fire('keydown', { key: 'x' });
+  assert.equal(legend.hidden, true);
+  h.window.fire('keyup', { key: 'x' });
+  assert.equal(legend.hidden, false);
+  h.run("selectView('compare')");
+  assert.equal(legend.hidden, true);
   assert.match(h.elements.get('change-history-list').children[0].children[1].textContent, /B 已包含/);
 });
 
@@ -282,17 +350,67 @@ test('outdated change responses never install over a newer result', async () => 
   h.api.beforeChanges = pending.promise;
   h.api.changeCounts.added = 50;
   h.run("selectView('changes')");
-  h.run("addEdit({tool:'include',points:[[10,10]],radius:5})");
+  h.run("selectView('weight'); addEdit({tool:'include',points:[[10,10]],radius:5})");
   await h.run('saveDraft()');
   h.api.beforeChanges = null;
-  h.api.changeCounts.added = 3;
+  h.api.changeCounts.added = 0;
+  h.api.changeCounts.weaker = 3;
   h.api.ready();
   await h.run('pollDocument()');
+  h.run("selectView('changes')");
   await tick();
   pending.resolve();
   await tick();
-  assert.equal(h.run("state.images.get('changes').revision"), 1);
-  assert.equal(h.run("state.images.get('changes').counts.added"), 3);
+  assert.equal(h.run("state.images.get('changes:range').revision"), 1);
+  assert.equal(h.run("state.images.get('changes:range').counts.weaker"), 3);
+  assert.equal(h.elements.get('range-legend-added').hidden, true);
+  assert.equal(h.elements.get('range-legend-weaker').hidden, false);
+});
+
+test('parts and range show their own edit rows and keep concurrent change previews separate', async () => {
+  const h = harness();
+  h.api.mutate({ edits: [
+    { stage: 'parts', tool: 'classify', module: 'outfit', points: [[20, 30]], radius: 3 },
+    { stage: 'range', tool: 'exclude', points: [[80, 90]], radius: 3 },
+  ], cursor: 2 });
+  h.api.ready();
+  await tick();
+  await h.run('openFile(file)');
+  const history = () => h.elements.get('change-history-list').children.map(row => row.children[0].textContent);
+  const pending = deferred();
+  h.api.beforeChanges = stage => stage === 'parts' ? pending.promise : undefined;
+  h.api.changeCountsByStage = {
+    parts: { reclassified: 13 },
+    range: { added: 0, removed: 29, stronger: 0, weaker: 0 },
+  };
+  h.api.changedParts = ['hair', 'outfit', 'unknown'];
+  h.run("selectMode('parts'); selectView('changes')");
+  assert.deepEqual(history(), ['1  归为outfit']);
+  h.run("selectMode('range'); selectView('changes')");
+  await tick();
+  assert.deepEqual(history(), ['2  移出处理范围']);
+  assert.match(h.elements.get('changes-removed').textContent, /29/);
+  assert.equal(h.elements.get('change-count-reclassified').hidden, true);
+  pending.resolve();
+  await tick();
+  assert.match(h.elements.get('changes-removed').textContent, /29/);
+  h.run("selectMode('parts'); selectView('changes')");
+  await tick();
+  assert.match(h.elements.get('changes-reclassified').textContent, /13/);
+  assert.equal(h.elements.get('change-count-removed').hidden, true);
+  const legend = h.elements.get('part-changes-legend');
+  assert.ok(legend, 'the parts audit has a destination legend');
+  assert.equal(legend.hidden, false);
+  assert.deepEqual(legend.children.map(item => item.children[1]), ['hair', 'outfit', '待确认']);
+  assert.equal(legend.children.at(-1).children[0].className, 'hatch-key');
+  h.window.fire('keydown', { key: 'x' });
+  assert.equal(legend.hidden, true);
+  h.window.fire('keyup', { key: 'x' });
+  assert.equal(legend.hidden, false);
+  h.run("selectMode('range'); selectView('changes')");
+  assert.equal(legend.hidden, true);
+  assert.deepEqual(h.api.requests.filter(x => x.route.includes('/changes?')).map(x => x.route.split('&stage=')[1]),
+    ['parts', 'range']);
 });
 
 test('a saved no-op can be located without changing tool, view or edit history', async () => {
@@ -327,14 +445,14 @@ test('the history label records the value and target used by an edit', async () 
   assert.match(h.run("editHistoryLabel({tool:'override',module:'skin'})"), /皮肤/);
 });
 
-test('full result stays visible while choosing a tool and quick strength keeps the algorithm', async () => {
+test('quick strength in the effect editor keeps the algorithm and displays the result', async () => {
   const h = harness();
   await tick();
   await h.run('openFile(file)');
   h.api.ready();
   await h.run('pollDocument()');
   await tick();
-  h.run("selectMode('range'); selectView('result'); selectTool('include')");
+  h.run("selectMode('effect')");
   assert.equal(h.run('state.view'), 'result');
   assert.equal(h.run("visibleImage('result') === visibleImage('b')"), true);
   h.run("state.draft.settings.method = 'esrgan-l0'; state.draft.settings.l0 = .0007; choosePreset('soft')");
@@ -362,6 +480,10 @@ test('brush mode has explicit controls and only fetches the visible mask after e
   await tick();
   assert.ok(h.api.requests.some(item => item.route.endsWith('/image?view=weight&revision=1')));
   assert.equal(h.api.requests.some(item => item.route.endsWith('/image?view=b&revision=1')), false);
+  const legacyLegend = h.elements.get('weight-legacy-legend');
+  assert.ok(legacyLegend, 'a composite weight preview has its own legend');
+  assert.equal(legacyLegend.hidden, false);
+  assert.equal(h.elements.get('weight-ramp').hidden, true);
   assert.match(h.elements.get('status').textContent, /范围已更新/);
   h.run("selectMode('review')");
   await tick();
@@ -409,7 +531,7 @@ test('suspected objects load on demand and keep part edits in the overlay view',
   stroke(h, [[200, 120]]);
   await h.run('saveDraft()');
   const edit = h.api.requests.find(item => item.route.endsWith('/edit'));
-  assert.deepEqual(JSON.parse(edit.args.body).edits, [{ tool:'classify', stage:'parts', module:'hair', shape:'brush',
+  assert.deepEqual(JSON.parse(edit.args.body).edits, [{ tool:'classify', stage:'parts', module:'hair', shape:'brush', geometry:'continuous',
     points:[[200,120]], radius:24, feather:0, protected_parts: defaultProtectedParts }]);
 });
 
@@ -422,6 +544,54 @@ function stroke(h, points) {
   for (const point of points.slice(1)) canvas.fire('pointermove', event(point));
   canvas.fire('pointerup', event(points.at(-1)));
 }
+
+test('prepares a finished draft on opening without repeating preparation on polls', async () => {
+  const h = harness();
+  await tick();
+  h.api.ready();
+  await h.run('openFile(file)');
+  await h.run('pollDocument()');
+  await tick();
+  const prepared = h.api.requests.filter(item => item.route.endsWith('/prepare-edit'));
+  assert.equal(prepared.length, 1);
+  assert.deepEqual(JSON.parse(prepared[0].args.body), { revision: 0 });
+});
+
+test('brush captures subpixel samples and reaches the release point', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range'); zoomTo(2)");
+  const rect = h.run('layout()'), canvas = h.elements.get('canvas');
+  const event = (x, y) => ({ pointerId: 1, button: 0, clientX: 100 + rect.x + x * rect.scale,
+    clientY: 50 + rect.y + y * rect.scale, preventDefault() {} });
+  canvas.fire('pointerdown', event(200.25, 120.25));
+  canvas.fire('pointermove', { ...event(220.25, 120.25),
+    getCoalescedEvents: () => [event(210.25, 121.25)] });
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.gesture.edit.points)')),
+    [[200.25, 120.25], [210.25, 120.75], [220.25, 120.25]]);
+  canvas.fire('pointerup', event(228.75, 120.875));
+  await h.run('saveDraft()');
+  const edit = h.api.requests.find(item => item.route.endsWith('/edit'));
+  const [brush] = JSON.parse(edit.args.body).edits;
+  assert.equal(brush.geometry, 'continuous');
+  assert.equal(brush.adaptive_edge, true);
+  assert.deepEqual(brush.points, [[200.25, 120.25], [210.25, 120.75], [228.75, 120.875]]);
+});
+
+test('dense samples along a straight brush stroke are compacted when saved', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  const points = Array.from({ length: 401 }, (_, i) => [100 + i, 200]);
+  stroke(h, points);
+  const stored = JSON.parse(h.run('JSON.stringify(state.draft.edits[0].points)'));
+  assert.deepEqual(stored[0], [100, 200]);
+  assert.deepEqual(stored.at(-1), [500, 200]);
+  assert.ok(stored.length <= 8, stored.length);
+  assert.ok(stored.every(([, y]) => y === 200));
+});
 
 test('exiting through settings waits for pending brush edits to save', async () => {
   const h = harness();
@@ -437,6 +607,7 @@ test('exiting through settings waits for pending brush edits to save', async () 
   await tick();
   assert.ok(h.api.requests.some(item => item.route.endsWith('/edit')));
   assert.ok(!h.api.requests.some(item => item.route === '/api/exit'));
+  assert.equal(h.window.closed, undefined);
   saved.resolve();
 
   await exit;
@@ -444,103 +615,157 @@ test('exiting through settings waits for pending brush edits to save', async () 
     ['/api/documents/source/edit', '/api/exit']);
   assert.equal(h.elements.get('settings-dialog').open, false);
   assert.equal(h.elements.get('empty-title').textContent, '工作台已退出');
+  assert.equal(h.window.closed, true);
 });
 
-test('part comparison uses the original even when a pinned A exists', async () => {
+test('closing a browser page reports its departure and sends a pending stroke', async () => {
   const h = harness();
+  const reports = () => h.api.requests.filter(item => item.route === '/api/page');
   await tick();
+  h.window.fire('blur');
+  assert.equal(reports().length, 1);
+  const joined = JSON.parse(reports()[0].args.body);
+  assert.equal(joined.open, true);
+
   await h.run('openFile(file)');
   h.run("selectMode('parts')");
-  h.api.mutate({ a: { revision: 0, method: 'l0' } });
-  h.api.ready();
-  await h.run('pollDocument()');
-  const view = id => h.nodes.view.find(button => button.dataset.view === id);
-  assert.equal(view('original').hidden, true);
-  assert.equal(view('result').hidden, true);
-  assert.equal(view('compare').hidden, false);
-  assert.equal(view('compare').textContent, '原图 / 成品');
-  view('compare').click();
-  await tick();
-  assert.equal(h.elements.get('divider').hidden, false);
-  assert.equal(h.elements.get('left-badge').textContent, '原图');
-  assert.equal(h.api.requests.some(item => item.route.includes('view=a')), false);
-
-  h.run("selectMode('review')");
-  await tick();
-  assert.match(h.elements.get('left-badge').textContent, /^A  /);
-  h.run("selectMode('parts'); selectView('compare')");
-  assert.equal(h.elements.get('left-badge').textContent, '原图');
-});
-
-test('part inspection views pan without editing by pointer, tools, or shortcuts', async () => {
-  const h = harness();
-  await tick();
-  await h.run('openFile(file)');
-  h.api.ready();
-  await h.run('pollDocument()');
-  h.run("selectMode('parts'); selectTool('classify')");
-  const brush = h.nodes.tool.find(button => button.dataset.tool === 'brush');
-  for (const view of ['compare', 'changes']) {
-    h.run("selectView('" + view + "')");
-    assert.equal(brush.disabled, true);
-    assert.equal(h.elements.get('stage').dataset.tool, 'pan');
-    const before = h.run('state.panX');
-    h.window.fire('keydown', {key: 'b', preventDefault() {}});
-    stroke(h, [[200, 120], [210, 124]]);
-    assert.ok(h.run('state.panX') > before);
-    assert.equal(h.run('state.draft.cursor'), 0);
-  }
-  h.run("selectView('parts')");
-  assert.equal(brush.disabled, false);
   stroke(h, [[200, 120]]);
-  assert.equal(h.run('state.draft.cursor'), 1);
-  h.run("selectView('compare')");
-  h.window.fire('keydown', {key: 'z', ctrlKey: true, preventDefault() {}});
-  assert.equal(h.run('state.draft.cursor'), 1);
+  h.window.fire('pagehide');
+  await tick();
+  assert.deepEqual(JSON.parse(reports()[1].args.body), { id: joined.id, open: false });
+  assert.equal(reports()[1].args.keepalive, true);
+  const edit = h.api.requests.find(item => item.route.endsWith('/edit'));
+  assert.equal(edit.args.keepalive, true);
+  assert.equal(JSON.parse(edit.args.body).cursor, 1);
+
+  h.window.fire('pageshow');
+  const restored = JSON.parse(reports()[2].args.body);
+  assert.equal(restored.open, true);
+  assert.notEqual(restored.id, joined.id);
 });
 
-test('leaving the part overlay discards an unfinished lasso', async () => {
+test('settings save and reload the preference to exit with the last page', async () => {
   const h = harness();
   await tick();
-  await h.run('openFile(file)');
-  h.run("selectMode('parts'); selectTool('lasso')");
-  for (const p of [[125,105],[140,115],[132,120]]) stroke(h, [p]);
-  assert.equal(h.run('state.polygon.length'), 3);
-  h.run("selectView('compare')");
-  h.window.fire('keydown', {key: 'Enter', preventDefault() {}});
-  assert.equal(h.run('state.draft.cursor'), 0);
-  h.run("selectView('parts')");
-  assert.equal(h.run('state.polygon.length'), 0);
+  await h.elements.get('open-settings').click();
+  const field = h.elements.get('pref-exit-on-close');
+  assert.equal(field.checked, false);
+  field.checked = true;
+  await h.elements.get('settings-form').fire('submit', { preventDefault() {} });
+  const update = h.api.requests.find(item => item.route === '/api/settings' && item.args?.method === 'POST');
+  assert.deepEqual(JSON.parse(update.args.body), { exit_on_close: true });
+  await h.elements.get('open-settings').click();
+  assert.equal(field.checked, true);
 });
 
-test('SAM2 point selection previews original-grid prompts and applies one undoable edit', async () => {
-  const h = harness();
-  await tick();
-  await h.run('openFile(file)');
-  h.api.ready();
-  await h.run('pollDocument()');
-  h.run("selectMode('parts'); selectTool('sam_object'); zoomTo(2)");
-  assert.equal(h.run('state.view'), 'parts');
-  assert.equal(h.elements.get('sam-panel').hidden, false);
-  assert.equal(h.elements.get('sam-apply').disabled, true);
-  stroke(h, [[285, 215]]);
-  h.elements.get('sam-negative').click();
-  stroke(h, [[310, 235]]);
-  assert.equal(h.api.requests.some(item => item.route.endsWith('/sam-selection')), false);
-  await h.elements.get('sam-preview').click();
-  const preview = h.api.requests.find(item => item.route.endsWith('/sam-selection'));
-  assert.deepEqual(JSON.parse(preview.args.body), { revision: 0, positive: [[285, 215]], negative: [[310, 235]] });
-  assert.equal(h.elements.get('sam-apply').disabled, false);
-  assert.equal(h.run('state.draft.cursor'), 0);
-  await h.elements.get('sam-apply').click();
-  assert.equal(h.run("state.draft.edits[0].tool"), 'classify');
-  assert.equal(h.run("state.draft.edits[0].shape"), 'sam');
-  assert.equal(h.run('state.draft.cursor'), 1);
-  assert.equal(h.run('state.view'), 'parts');
-  h.elements.get('undo').click();
-  await h.run('flushChanges()');
-  assert.equal(h.run('state.draft.cursor'), 0);
-});
+for (const [mode, editable] of [['parts', 'parts'], ['range', 'weight']]) {
+  test(mode + ' comparison combines the original and B even when a pinned A exists', async () => {
+    const h = harness();
+    await tick();
+    await h.run('openFile(file)');
+    h.run(`selectMode('${mode}')`);
+    h.api.mutate({ a: { revision: 0, method: 'l0' } });
+    h.api.ready();
+    await h.run('pollDocument()');
+    const view = id => h.nodes.view.find(button => button.dataset.view === id);
+    assert.equal(view('original').hidden, true);
+    assert.equal(view('result').hidden, true);
+    assert.equal(view('compare').hidden, false);
+    assert.equal(view('compare').textContent, '原图 / 成品');
+    const viewport = h.run('JSON.stringify([state.fit, state.zoom, state.panX, state.panY])');
+    view('compare').click();
+    await tick();
+    assert.equal(h.elements.get('divider').hidden, false);
+    assert.equal(h.elements.get('left-badge').textContent, '原图');
+    assert.equal(h.run('JSON.stringify([state.fit, state.zoom, state.panX, state.panY])'), viewport);
+    assert.equal(h.api.requests.some(item => item.route.includes('view=a')), false);
+
+    h.run("selectMode('review')");
+    await tick();
+    assert.match(h.elements.get('left-badge').textContent, /^A  /);
+    h.run(`selectMode('${mode}'); selectView('compare')`);
+    assert.equal(h.elements.get('left-badge').textContent, '原图');
+  });
+
+  test(mode + ' inspection views pan without editing by pointer, tools, or shortcuts', async () => {
+    const h = harness();
+    await tick();
+    await h.run('openFile(file)');
+    h.api.ready();
+    await h.run('pollDocument()');
+    h.run(`selectMode('${mode}')`);
+    const brush = h.nodes.tool.find(button => button.dataset.tool === 'brush');
+    for (const view of ['compare', 'changes']) {
+      h.run("selectView('" + view + "')");
+      assert.equal(brush.disabled, true);
+      assert.equal(h.elements.get('stage').dataset.tool, 'pan');
+      assert.equal(h.elements.get(mode + '-inspector').hidden, true);
+      assert.equal(h.elements.get('edit-inspector').hidden, true);
+      assert.equal(h.elements.get('feather-row').hidden, true);
+      const before = h.run('state.panX');
+      h.window.fire('keydown', {key: 'b', preventDefault() {}});
+      stroke(h, [[200, 120], [210, 124]]);
+      assert.ok(h.run('state.panX') > before);
+      assert.equal(h.run('state.draft.cursor'), 0);
+    }
+    h.run(`selectView('${editable}')`);
+    assert.equal(brush.disabled, false);
+    h.window.fire('keydown', {key: 'x'});
+    assert.equal(brush.disabled, true);
+    stroke(h, [[200, 120]]);
+    assert.equal(h.run('state.draft.cursor'), 0);
+    h.window.fire('keyup', {key: 'x'});
+    assert.equal(brush.disabled, false);
+    stroke(h, [[200, 120]]);
+    assert.equal(h.run('state.draft.cursor'), 1);
+    h.run("selectView('compare')");
+    h.window.fire('keydown', {key: 'z', ctrlKey: true, preventDefault() {}});
+    assert.equal(h.run('state.draft.cursor'), 1);
+  });
+
+  test(mode + ' switching to comparison discards an unfinished lasso', async () => {
+    const h = harness();
+    await tick();
+    await h.run('openFile(file)');
+    h.run(`selectMode('${mode}'); selectTool('lasso')`);
+    for (const p of [[125,105],[140,115],[132,120]]) stroke(h, [p]);
+    assert.equal(h.run('state.polygon.length'), 3);
+    h.run("selectView('compare')");
+    h.window.fire('keydown', {key: 'Enter', preventDefault() {}});
+    assert.equal(h.run('state.draft.cursor'), 0);
+    h.run(`selectView('${editable}')`);
+    assert.equal(h.run('state.polygon.length'), 0);
+  });
+
+  test(mode + ' SAM2 previews on the editable view and applies one undoable edit', async () => {
+    const h = harness();
+    await tick();
+    await h.run('openFile(file)');
+    h.api.ready();
+    await h.run('pollDocument()');
+    h.run(`selectMode('${mode}'); selectTool('sam_object'); zoomTo(2)`);
+    assert.equal(h.run('state.view'), editable);
+    assert.equal(h.elements.get('sam-panel').hidden, false);
+    assert.equal(h.elements.get('sam-apply').disabled, true);
+    stroke(h, [[285, 215]]);
+    h.elements.get('sam-negative').click();
+    stroke(h, [[310, 235]]);
+    assert.equal(h.api.requests.some(item => item.route.endsWith('/sam-selection')), false);
+    await h.elements.get('sam-preview').click();
+    const preview = h.api.requests.find(item => item.route.endsWith('/sam-selection'));
+    assert.deepEqual(JSON.parse(preview.args.body), { revision: 0, positive: [[285, 215]], negative: [[310, 235]] });
+    assert.equal(h.elements.get('sam-apply').disabled, false);
+    assert.equal(h.run('state.draft.cursor'), 0);
+    await h.elements.get('sam-apply').click();
+    assert.equal(h.run("state.draft.edits[0].tool"), mode === 'parts' ? 'classify' : 'include');
+    assert.equal(h.run("state.draft.edits[0].shape"), 'sam');
+    assert.equal(h.run('state.draft.cursor'), 1);
+    assert.equal(h.run('state.view'), editable);
+    h.elements.get('undo').click();
+    await h.run('flushChanges()');
+    assert.equal(h.run('state.draft.cursor'), 0);
+  });
+}
 
 test('SAM2 previews cannot be applied after cancellation or a remote revision change', async () => {
   const h = harness();
@@ -593,7 +818,8 @@ test('shows local original during upload and keeps editing during analysis, then
   assert.equal(h.run('state.draft.cursor'), 1);
   await h.run('saveDraft()');
   const edit = h.api.requests.find(item => item.route.endsWith('/edit'));
-  assert.deepEqual(JSON.parse(edit.args.body).edits, [{ tool:'protect', stage:'range', shape:'brush', points:[[200,120],[207,122]], radius:24, strength:.9, feather:0 }]);
+  assert.deepEqual(JSON.parse(edit.args.body).edits, [{ tool:'protect', stage:'range', shape:'brush', geometry:'continuous',
+    points:[[200,120],[207,122]], radius:24, strength:.9, feather:0 }]);
   h.api.ready();
   await h.run('pollDocument()');
   await tick();
@@ -1160,6 +1386,91 @@ test('new B cannot be exported or pinned until its decoded frame replaces the ol
   assert.equal(h.api.requests.some(item => item.route.endsWith('/pin')), true);
 });
 
+test('selection previews advance during encoding and never unlock a result that has not been shown', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  h.run("selectMode('parts')");
+  await tick();
+  const encoding = revision => h.api.mutate({ status: 'running', phase: 'encoding',
+    selection_preview: { revision, cursor: revision, images: { parts_overlay: true, weight_overlay: true } } });
+  const old = deferred(), result = deferred();
+  h.api.beforeDecode = url => url.endsWith('view=parts_overlay&revision=1') ? old.promise
+    : url.endsWith('view=b&revision=2') ? result.promise : undefined;
+
+  stroke(h, [[200, 120]]);
+  await h.run('saveDraft()');
+  encoding(1);
+  await h.run('pollDocument()');
+  await tick();
+  assert.ok(h.api.requests.some(item => item.route.endsWith('view=parts_overlay&revision=1')));
+  assert.equal(h.run("viewAsset('parts').revision"), 0);
+
+  stroke(h, [[240, 130]]);
+  await h.run('saveDraft()');
+  encoding(2);
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.run("viewAsset('parts').revision"), 2);
+  assert.equal(h.run("viewAsset('parts').cursor"), 2);
+  assert.match(h.elements.get('status').textContent, /分区已更新.*成品 B/);
+  assert.equal(h.run('state.doc.b.revision'), 0);
+  old.resolve();
+  await tick();
+  assert.equal(h.run("viewAsset('parts').revision"), 2);
+  h.run("selectMode('range')");
+  await tick();
+  assert.equal(h.run("viewAsset('weight').revision"), 2);
+  assert.match(h.elements.get('status').textContent, /范围已更新.*成品 B/);
+
+  h.run("selectMode('review')");
+  await h.run('download()');
+  await h.run('pin()');
+  assert.equal(h.api.requests.some(item => /\/download\?|\/pin$/.test(item.route)), false);
+  h.api.ready();
+  h.api.mutate({ selection_preview: null });
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.run('state.doc.b.revision'), 2);
+  assert.equal(h.elements.get('pin').disabled, true);
+  assert.equal(h.elements.get('download').disabled, true);
+  result.resolve();
+  await tick();
+  assert.equal(h.run('state.displayedResult'), 2);
+  assert.equal(h.elements.get('pin').disabled, false);
+  assert.equal(h.elements.get('download').disabled, false);
+});
+
+test('more export options are only shown when the menu has actions', async () => {
+  const h = harness();
+  const menu = h.elements.get('export-panel');
+  const visibleItems = () => ['download-a', 'correction-export', 'correction-import']
+    .filter(id => !h.elements.get(id).hidden);
+  await tick();
+  assert.equal(menu.hidden, true);
+  await h.run('openFile(file)');
+  assert.equal(menu.hidden, true);
+
+  for (const mode of ['parts', 'range']) {
+    h.run("selectMode('" + mode + "')");
+    assert.equal(menu.hidden, false);
+    assert.deepEqual(visibleItems(), ['correction-export', 'correction-import']);
+    menu.open = true;
+    h.run("selectMode('review')");
+    assert.equal(menu.hidden, true);
+    assert.equal(menu.open, false);
+  }
+
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  await h.run('pin()');
+  assert.equal(menu.hidden, false);
+  assert.deepEqual(visibleItems(), ['download-a']);
+});
+
 test('command-line correction export can run once the server revision is ready even in a mask view', async () => {
   const h = harness();
   await tick();
@@ -1312,9 +1623,13 @@ test('待确认图层按需加载，并在两个范围视图之间复用', async
   h.run("selectMode('parts')");
   await tick();
   assert.equal(requested(), 1);
-  toggle.click();
+  const unknownEye = h.elements.get('part-targets').children.flatMap(row => row.children)
+    .find(button => button.dataset.showPart === 'unknown');
+  assert.equal(toggle.hidden, true);
+  unknownEye.click();
   assert.equal(h.elements.get('unknown-legend').hidden, true);
-  toggle.click();
+  unknownEye.click();
+  await tick();
   assert.equal(h.elements.get('unknown-legend').hidden, false);
   assert.equal(requested(), 1);
   h.run("selectView('compare')");
@@ -1477,6 +1792,39 @@ test('flow uses the published thumbnails and keeps the canvas position across no
   assert.equal(h.run('JSON.stringify([state.zoom, state.panX, state.panY])'), viewport);
 });
 
+test('node navigation makes the current editor clear and returns to its flow card', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const [review, flow] = h.nodes.mode;
+  const heading = h.elements.get('node-title'), back = h.elements.get('back-to-flow');
+  flow.click();
+  assert.equal(flow['aria-pressed'], 'true');
+  for (const [mode, name] of [['parts', '部位分区'], ['range', '处理范围'], ['effect', '降噪效果']]) {
+    const card = h.elements.get('node-' + mode);
+    card.click();
+    assert.equal(flow['aria-pressed'], 'false');
+    assert.equal(flow.hidden, true);
+    assert.equal(review['aria-pressed'], 'false');
+    assert.equal(heading.hidden, false);
+    assert.equal(heading.textContent, name);
+    assert.equal(heading.focused, true);
+    assert.equal(h.elements.get('stage').focused, undefined);
+    assert.equal(back.hidden, false);
+    back.click();
+    assert.equal(h.elements.get('flow-board').hidden, false);
+    assert.equal(flow['aria-pressed'], 'true');
+    assert.equal(heading.hidden, true);
+    assert.equal(back.hidden, true);
+    assert.equal(card.focused, true);
+  }
+  h.elements.get('node-parts').click();
+  review.click();
+  assert.equal(h.run('state.mode'), 'review');
+  assert.equal(review['aria-pressed'], 'true');
+  assert.equal(heading.hidden, true);
+});
+
 test('brush geometry stays in original-image pixels and applies feather only in the range stage', async () => {
   const h = harness();
   await tick();
@@ -1494,10 +1842,128 @@ test('brush geometry stays in original-image pixels and applies feather only in 
   assert.equal(h.elements.get('feather-row').hidden, false);
   stroke(h, [[210, 150]]);
   assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.draft.edits)')), [
-    { tool: 'classify', stage: 'parts', module: 'outfit', shape: 'brush', points: [[210, 150]], radius: 18, feather: 0,
+    { tool: 'classify', stage: 'parts', module: 'outfit', shape: 'brush', geometry: 'continuous', points: [[210, 150]], radius: 18, feather: 0,
       protected_parts: defaultProtectedParts },
-    { tool: 'exclude', stage: 'range', shape: 'brush', points: [[210, 150]], radius: 18, feather: 12 },
+    { tool: 'exclude', stage: 'range', shape: 'brush', geometry: 'continuous', points: [[210, 150]], radius: 18, feather: 12 },
   ]);
+});
+
+test('brackets resize the active brush in image pixels and clamp its feather', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const radius = h.elements.get('radius'), feather = h.elements.get('feather');
+  const press = (key, extra = {}) => {
+    let handled = false;
+    h.window.fire('keydown', { key, preventDefault() { handled = true; }, ...extra });
+    return handled;
+  };
+  assert.equal(press(']'), false);
+  h.run("selectMode('range'); selectTool('exclude'); zoomTo(2)");
+  radius.value = '10';
+  feather.value = '10';
+  radius.fire('input');
+  assert.equal(press('[', { target: radius }), true);
+  assert.equal(h.elements.get('radius-value').textContent, '18 px');
+  assert.equal(h.elements.get('feather-value').textContent, '9 px');
+  assert.equal(press(']', { target: new Element('input') }), false);
+  assert.equal(press(']', { ctrlKey: true }), false);
+  assert.equal(h.run('state.draft.cursor'), 0);
+  stroke(h, [[210, 150]]);
+  assert.equal(h.run('state.draft.edits[0].radius'), 9);
+  assert.equal(h.run('state.draft.edits[0].feather'), 9);
+  h.run("selectMode('parts')");
+  radius.value = '255';
+  assert.equal(press('】'), true);
+  assert.equal(h.elements.get('radius-value').textContent, '512 px');
+  radius.value = '1';
+  press('[');
+  assert.equal(Number(radius.value), 1);
+  h.nodes.view.find(button => button.dataset.view === 'compare').click();
+  assert.equal(press(']'), false);
+  assert.equal(Number(radius.value), 1);
+});
+
+test('holding a brush-size shortcut saves once and slow settings replies preserve a newer size', async () => {
+  const h = harness();
+  await tick();
+  await h.run("preferences.update({ remember_brush: true, brush_radius: 24, brush_feather: 12 })");
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  const settingsWrites = () => h.api.requests
+    .filter(item => item.route === '/api/settings' && item.args.method === 'POST')
+    .map(item => JSON.parse(item.args.body)).filter(patch => !Object.hasOwn(patch, 'remember_brush'));
+  const key = (event, key, repeat = false) => h.window.fire(event, { key, repeat, preventDefault() {} });
+  key('keydown', ']');
+  key('keydown', ']', true);
+  await tick();
+  assert.equal(h.elements.get('radius-value').textContent, '52 px');
+  assert.deepEqual(settingsWrites(), []);
+
+  const firstWrite = deferred();
+  h.api.beforeSettings = firstWrite.promise;
+  key('keyup', ']');
+  await tick();
+  assert.deepEqual(settingsWrites(), [{ brush_radius: 26, brush_feather: 12 }]);
+  key('keydown', '[');
+  firstWrite.resolve();
+  await tick();
+  assert.equal(h.elements.get('radius-value').textContent, '50 px');
+  key('keyup', '[');
+  await tick();
+  assert.deepEqual(settingsWrites().at(-1), { brush_radius: 25, brush_feather: 12 });
+  assert.equal(settingsWrites().length, 2);
+});
+
+test('Shift-wheel resizes the brush without zooming and saves once on release', async () => {
+  const h = harness();
+  await tick();
+  await h.run("preferences.update({ remember_brush: true, brush_radius: 24, brush_feather: 24 })");
+  await h.run('openFile(file)');
+  h.run("selectMode('range'); zoomTo(2)");
+  const canvas = h.elements.get('canvas');
+  const wheel = (deltaY, extra = {}) => canvas.fire('wheel', {
+    shiftKey: true, deltaMode: 0, deltaX: 0, deltaY, clientX: 410, clientY: 290, preventDefault() {}, ...extra,
+  });
+  const diameter = () => h.elements.get('radius-value').textContent;
+  const viewport = () => h.run('JSON.stringify([state.fit, state.zoom, state.panX, state.panY])');
+  const initialView = viewport();
+  const writes = () => h.api.requests.filter(item => item.route === '/api/settings' && item.args.method === 'POST').slice(1);
+  wheel(100);
+  assert.equal(diameter(), '46 px');
+  assert.equal(h.elements.get('feather-value').textContent, '23 px');
+  wheel(0, { deltaX: -100 });
+  assert.equal(diameter(), '48 px');
+  for (let index = 0; index < 3; index++) wheel(-10);
+  assert.equal(diameter(), '48 px');
+  wheel(-10);
+  assert.equal(diameter(), '50 px');
+  wheel(-3, { deltaMode: 1 });
+  assert.equal(diameter(), '52 px');
+  assert.equal(viewport(), initialView);
+  assert.equal(h.run('state.draft.cursor'), 0);
+  await tick();
+  assert.equal(writes().length, 0);
+  h.window.fire('keyup', { key: 'Shift' });
+  await tick();
+  assert.deepEqual(writes().map(item => JSON.parse(item.args.body)), [{ brush_radius: 26, brush_feather: 23 }]);
+
+  wheel(-100, { shiftKey: false });
+  assert.equal(diameter(), '52 px');
+  assert.ok(h.run('state.zoom') > 2);
+  h.run("selectMode('parts'); selectTool('lasso')");
+  wheel(100);
+  assert.equal(diameter(), '52 px');
+});
+
+test('changing only the saved size in settings updates the brush controls', async () => {
+  const h = harness();
+  await tick();
+  await h.run("preferences.update({ remember_brush: true })");
+  await h.elements.get('open-settings').click();
+  h.elements.get('pref-brush-size').value = '60';
+  await h.elements.get('settings-form').fire('submit', { preventDefault() {} });
+  assert.equal(h.elements.get('radius-value').textContent, '60 px');
 });
 
 test('host export uses the exact displayed revision and reports its local path', async () => {
@@ -1565,6 +2031,214 @@ test('part protection defaults to known parts and snapshots the switches for eac
   assert.equal(unknown['aria-pressed'], 'true');
 });
 
+test('range locks are independent of classification and snapshot local and bulk edits', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  const locks = h.elements.get('range-part-locks');
+  assert.ok(locks, 'range editing exposes its own locks');
+  const skin = locks.children.find(button => button.dataset.rangeProtectPart === 'skin');
+  const all = h.elements.get('range-protection-all');
+  assert.equal(skin['aria-pressed'], 'false');
+  skin.click();
+  assert.equal(skin['aria-pressed'], 'true');
+  assert.equal(all['aria-pressed'], 'mixed');
+  assert.equal(h.run('state.draft.cursor'), 0);
+  stroke(h, [[200, 120]]);
+  h.elements.get('invert').click();
+  h.run("selectMode('parts')");
+  const semantic = h.elements.get('part-targets').children.flatMap(row => row.children)
+    .find(button => button.dataset.protectPart === 'skin');
+  semantic.click();
+  assert.equal(semantic['aria-pressed'], 'false');
+  h.run("selectMode('range')");
+  assert.equal(skin['aria-pressed'], 'true');
+  all.click();
+  assert.equal(all['aria-pressed'], 'true');
+  h.elements.get('reset').click();
+  all.click();
+  assert.equal(all['aria-pressed'], 'false');
+  skin.click();
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.draft.edits.map(edit => edit.protected_parts))')),
+    [['skin'], ['skin'], [...defaultProtectedParts, 'unknown']]);
+  await h.run("openRecent('source')");
+  h.run("selectMode('range')");
+  assert.equal(skin['aria-pressed'], 'true');
+  assert.equal(h.run('state.draft.cursor'), 3);
+});
+
+test('part eyes hide independently of classification and ignore outdated filtered previews', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  h.run("selectMode('parts')");
+  await tick();
+  const control = (action, part) => h.elements.get('part-targets').children.flatMap(row => row.children)
+    .find(button => button.dataset[action] === part);
+  const hair = control('showPart', 'hair'), skin = control('showPart', 'skin');
+  assert.ok(hair && skin);
+  assert.equal(hair['aria-pressed'], 'true');
+  const displayed = h.run("visibleImage('parts').src");
+  const pending = deferred();
+  h.api.beforeDecode = url => url.endsWith('hide=hair') ? pending.promise : undefined;
+  hair.click();
+  await tick();
+  assert.equal(h.run("visibleImage('parts')?.src"), displayed);
+  assert.match(h.elements.get('status').textContent, /正在更新分区显示/);
+  skin.click();
+  await tick();
+  assert.equal(hair['aria-pressed'], 'false');
+  assert.equal(skin['aria-pressed'], 'false');
+  assert.equal(control('protectPart', 'hair')['aria-pressed'], 'true');
+  assert.equal(h.run('state.part'), 'hair');
+  assert.equal(h.run('state.draft.cursor'), 0);
+  assert.match(h.run("visibleImage('parts').src"), /hide=hair%2Cskin$/);
+  pending.resolve();
+  await tick();
+  assert.match(h.run("visibleImage('parts').src"), /hide=hair%2Cskin$/);
+  await h.run("openRecent('source')");
+  h.run("selectMode('parts')");
+  await tick();
+  assert.equal(hair['aria-pressed'], 'false');
+  assert.equal(skin['aria-pressed'], 'false');
+  hair.click();
+  await tick();
+  assert.equal(hair['aria-pressed'], 'true');
+  assert.equal(skin['aria-pressed'], 'false');
+  assert.match(h.run("visibleImage('parts').src"), /hide=skin$/);
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/edit')), false);
+});
+
+test('Ctrl-click isolates a part and restores the previous visibility on a second click', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.mutate({ status: 'ready', b: { revision: 0, images: { parts_overlay: true, unknown: true } } });
+  await h.run('pollDocument()');
+  h.run("selectMode('parts')");
+  await tick();
+  const rows = h.elements.get('part-targets').children;
+  const rowFor = id => rows.find(row => row.children[0].dataset.part === id).children;
+  const visible = () => rows.filter(row => row.children[1]['aria-pressed'] === 'true').map(row => row.children[0].dataset.part);
+  const [hair, hairEye] = rowFor('hair'), [outfit] = rowFor('outfit'), [unknown] = rowFor('unknown');
+  hairEye.click();
+  outfit.click();
+  const previous = visible();
+
+  hair.fire('click', { ctrlKey: true });
+  await tick();
+  assert.equal(hair['aria-pressed'], 'true');
+  assert.deepEqual(visible(), ['hair']);
+  assert.match(h.run("visibleImage('parts').src"), /hide=background%2Ceyes%2Cface%2Cmouth%2Cobject%2Coutfit%2Cskin%2Cunknown$/);
+  assert.equal(h.elements.get('unknown-legend').hidden, true);
+
+  unknown.fire('click', { ctrlKey: true });
+  await tick();
+  assert.deepEqual(visible(), ['unknown']);
+  assert.equal(h.elements.get('unknown-legend').hidden, false);
+  unknown.fire('click', { ctrlKey: true });
+  await tick();
+  assert.deepEqual(visible(), previous);
+  assert.match(h.run("visibleImage('parts').src"), /hide=hair$/);
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/edit')), false);
+});
+
+test('the master eye shows and hides every overlay and clears Ctrl-click isolation', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.mutate({ status: 'ready', b: { revision: 0, images: { parts_overlay: true, unknown: true } } });
+  await h.run('pollDocument()');
+  h.run("selectMode('parts')");
+  await tick();
+  const all = h.elements.get('part-visibility-all');
+  assert.ok(all, 'the part list has a master eye');
+  const rows = h.elements.get('part-targets').children;
+  const eyes = rows.map(row => row.children[1]);
+  const hair = rows.find(row => row.children[0].dataset.part === 'hair').children[0];
+  assert.equal(all['aria-pressed'], 'true');
+  hair.fire('click', { ctrlKey: true });
+  assert.equal(all['aria-pressed'], 'mixed');
+  all.click();
+  assert.equal(all['aria-pressed'], 'true');
+  assert.ok(eyes.every(eye => eye['aria-pressed'] === 'true'));
+  hair.fire('click', { ctrlKey: true });
+  assert.equal(all['aria-pressed'], 'mixed');
+  all.click();
+
+  all.click();
+  await tick();
+  assert.equal(all['aria-pressed'], 'false');
+  assert.ok(eyes.every(eye => eye['aria-pressed'] === 'false'));
+  assert.match(h.run("visibleImage('parts').src"), /hide=background%2Ceyes%2Cface%2Chair%2Cmouth%2Cobject%2Coutfit%2Cskin%2Cunknown$/);
+  assert.equal(h.elements.get('unknown-legend').hidden, true);
+  assert.equal(h.elements.get('overlay-legend').hidden, true);
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/edit')), false);
+
+  await h.run("openRecent('source')");
+  h.run("selectMode('parts')");
+  assert.equal(all['aria-pressed'], 'false');
+  eyes[0].click();
+  assert.equal(all['aria-pressed'], 'mixed');
+});
+
+test('the master lock changes protection for all parts on subsequent strokes', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('parts')");
+  const all = h.elements.get('part-protection-all');
+  assert.ok(all, 'the part list has a master lock');
+  const locks = h.elements.get('part-targets').children.map(row => row.children[2]);
+  assert.equal(all['aria-pressed'], 'mixed');
+  all.click();
+  assert.equal(all['aria-pressed'], 'true');
+  assert.ok(locks.every(lock => lock['aria-pressed'] === 'true'));
+  stroke(h, [[200, 120]]);
+  all.click();
+  assert.equal(all['aria-pressed'], 'false');
+  assert.ok(locks.every(lock => lock['aria-pressed'] === 'false'));
+  stroke(h, [[210, 130]]);
+  assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.draft.edits.map(edit => edit.protected_parts))')),
+    [[...defaultProtectedParts, 'unknown'], []]);
+  await h.run("openRecent('source')");
+  h.run("selectMode('parts')");
+  assert.equal(all['aria-pressed'], 'false');
+  locks[0].click();
+  assert.equal(all['aria-pressed'], 'mixed');
+});
+
+test('uses lightweight overlays for the active editor when the result advertises them', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.mutate({ status: 'ready', b: { revision: 0, images: { parts_overlay: true, weight_overlay: true } } });
+  await h.run('pollDocument()');
+  h.run("selectMode('parts')");
+  await tick();
+  const requests = () => h.api.requests.map(item => item.route);
+  assert.ok(requests().some(route => route.includes('view=parts_overlay&revision=0')));
+  assert.ok(!requests().some(route => route.includes('view=parts&') || route.includes('view=background_overlay')));
+  assert.equal(h.run("viewAsset('parts').overlay"), true);
+  const hair = h.elements.get('part-targets').children.flatMap(row => row.children)
+    .find(button => button.dataset.showPart === 'hair');
+  hair.click();
+  await tick();
+  assert.ok(requests().some(route => route.endsWith('view=parts_overlay&revision=0&hide=hair')));
+  h.run("selectMode('range')");
+  await tick();
+  assert.ok(requests().some(route => route.includes('view=weight_overlay&revision=0')));
+  assert.ok(!requests().some(route => route.includes('view=weight&')));
+  assert.equal(h.run("viewAsset('weight').overlay"), true);
+  const ramp = h.elements.get('weight-ramp');
+  assert.ok(ramp, 'an indexed weight preview has a gradient legend');
+  assert.equal(ramp.hidden, false);
+  assert.equal(h.elements.get('weight-legacy-legend').hidden, true);
+});
+
 test('remove current part uses the selected source for brush and lasso', async () => {
   const h = harness();
   await tick();
@@ -1585,7 +2259,7 @@ test('remove current part uses the selected source for brush and lasso', async (
   }
   h.window.fire('keydown', { key: 'Enter', preventDefault() {} });
   assert.deepEqual(JSON.parse(h.run('JSON.stringify(state.draft.edits)')), [
-    { stage: 'parts', tool: 'remove_part', module: 'hair', shape: 'brush', points: [[200, 120]], radius: 24, feather: 0 },
+    { stage: 'parts', tool: 'remove_part', module: 'hair', shape: 'brush', geometry: 'continuous', points: [[200, 120]], radius: 24, feather: 0 },
     { stage: 'parts', tool: 'remove_part', module: 'hair', shape: 'polygon', points },
   ]);
   h.run("setPart('unknown')");
@@ -1609,6 +2283,40 @@ test('a processing failure links to its stage and offers a retry without enablin
   await tick();
   assert.equal(h.run('state.doc.status'), 'queued');
   assert.ok(h.api.requests.some(item => item.route.endsWith('/edit')));
+});
+
+test('a recovery link opens the exact saved draft and removes its startup fragment', async () => {
+  const id = 'a'.repeat(64);
+  const h = harness({ draftLink: id });
+  h.api.mutate({ id, name: '雪巷红伞.png', width: 3456, height: 2304 });
+  await tick();
+  assert.equal(h.run('state.doc?.id'), id);
+  assert.ok(h.api.requests.some(item => item.route === '/api/documents/' + id));
+  assert.deepEqual(h.api.lastHistoryReplace, [null, '', '/']);
+});
+
+test('dropping a workbench thumbnail preserves the active draft', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('flow')");
+  const fileDrop = url => ({
+    dataTransfer: { files: [{ ...file, name: 'thumbnail.png' }], types: ['Files', 'text/uri-list'],
+      getData: type => type === 'text/uri-list' ? url : '' },
+    preventDefault() {},
+  });
+  const drop = event => h.elements.get('viewer').fire('drop', event);
+  const uploads = () => h.api.requests.filter(item => item.route === '/api/documents' && item.args.method === 'POST');
+  drop(fileDrop('http://127.0.0.1:1790/api/documents/' + 'a'.repeat(64) + '/thumbnail?view=parts&revision=0'));
+  await tick();
+  assert.equal(uploads().length, 1);
+  assert.equal(h.run('state.mode'), 'flow');
+  assert.equal(h.run('state.doc.name'), file.name);
+
+  drop(fileDrop('file:///C:/Pictures/thumbnail.png'));
+  await tick();
+  assert.equal(uploads().length, 2);
+  assert.equal(h.run('state.mode'), 'review');
 });
 
 test('dropping into the flow opens the image in review', async () => {

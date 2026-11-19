@@ -108,7 +108,27 @@ class WorkbenchSession:
             models.release()
         if _sha(source) != digest:
             raise ValueError('Source changed while preparing the workbench')
+        return cls._load_completed_case(source, output, report, digest, downscale, models=models)
 
+    @classmethod
+    def from_cache(cls, source, workspace, digest, size, *, method='l0', lam=None, downscale=DOWNSCALE):
+        """Restore the verified analysis and exact float candidate for an already opened source."""
+        output = _case_folder(Path(workspace).resolve(), digest)
+        case = _case_folder(output, 'analysis')
+        report = json.loads((case / 'report.json').read_text(encoding='utf-8'))
+        parameters = report['parameters']
+        device = parameters['device']
+        method, lam = resolve_denoiser(method, lam)
+        if (report['folder'] != 'analysis' or report['size'] != size
+                or not isinstance(device, str) or not (device == 'cpu' or device.startswith('cuda'))
+                or parameters.get('denoiser', 'l0') != method
+                or (uses_l0(method) and parameters['lambda'] != lam)
+                or parameters.get('denoiser_config') != describe_denoiser(method, device, downscale=downscale)):
+            raise ValueError('Workbench cache does not match the requested source and denoiser')
+        return cls._load_completed_case(Path(source), output, report, digest, downscale, models=None)
+
+    @classmethod
+    def _load_completed_case(cls, source, output, report, digest, downscale, *, models):
         case = _case_folder(output, report['folder'])
         editor, icc = _case_editor(case, report, digest)
         suspected = None
@@ -123,6 +143,13 @@ class WorkbenchSession:
                    report['parameters']['lambda'], models=models, suspected_objects=suspected,
                    baseline_method=report['parameters'].get('denoiser', 'l0'), baseline_downscale=downscale)
 
+    def _inference_device(self):
+        if self._models is None:
+            import torch
+
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        return self.device
+
     def predict_object(self, positive, negative):
         """Preview a manually prompted shape in the source pixel grid."""
         from ..auto_sam import select_manual_candidate
@@ -134,6 +161,10 @@ class WorkbenchSession:
             opacity = alpha.astype(np.float32)[..., None] / 255
             rgb = np.rint(rgb * opacity + 255 * (1 - opacity)).astype(np.uint8)
         prompt = {'positive': positive, 'negative': negative}
+        if self._models is None:
+            from ..fusion_models import FusionModels
+
+            self._models = FusionModels(device=self._inference_device())
         try:
             prediction = self._models.predict_candidates(rgb, prompt)
             mask, _ = select_manual_candidate(prediction, prompt)
@@ -153,9 +184,10 @@ class WorkbenchSession:
         if self._candidate_key(method, lam, downscale) == self._baseline_key:
             return self._baseline
 
+        device = self._inference_device()
         sr_key = None
         if uses_sr(method):
-            config = describe_denoiser(method, self.device, downscale=downscale)
+            config = describe_denoiser(method, device, downscale=downscale)
             sr_key = _digest({name: value for name, value in config.items() if name != 'method'})
         l0_enabled = uses_l0(method)
         key = (method, lam if l0_enabled else None, sr_key)
@@ -166,10 +198,10 @@ class WorkbenchSession:
         rgb = self.editor.rgb
         if sr_key is not None:
             if sr_key != self._sr_key:
-                self._sr_input = super_resolve(rgb, device=self.device, method=method, downscale=downscale)
+                self._sr_input = super_resolve(rgb, device=device, method=method, downscale=downscale)
                 self._sr_key = sr_key
             rgb = self._sr_input
-        candidate = (smooth_candidate(rgb, lam, device=self.device) if l0_enabled
+        candidate = (smooth_candidate(rgb, lam, device=device) if l0_enabled
                      else rgb.astype(np.float32) / np.float32(255))
         candidate.setflags(write=False)
         self._candidates[key] = candidate

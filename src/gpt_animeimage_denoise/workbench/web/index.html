@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/settings.css">
   <script defer src="/settings.js"></script>
+  <script defer src="/tools.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body data-mode="review">
@@ -26,6 +27,8 @@
     <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M9 5 4 10l5 5m-4-5h8a6 6 0 0 1 6 6v3"/></symbol>
     <symbol id="icon-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5m4-5h-8a6 6 0 0 0-6 6v3"/></symbol>
     <symbol id="icon-pan" viewBox="0 0 24 24"><path d="M7 12V7a2 2 0 0 1 4 0v4-6a2 2 0 0 1 4 0v6-3a2 2 0 0 1 4 0v7a6 6 0 0 1-6 6h-1c-3 0-4-2-6-5l-2-3a2 2 0 0 1 3-2l2 2"/></symbol>
+    <symbol id="icon-tool-grip" viewBox="0 0 24 24"><path d="M6 9h12M6 15h12" stroke-width="2" stroke-dasharray="1 4"/></symbol>
+    <symbol id="icon-tool-dock" viewBox="0 0 24 24"><path d="M4 5h5v14H4zm9 7h7m-7 0 3-3m-3 3 3 3"/></symbol>
     <symbol id="icon-brush" viewBox="0 0 24 24"><path d="m9 15 8-11a2 2 0 0 1 3 3L10 16m-1-1c-4-1-3 4-6 5 3 1 7 0 7-3l-1-2Z"/></symbol>
     <symbol id="icon-lasso" viewBox="0 0 24 24"><path d="M9 17C3 16 2 11 5 7s12-5 15 0-1 9-8 10c-4 0-6-2-5-4s4-1 4 1c0 4-3 6-6 6"/></symbol>
     <symbol id="icon-magnetic" viewBox="0 0 24 24"><path d="M5 4v9a7 7 0 0014 0V4h-4v9a3 3 0 01-6 0V4zM5 8h4m6 0h4"/></symbol>
@@ -43,6 +46,8 @@
     <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15 3 6 6-4 2-2 5-2 2-7-7 2-2 5-2 2-4ZM10 14l-6 6"/></symbol>
     <symbol id="icon-flow" viewBox="0 0 24 24"><rect x="2" y="9" width="5" height="6" rx="1.3"/><rect x="16" y="3" width="6" height="5" rx="1.3"/><rect x="16" y="16" width="6" height="5" rx="1.3"/><path d="M7 12h3a2 2 0 002-2V7a1.5 1.5 0 011.5-1.5H16M10 12a2 2 0 012 2v3a1.5 1.5 0 001.5 1.5H16"/></symbol>
     <symbol id="icon-parts" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-8 9 8 5 8-5M4 16l8 5 8-5"/></symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-5 10-5 10 5 10 5-3.5 5-10 5-10-5-10-5Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M3 4l18 16M9 7.4a12 12 0 0 1 3-.4c6.5 0 10 5 10 5a16 16 0 0 1-3 2.8M14.7 16.7a12 12 0 0 1-2.7.3C5.5 17 2 12 2 12a16 16 0 0 1 3-2.8"/></symbol>
     <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/></symbol>
     <symbol id="icon-unlock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2M12 14v3"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><path d="m10 3-.6 2.1-2 .9-2-.6-2 3.4L5 10.4v2.4l-1.6 1.6 2 3.5 2.1-.6 1.9 1.1.6 2.1h4l.6-2.1 2-1.1 2 .6 2-3.5-1.6-1.6v-2.4l1.6-1.6-2-3.4-2 .6-2-.9L14 3z"/><circle cx="12" cy="11.8" r="3.2"/></symbol>
@@ -84,7 +89,7 @@
       </details>
       <div class="top-export">
         <button id="download" class="button primary" type="button" disabled><svg aria-hidden="true"><use href="#icon-download"/></svg><span>导出 PNG</span></button>
-        <details id="export-panel" class="popover export-panel">
+        <details id="export-panel" class="popover export-panel" hidden>
           <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
           <div class="export-list">
             <button id="download-a" type="button" disabled>导出固定方案 A</button>
@@ -96,12 +101,13 @@
       </div>
     </div>
   </header>
-  <main class="workspace">
+  <main id="workspace" class="workspace">
     <div class="workspace-navigation">
       <nav id="workspace-modes" class="workspace-modes" aria-label="工作台视图">
+        <button id="back-to-flow" class="node-back" type="button" hidden>返回流程</button>
+        <h1 id="node-title" class="node-title" aria-current="page" tabindex="-1" hidden></h1>
         <button type="button" data-mode="review" aria-pressed="true" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品检查</button>
         <button type="button" data-mode="flow" aria-pressed="false" disabled><svg aria-hidden="true"><use href="#icon-flow"/></svg>编辑流程</button>
-        <span id="node-breadcrumb" class="node-breadcrumb" hidden></span>
         <button id="inspector-toggle" type="button" aria-controls="inspector" aria-expanded="false">参数</button>
       </nav>
       <div class="statusbar">
@@ -115,12 +121,16 @@
         <span id="viewer-hint" hidden>滚轮缩放，空格拖动画布</span>
       </div>
     </div>
-    <nav id="tools" class="tools" aria-label="画布工具">
-      <button data-tool="pan" type="button" aria-pressed="true" title="移动（按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
-      <button data-tool="brush" type="button" aria-pressed="false" title="画笔 B" disabled><svg aria-hidden="true"><use href="#icon-brush"/></svg><span>画笔</span></button>
-      <button data-tool="lasso" type="button" aria-pressed="false" title="多边形套索 L" disabled><svg aria-hidden="true"><use href="#icon-lasso"/></svg><span>套索</span></button>
-      <button data-tool="magnetic" type="button" aria-pressed="false" title="磁性套索 G" disabled><svg aria-hidden="true"><use href="#icon-magnetic"/></svg><span>磁性套索</span></button>
-      <button data-tool="sam_object" type="button" aria-pressed="false" title="SAM2 点选" disabled><svg aria-hidden="true"><use href="#icon-object-point"/></svg><span>SAM2 点选</span></button>
+    <nav id="tools" class="tools" data-placement="docked" aria-label="画布工具" hidden>
+      <button id="tools-handle" class="tools-handle" type="button" aria-label="浮动工具栏" title="拖出工具栏，或点击浮动">
+        <svg aria-hidden="true"><use href="#icon-tool-grip"/></svg>
+        <svg class="tools-dock-icon" aria-hidden="true"><use href="#icon-tool-dock"/></svg>
+      </button>
+      <button data-tool="pan" type="button" aria-pressed="true" aria-label="移动画布" title="移动（按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
+      <button data-tool="brush" type="button" aria-pressed="false" aria-label="画笔" title="画笔 B · Shift+滚轮调直径" disabled><svg aria-hidden="true"><use href="#icon-brush"/></svg><span>画笔</span></button>
+      <button data-tool="lasso" type="button" aria-pressed="false" aria-label="套索" title="多边形套索 L" disabled><svg aria-hidden="true"><use href="#icon-lasso"/></svg><span>套索</span></button>
+      <button data-tool="magnetic" type="button" aria-pressed="false" aria-label="磁性套索" title="磁性套索 G" disabled><svg aria-hidden="true"><use href="#icon-magnetic"/></svg><span>磁性套索</span></button>
+      <button data-tool="sam_object" type="button" aria-pressed="false" aria-label="SAM2 点选" title="SAM2 点选" disabled><svg aria-hidden="true"><use href="#icon-object-point"/></svg><span>SAM2 点选</span></button>
     </nav>
     <section id="viewer" class="viewer" aria-label="图像画布">
       <div class="viewbar" id="viewbar" hidden>
@@ -139,9 +149,9 @@
       </div>
       <div class="edit-bar" id="edit-bar" role="group" aria-label="当前工具参数" hidden>
         <label class="action-field" id="action-field"><span>动作</span><select id="lasso-action" aria-label="编辑动作" disabled></select></label>
-        <div id="brush-radius-row" class="range-row">
+        <div id="brush-radius-row" class="range-row" title="Shift+滚轮调直径 · [ 缩小 · ] 放大">
           <label for="radius">直径</label><output id="radius-value" for="radius">48 px</output>
-          <input id="radius" type="range" min="1" max="256" value="24" step="1" disabled>
+          <input id="radius" type="range" min="1" max="256" value="24" step="1" aria-keyshortcuts="[ ]" disabled>
         </div>
         <div id="protect-row" class="range-row" hidden>
           <label for="protection" id="protection-label">保护比例</label><output id="protection-value" for="protection" hidden>90%</output>
@@ -165,23 +175,23 @@
             <path id="wire-source-parts"/><path id="wire-parts-range"/><path id="wire-source-effect"/><path id="wire-range-result"/><path id="wire-effect-result"/>
           </svg>
           <button class="flow-node node-source" id="node-source" type="button" aria-label="原图">
-            <span class="node-preview"><img id="thumb-source" alt="" decoding="async" hidden><span class="preview-wait" id="wait-source">等待预览</span></span>
+            <span class="node-preview"><img id="thumb-source" alt="" decoding="async" draggable="false" hidden><span class="preview-wait" id="wait-source">等待预览</span></span>
             <span class="node-caption"><strong><svg aria-hidden="true"><use href="#icon-image"/></svg>原图</strong><small id="summary-source"></small></span>
           </button>
           <button class="flow-node node-parts" id="node-parts" type="button" aria-label="部位分区">
-            <span class="node-preview"><img id="thumb-parts" alt="" decoding="async" hidden><span class="preview-wait" id="wait-parts">等待预览</span></span>
+            <span class="node-preview"><img id="thumb-parts" alt="" decoding="async" draggable="false" hidden><span class="preview-wait" id="wait-parts">等待预览</span></span>
             <span class="node-caption"><strong><svg aria-hidden="true"><use href="#icon-parts"/></svg>部位分区</strong><small id="summary-parts"></small></span>
           </button>
           <button class="flow-node node-range" id="node-range" type="button" aria-label="处理范围">
-            <span class="node-preview"><img id="thumb-range" alt="" decoding="async" hidden><span class="preview-wait" id="wait-range">等待预览</span></span>
+            <span class="node-preview"><img id="thumb-range" alt="" decoding="async" draggable="false" hidden><span class="preview-wait" id="wait-range">等待预览</span></span>
             <span class="node-caption"><strong><svg aria-hidden="true"><use href="#icon-range"/></svg>处理范围</strong><small id="summary-range"></small></span>
           </button>
           <button class="flow-node node-effect" id="node-effect" type="button" aria-label="降噪效果">
-            <span class="node-preview"><img id="thumb-effect" alt="" decoding="async" hidden><span class="preview-wait" id="wait-effect">等待预览</span></span>
+            <span class="node-preview"><img id="thumb-effect" alt="" decoding="async" draggable="false" hidden><span class="preview-wait" id="wait-effect">等待预览</span></span>
             <span class="node-caption"><strong><svg aria-hidden="true"><use href="#icon-effect"/></svg>降噪效果</strong><small id="summary-effect"></small></span>
           </button>
           <button class="flow-node node-result" id="node-result" type="button" aria-label="成品 B">
-            <span class="node-preview"><img id="thumb-result" alt="" decoding="async" hidden><span class="preview-wait" id="wait-result">等待预览</span></span>
+            <span class="node-preview"><img id="thumb-result" alt="" decoding="async" draggable="false" hidden><span class="preview-wait" id="wait-result">等待预览</span></span>
             <span class="node-caption"><strong><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品 B</strong><small id="summary-result"></small></span>
           </button>
         </div>
@@ -207,10 +217,22 @@
           <span id="objects-legend"><i class="dot object"></i>已识别外物</span>
           <span id="unknown-legend" hidden><i class="hatch-key" aria-hidden="true"></i>待确认 · 默认保留</span>
           <span id="protection-legend"><i class="dot protect"></i>手动保护</span>
-          <span id="weight-legend"><i class="dot include"></i>蓝色越深，处理越强</span>
+          <span id="weight-legend">
+            <span id="weight-ramp" class="weight-ramp" role="img" aria-label="处理强度由浅青到蓝紫、玫红逐渐增强" hidden>
+              弱处理<i aria-hidden="true"></i>强处理
+            </span>
+            <span id="weight-legacy-legend" hidden>蓝色越深，处理越强</span>
+          </span>
         </div>
         <div id="suspected-objects-legend" class="overlay-legend" hidden>
           <span><i class="dot suspected" aria-hidden="true"></i>疑似外物仅供检查。原部位保留，可照常使用画笔。</span>
+        </div>
+        <div id="part-changes-legend" class="overlay-legend" role="group" aria-label="改动后的部位" hidden></div>
+        <div id="range-changes-legend" class="overlay-legend" role="group" aria-label="范围改动图例" hidden>
+          <span id="range-legend-added" hidden><i class="dot change-added" aria-hidden="true"></i>新增处理</span>
+          <span id="range-legend-removed" hidden><i class="dot change-removed" aria-hidden="true"></i>移出处理</span>
+          <span id="range-legend-stronger" hidden><i class="dot change-stronger" aria-hidden="true"></i>处理增强</span>
+          <span id="range-legend-weaker" hidden><i class="dot change-weaker" aria-hidden="true"></i>处理减弱</span>
         </div>
         <div id="history-location-label" class="history-location-label" hidden>虚线 · 这次操作的位置</div>
       </div>
@@ -253,14 +275,24 @@
         </section>
         <section id="parts-inspector" class="panel" aria-label="部位分区设置" hidden>
           <div class="section-heading"><h2 id="part-heading">目标部位</h2></div>
-          <p id="part-hint" class="panel-hint">点部位选目标，点锁切换原分区保护。待确认默认可改。</p>
-          <div id="part-targets" class="part-targets" role="group" aria-labelledby="part-heading"></div>
+          <p id="part-hint" class="panel-hint">点部位选目标，Ctrl+点击独显。眼睛控制叠加，锁控制保护。</p>
+          <div class="part-targets" role="group" aria-labelledby="part-heading">
+            <div class="part-target part-bulk">
+              <span>全部分区</span>
+              <button id="part-visibility-all" class="part-eye" type="button" aria-label="显示全部分区叠加">
+                <svg aria-hidden="true"><use id="part-visibility-all-icon" href="#icon-eye"/></svg>
+              </button>
+              <button id="part-protection-all" class="part-lock" type="button" aria-label="锁定全部分区">
+                <svg aria-hidden="true"><use id="part-protection-all-icon" href="#icon-unlock"/></svg>
+              </button>
+            </div>
+            <div id="part-targets" class="part-targets"></div>
+          </div>
         </section>
         <section id="edit-inspector" aria-label="选区工具" hidden>
           <section id="brush-panel" class="panel edit-panel">
             <div class="section-heading"><h2 id="current-tool-name">移动画布</h2><span id="tool-hint">当前工具</span></div>
             <p id="tool-description" class="tool-description" hidden></p>
-            <button id="suggested-range-view" class="text-button" type="button" hidden>查看实际处理</button>
             <p id="stroke-feedback" class="stroke-feedback" role="status" hidden></p>
             <div id="unknown-stroke-actions" class="unknown-stroke-actions" hidden>
               <button id="include-unknown-stroke" class="button" type="button" title="只加入这笔跳过的待确认像素">加入这笔的处理范围</button>
@@ -322,6 +354,14 @@
                 <summary>分部位强度</summary>
                 <div id="part-strengths" class="part-strengths"></div>
               </details>
+              <details id="range-protection" class="fold range-locks">
+                <summary id="range-lock-heading">保护分区<span id="range-lock-count"></span></summary>
+                <div class="range-lock-actions">
+                  <p class="panel-hint">手动工具会跳过已锁部位。</p>
+                  <button id="range-protection-all" class="text-button" type="button" disabled>锁定全部</button>
+                </div>
+                <div id="range-part-locks" class="range-lock-grid" role="group" aria-labelledby="range-lock-heading"></div>
+              </details>
               <div class="text-actions">
                 <button id="invert" type="button" class="text-button" disabled>反选</button>
                 <button id="reset" type="button" class="text-button" disabled>按部位恢复</button>
@@ -330,13 +370,13 @@
           </details>
         </section>
         <details id="range-history" class="panel range-history" hidden>
-          <summary>手动修改记录</summary>
+          <summary id="change-history-title">手动修改记录</summary>
           <div class="section-heading">
             <h2>核对改动</h2>
             <button id="show-manual-changes" class="button" type="button" disabled>查看手动改动</button>
           </div>
           <div id="changes-details" hidden>
-            <p class="panel-hint">以同一组部位和强度设置下的自动选区为基准。</p>
+            <p id="changes-baseline" class="panel-hint"></p>
             <p id="changes-status" class="changes-status" role="status"></p>
             <button id="retry-changes" class="text-button" type="button" hidden>重试读取改动</button>
             <dl id="changes-counts" class="changes-counts" hidden>
@@ -344,7 +384,7 @@
               <div id="change-count-removed"><dt><i class="dot change-removed"></i>移出处理</dt><dd id="changes-removed"></dd></div>
               <div id="change-count-stronger"><dt><i class="dot change-stronger"></i>处理增强</dt><dd id="changes-stronger"></dd></div>
               <div id="change-count-weaker"><dt><i class="dot change-weaker"></i>处理减弱</dt><dd id="changes-weaker"></dd></div>
-              <div id="change-count-reclassified"><dt><i class="dot change-reclassified"></i>仅改分区</dt><dd id="changes-reclassified"></dd></div>
+              <div id="change-count-reclassified"><dt>归属变更</dt><dd id="changes-reclassified"></dd></div>
             </dl>
           </div>
           <p id="change-history-empty" class="panel-hint">画完一笔或闭合选区，操作会出现在这里。</p>
@@ -400,7 +440,7 @@
     <div class="settings-tabs" role="tablist" aria-label="设置类别">
       <button id="tab-defaults" type="button" role="tab" aria-controls="prefs-defaults" aria-selected="true">新图默认值</button>
       <button id="tab-storage" type="button" role="tab" aria-controls="prefs-storage" aria-selected="false" tabindex="-1">导出与缓存</button>
-      <button id="tab-appearance" type="button" role="tab" aria-controls="prefs-appearance" aria-selected="false" tabindex="-1">外观与画笔</button>
+      <button id="tab-appearance" type="button" role="tab" aria-controls="prefs-appearance" aria-selected="false" tabindex="-1">工作台</button>
     </div>
     <form id="settings-form">
       <div class="settings-scroll">
@@ -432,6 +472,8 @@
           <h2>画笔</h2><label class="remember-brush"><input type="checkbox" id="pref-remember-brush">记住上次使用的大小和羽化</label>
           <div class="defaults-main brush-defaults"><label>画笔直径<span class="pref-percentage"><input type="number" min="2" max="512" step="2" id="pref-brush-size" required>px</span></label>
             <label>羽化宽度<span class="pref-percentage"><input type="number" min="0" max="256" step="1" id="pref-brush-feather" required>px</span></label></div>
+          <h2>关闭页面</h2>
+          <label class="exit-on-close"><input type="checkbox" id="pref-exit-on-close">关闭最后一个工作台页面时退出后台</label>
         </section>
       </div>
       <footer class="settings-footer">

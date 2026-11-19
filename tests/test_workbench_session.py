@@ -59,6 +59,55 @@ class WorkbenchSessionTest(unittest.TestCase):
             self.assertEqual(notes.read_text(encoding='utf-8'), 'keep')
             self.assertTrue(docs.asset(doc, 'b', revision=revision, download=True).startswith(b'\x89PNG'))
 
+    def test_first_edit_after_reopening_uses_the_verified_saved_case(self):
+        from gpt_animeimage_denoise.workbench.session import WorkbenchSession
+
+        original = self.open_session(self.root / 'cases')
+        wait_ready = test_workbench_documents.DocumentsTest.ready
+        with Documents(self.root, opener=lambda *_: original) as docs:
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            wait_ready(self, opened['id'], opened['revision'], docs=docs)
+
+        with mock.patch.object(WorkbenchSession, 'open', side_effect=AssertionError('repeated analysis')) as open_session, \
+                Documents(self.root) as reopened:
+            ready = reopened.get(opened['id'])
+            edit = {'stage': 'range', 'tool': 'exclude', 'points': [[17, 18]], 'radius': 2}
+            queued = reopened.update(ready['id'], {'revision': ready['revision'], 'settings': ready['settings'],
+                                                  'edits': [edit], 'cursor': 1})
+            result = wait_ready(self, ready['id'], queued['revision'], docs=reopened)
+            self.assertEqual(open_session.call_count, 0)
+            np.testing.assert_array_equal(reopened._resident.candidate(), self.baseline)
+            self.assertEqual(result['b']['revision'], queued['revision'])
+
+    def test_preparing_a_saved_draft_reuses_its_selection_without_publishing_a_revision(self):
+        from gpt_animeimage_denoise.workbench.session import WorkbenchSession
+
+        original = self.open_session(self.root / 'cases')
+        wait_ready = test_workbench_documents.DocumentsTest.ready
+        with Documents(self.root, opener=lambda *_: original) as docs:
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            wait_ready(self, opened['id'], opened['revision'], docs=docs)
+
+        with (mock.patch.object(WorkbenchSession, 'from_cache', wraps=WorkbenchSession.from_cache) as restore,
+              mock.patch.object(WorkbenchSession, 'open', side_effect=AssertionError('repeated analysis')),
+              Documents(self.root) as reopened):
+            ready = reopened.get(opened['id'])
+            reopened.prepare_edit(ready['id'], ready['revision'])
+            key = reopened._selection_cache_key(ready)
+            limit = monotonic() + 3
+            while monotonic() < limit and reopened._selection_key != key:
+                sleep(.01)
+            self.assertEqual(reopened._selection_key, key)
+            self.assertEqual(reopened.get(ready['id']), ready)
+            self.assertIsNone(reopened._restored)
+            cache = reopened._weight_cache
+            edit = {'stage': 'range', 'tool': 'exclude', 'points': [[17, 18]], 'radius': 2}
+            queued = reopened.update(ready['id'], {'revision': ready['revision'], 'settings': ready['settings'],
+                                                   'edits': [edit], 'cursor': 1})
+            wait_ready(self, ready['id'], queued['revision'], docs=reopened)
+            self.assertIs(reopened._weight_cache, cache)
+            self.assertEqual(restore.call_count, 1)
+
     def test_first_denoiser_failure_identifies_the_candidate_stage(self):
         model_path = self.root / 'esrgan.pth'
         model_path.write_bytes(b'fixture with an invalid checksum')

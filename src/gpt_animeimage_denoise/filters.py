@@ -117,7 +117,7 @@ def blend(original_uint8, candidate_float, weight_float):
 
 
 def _distance_weight(inside, radius):
-    if radius == 0 or inside.all() or not inside.any():
+    if (np.isscalar(radius) and radius == 0) or inside.all() or not inside.any():
         return inside.astype(np.float32)
     distance = distance_transform_edt(inside)
     return (np.sin(np.clip(distance / radius, 0, 1) * np.pi / 2) ** 2).astype(np.float32)

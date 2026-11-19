@@ -83,7 +83,8 @@ class Preferences:
     def __init__(self, defaults, validate):
         self.validate = validate
         self.initial = {'defaults': defaults, 'export_dir': '', 'cache_dir': '', 'theme': 'system',
-                        'remember_brush': False, 'brush_radius': 24, 'brush_feather': 0}
+                        'remember_brush': False, 'brush_radius': 24, 'brush_feather': 0,
+                        'exit_on_close': False}
         configured = os.environ.get('GAID_WORKBENCH_SETTINGS')
         local = os.environ.get('LOCALAPPDATA') or os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config'
         self.path = Path(configured).resolve() if configured else Path(local) / 'GAID' / 'workbench' / 'settings.json'
@@ -111,6 +112,8 @@ class Preferences:
                 result['defaults'] = self.validate({**before['defaults'], **patch['defaults']})
             if result['theme'] not in ('system', 'light', 'dark') or type(result['remember_brush']) is not bool:
                 raise ValueError('外观或笔刷记忆设置无效。')
+            if type(result['exit_on_close']) is not bool:
+                raise ValueError('关闭页面时的退出设置无效。')
             radius, feather = result['brush_radius'], result['brush_feather']
             if (type(radius) is not int or not 1 <= radius <= 256 or not isinstance(feather, Real)
                     or isinstance(feather, bool) or not 0 <= feather <= radius):

@@ -192,6 +192,41 @@ class WorkbenchHTTPTest(unittest.TestCase):
                 sleep(.01)
             shutdown.assert_called_once()
 
+    def test_closing_the_last_page_keeps_workbench_running_by_default(self):
+        settings = json.loads(self.request('GET', '/api/settings')[1])
+        self.assertIs(settings.get('exit_on_close'), False)
+        page = {'id': '00000000-0000-4000-8000-000000000001'}
+        stopped = Event()
+        with patch('gpt_animeimage_denoise.workbench.server._PAGE_CLOSE_GRACE', .1, create=True), \
+                patch.object(self.server, 'shutdown', side_effect=stopped.set):
+            self.assertEqual(self.post('/api/page', {**page, 'open': True})[0], 200)
+            self.assertEqual(self.post('/api/page', {**page, 'open': False})[0], 200)
+            self.assertFalse(stopped.wait(.25))
+
+    def test_page_close_exits_after_the_last_page_and_allows_reload(self):
+        self.assertEqual(self.post('/api/settings', {'exit_on_close': 'yes'})[0], 400)
+        self.assertEqual(self.post('/api/settings', {'exit_on_close': True})[0], 200)
+        self.assertIs(self.server.documents.preferences.read()['exit_on_close'], True)
+        stopped = Event()
+
+        def report(number, opened):
+            page = f'00000000-0000-4000-8000-{number:012x}'
+            self.assertEqual(self.post('/api/page', {'id': page, 'open': opened})[0], 200)
+
+        with patch('gpt_animeimage_denoise.workbench.server._PAGE_CLOSE_GRACE', .5, create=True), \
+                patch.object(self.server, 'shutdown', side_effect=stopped.set):
+            report(1, True)
+            report(2, True)
+            report(1, False)
+            self.assertFalse(stopped.wait(.65))
+            report(2, False)
+            report(3, True)
+            self.assertFalse(stopped.wait(.65))
+            report(4, False)
+            report(4, True)  # A delayed open request must not revive a closed page.
+            report(3, False)
+            self.assertTrue(stopped.wait(3))
+
     def post(self, route, value):
         status, body = self.request('POST', route, json.dumps(value), **{
             'X-GAID-Request': '1', 'Content-Type': 'application/json'})
@@ -299,6 +334,43 @@ class WorkbenchHTTPTest(unittest.TestCase):
             with Image.open(BytesIO(image)) as highlight:
                 self.assertEqual(highlight.mode, 'P')
                 np.testing.assert_array_equal(np.asarray(highlight.convert('RGBA'))[..., 3] > 0, expected)
+            code, data = self.request('GET', route + '/image?view=background_overlay&revision=1')
+            self.assertEqual(code, 200)
+            with Image.open(BytesIO(data)) as image:
+                pixels = np.asarray(image.convert('RGBA'))
+                background = (labels == 0) & ~expected & (alpha > 0)
+                np.testing.assert_array_equal(pixels[..., 3] > 0, background)
+                self.assertEqual(pixels[60, 300].tolist(), [56, 151, 188, 100])
+            code, data = self.request('GET', route + '/image?view=parts_overlay&revision=1')
+            self.assertEqual(code, 200)
+            with Image.open(BytesIO(data)) as image:
+                self.assertEqual(image.convert('RGBA').getpixel((300, 60)), (56, 151, 188, 100))
+            code, data = self.request('GET', route + '/image?view=highlight&module=background&revision=1')
+            self.assertEqual(code, 200)
+            with Image.open(BytesIO(data)) as image:
+                selected = np.asarray(image.convert('RGBA'))
+                np.testing.assert_array_equal(selected[..., 3] > 0, background)
+                self.assertEqual(selected[60, 300].tolist(), [56, 151, 188, 64])
+            code, data = self.request('GET', '/api/options')
+            self.assertEqual(code, 200)
+            swatch = next(part for part in json.loads(data)['modules'] if part['id'] == 'background')
+            self.assertEqual(swatch['color'], '#3897bc')
+            self.assertEqual(self.request('GET', route + '/image?view=background_overlay&revision=0')[0], 409)
+            source = np.dstack((rgb, alpha))
+            with Image.open(BytesIO(self.request('GET', route + '/image?view=parts&revision=1')[1])) as image:
+                full_overlay = np.array(image)
+            for hidden in ('skin', 'mouth'):
+                code, data = self.request('GET', route + f'/image?view=parts&revision=1&hide={hidden}')
+                self.assertEqual(code, 200)
+                mask = labels == 1 if hidden == 'skin' else expected
+                with Image.open(BytesIO(data)) as filtered:
+                    self.assertEqual(filtered.info['icc_profile'], b'a-profile')
+                    pixels = np.array(filtered)
+                    np.testing.assert_array_equal(pixels[mask & (alpha > 0)], source[mask & (alpha > 0)])
+                    np.testing.assert_array_equal(pixels[~mask], full_overlay[~mask])
+                    np.testing.assert_array_equal(pixels[..., 3], alpha)
+            self.assertEqual(self.request('GET', route + '/image?view=parts&revision=1&hide=missing')[0], 400)
+            self.assertEqual(self.request('GET', route + '/image?view=parts&revision=0&hide=skin')[0], 409)
             self.assertEqual(self.request('GET', route + '/thumbnail?view=parts&revision=0')[0], 409)
             self.assertEqual(self.request('GET', route + '/image?view=candidate&revision=0')[0], 409)
             update = {key: state[key] for key in ('revision', 'settings', 'edits', 'cursor')}
@@ -425,6 +497,7 @@ class WorkbenchHTTPTest(unittest.TestCase):
             state = self.ready(route)
             self.assertEqual(self.request('GET', route + '/changes')[0], 400)
             self.assertEqual(self.request('GET', route + '/changes?revision=oops')[0], 400)
+            self.assertEqual(self.request('GET', route + f"/changes?revision={state['revision']}&stage=effect")[0], 400)
             status, body = self.request('GET', route + f"/changes?revision={state['revision']}")
             self.assertEqual(status, 200)
             self.assertIsNone(json.loads(body)['overlay'])
@@ -455,6 +528,13 @@ class WorkbenchHTTPTest(unittest.TestCase):
             self.assertEqual(changes['counts']['removed'], int(cup.sum()))
             with Image.open(BytesIO(b64decode(changes['overlay'].split(',', 1)[1]))) as overlay:
                 np.testing.assert_array_equal(np.asarray(overlay)[..., 3] > 0, cup)
+            for stage, counts in [('parts', {'reclassified': int(cup.sum())}),
+                                  ('range', {'added': 0, 'removed': 0, 'stronger': 0, 'weaker': 0})]:
+                status, body = self.request('GET', route + f"/changes?revision={state['revision']}&stage={stage}")
+                self.assertEqual(status, 200)
+                changes = json.loads(body)
+                self.assertEqual(changes['stage'], stage)
+                self.assertEqual(changes['counts'], counts)
             status, png = self.request('GET', route + f"/download?view=b&revision={state['revision']}")
             self.assertEqual(status, 200)
             with Image.open(BytesIO(png)) as result:

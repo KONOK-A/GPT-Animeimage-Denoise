@@ -1,5 +1,6 @@
+from copy import deepcopy
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -77,6 +78,104 @@ class WorkbenchMasksTests(unittest.TestCase):
         undo = self.selection([hard, erase], cursor=1, structure_protection=0)
         np.testing.assert_array_equal(undo.weight, self.selection([hard], structure_protection=0).weight)
 
+    def test_adaptive_include_gives_thin_brushes_a_full_core_and_preserves_outer_blending(self):
+        from gpt_animeimage_denoise.workbench.masks import binary_corrections, render_selection
+
+        shape = (768, 768)
+        labels = np.full(shape, MODULES['outfit'], np.uint8)
+        empty = np.zeros(shape, bool)
+        editor = SelectionEditor(np.full((*shape, 3), 100, np.uint8), None, labels, empty, empty)
+        settings = {'modules': [], 'strength': .8, 'structure_protection': 0}
+        brush = {'stage': 'range', 'tool': 'include', 'shape': 'brush', 'geometry': 'continuous',
+                 'radius': 2, 'feather': 0, 'points': [[100, 100], [100, 140]]}
+        old = render_selection(editor, settings, [brush], 1)
+        new = render_selection(editor, settings, [{**brush, 'adaptive_edge': True}], 1)
+        np.testing.assert_array_equal(new.selected, old.selected)
+        self.assertAlmostEqual(float(old.weight[120, 100]), .4)
+        self.assertAlmostEqual(float(new.weight[120, 100]), .8)
+        self.assertEqual(new.weight[120, 103], 0)
+        with self.assertRaisesRegex(ValueError, '随笔径'):
+            binary_corrections(editor, new, settings)
+        binary_corrections(editor, old, settings)
+
+        finer_edge = render_selection(editor, settings, [{**brush, 'radius': 9, 'adaptive_edge': True}], 1)
+        np.testing.assert_allclose(finer_edge.weight[120, [106, 107, 108, 109, 110]], [.8, .8, .6, .2, 0], atol=1e-6)
+        feathered = render_selection(editor, settings, [{**brush, 'radius': 9, 'feather': 4, 'adaptive_edge': True}], 1)
+        self.assertAlmostEqual(float(feathered.weight[120, 100]), .8)
+        self.assertTrue(0 < feathered.weight[120, 107] < .4)
+        self.assertEqual(feathered.weight[120, 109], 0)
+
+    def test_adaptive_edge_cache_updates_unchanged_selection_and_restores_on_undo(self):
+        from gpt_animeimage_denoise.workbench.masks import WorkbenchWeightCache, render_selection
+
+        shape = (512, 512)
+        empty = np.zeros(shape, bool)
+        editor = SelectionEditor(np.full((*shape, 3), 100, np.uint8), None, empty.astype(np.uint8), empty, empty)
+        settings = {'modules': [], 'structure_protection': 0}
+        brush = {'stage': 'range', 'tool': 'include', 'radius': 2, 'feather': 0, 'points': [[66, 70], [66, 90]]}
+        adaptive = {**brush, 'adaptive_edge': True}
+        reset = {'stage': 'range', 'tool': 'reset'}
+        cache = WorkbenchWeightCache(editor)
+        edits = [brush, adaptive, reset]
+        for cursor, expected in [(1, .853553), (2, 1), (1, .853553), (2, 1), (3, 0), (2, 1)]:
+            actual = render_selection(editor, settings, edits, cursor, weight_cache=cache)
+            reference = render_selection(editor, settings, edits, cursor)
+            self.assertAlmostEqual(float(actual.weight[80, 66]), expected, places=6)
+            np.testing.assert_array_equal(actual.weight, reference.weight)
+
+    def test_adaptive_edge_join_blends_across_shared_selection_at_equal_depth(self):
+        from gpt_animeimage_denoise.workbench.masks import WorkbenchWeightCache, render_selection
+
+        shape = (1280, 1280)
+        empty = np.zeros(shape, bool)
+        editor = SelectionEditor(np.full((*shape, 3), 100, np.uint8), None, empty.astype(np.uint8), empty, empty)
+        settings = {'modules': [], 'structure_protection': 0}
+        brush = {'stage': 'range', 'tool': 'include', 'shape': 'brush', 'geometry': 'continuous', 'adaptive_edge': True}
+        wide = {**brush, 'radius': 30, 'points': [[640, 500], [640, 750]]}
+        thin = {**brush, 'radius': 3, 'points': [[663, 629], [663, 656]]}
+        cache = WorkbenchWeightCache(editor)
+        before = render_selection(editor, settings, [wide, thin], 1, weight_cache=cache)
+        joined = render_selection(editor, settings, [wide, thin], 2, weight_cache=cache)
+        np.testing.assert_array_equal(joined.selected, before.selected)
+        section = joined.weight[610:644, 666]
+        self.assertAlmostEqual(float(section[0]), .5)
+        self.assertEqual(section[-1], 1)
+        self.assertLessEqual(float(np.abs(np.diff(section)).max()), .25)
+        self.assertTrue(((section > .5) & (section < 1)).any())
+        full = render_selection(editor, settings, [wide, thin], 2)
+        np.testing.assert_array_equal(joined.weight, full.weight)
+        undone = render_selection(editor, settings, [wide, thin], 1, weight_cache=cache)
+        np.testing.assert_array_equal(undone.weight, before.weight)
+
+        detached = {**thin, 'points': [[675, 629], [675, 656]]}
+        separate = render_selection(editor, settings, [wide, detached], 2, weight_cache=cache)
+        np.testing.assert_array_equal(separate.weight[:, :672], before.weight[:, :672])
+        self.assertEqual(separate.weight[640, 675], 1)
+
+    def test_continuous_brush_uses_distance_to_the_segment_at_subpixel_positions(self):
+        from gpt_animeimage_denoise.workbench.masks import _rasterize
+
+        shape = (130, 200)
+        points = [[22.25, 24.625], [164.25, 87.625]]
+        brush = {'stage': 'range', 'tool': 'include', 'shape': 'brush', 'points': points,
+                 'radius': 14, 'geometry': 'continuous'}
+        start, end = np.asarray(points)
+        dx, dy = end - start
+        y, x = np.indices(shape, dtype=np.float64) - start[::-1, None, None]
+        along = np.clip((x * dx + y * dy) / (dx ** 2 + dy ** 2), 0, 1)
+        distance = np.hypot(x - dx * along, y - dy * along)
+        edge = np.clip((14 - distance) / 6, 0, 1)
+        for feather, expected in [(0, distance <= 14), (6, edge ** 2 * (3 - 2 * edge))]:
+            with self.subTest(feather=feather):
+                tile, local = _rasterize({**brush, 'feather': feather}, shape)
+                actual = np.zeros(shape, np.float32)
+                actual[tile] = local
+                np.testing.assert_allclose(actual, expected, atol=3e-6)
+
+        old_brush = {key: value for key, value in brush.items() if key != 'geometry'}
+        previous = _rasterize({**old_brush, 'points': [[22, 24], [164, 87]]}, shape)[1]
+        np.testing.assert_array_equal(_rasterize(old_brush, shape)[1], previous)
+
     def test_part_protection_filters_the_current_source_labels(self):
         protected = [*MODULES, 'object']
         first = {'stage': 'parts', 'tool': 'classify', 'module': 'outfit',
@@ -102,6 +201,58 @@ class WorkbenchMasksTests(unittest.TestCase):
         all_protected = self.selection([{**first, 'protected_parts': [*protected, 'unknown']}])
         np.testing.assert_array_equal(all_protected.labels, self.editor.labels)
         self.assertEqual(all_protected.edit_feedback['reason'], 'protected')
+
+    def test_range_locks_mask_local_edits_and_saved_sam_outlines(self):
+        from gpt_animeimage_denoise.workbench.masks import render_selection
+
+        brush = {'stage': 'range', 'points': [[36, 40]], 'radius': 9}
+        locked = {**brush, 'protected_parts': ['skin']}
+        for tool, settings, prior, expected in (
+            ('include', {'modules': []}, [], [0, 1]),
+            ('exclude', {}, [], [1, 0]),
+            ('protect', {}, [], [1, .25]),
+            ('mix', {}, [], [1, .25]),
+            ('erase', {}, [{**brush, 'tool': 'exclude'}], [0, 1]),
+        ):
+            with self.subTest(tool=tool):
+                edit = {**locked, 'tool': tool}
+                if tool in ('protect', 'mix'):
+                    edit['strength'] = .75
+                result = self.selection([*prior, edit], structure_protection=0, **settings)
+                np.testing.assert_allclose(result.weight[40, [31, 41]], expected)
+                self.assertGreater(result.edit_feedback['skipped_protected_pixels'], 0)
+
+        outline = np.zeros(self.editor.labels.shape, bool)
+        outline[37:44, 29:43] = True
+        sam = {'stage': 'range', 'tool': 'exclude', 'shape': 'sam', 'token': 'verified', 'protected_parts': ['skin']}
+        result = render_selection(self.editor, {'structure_protection': 0}, [sam], 1, object_mask=lambda _: outline)
+        np.testing.assert_allclose(result.weight[40, [31, 41]], [1, 0])
+
+    def test_range_locks_preserve_manual_range_through_reset_and_invert(self):
+        exclude = {'stage': 'range', 'tool': 'exclude', 'points': [[36, 40]], 'radius': 9}
+        for tool in ('reset', 'invert'):
+            with self.subTest(tool=tool):
+                bulk = {'stage': 'range', 'tool': tool, 'protected_parts': ['skin']}
+                result = self.selection([exclude, bulk], structure_protection=0)
+                np.testing.assert_allclose(result.weight[40, [31, 41]], [0, 1])
+                self.assertTrue(result.selected[40, 25])
+                self.assertEqual(result.selected[40, 63], tool == 'reset')
+        undone = self.selection([exclude, {'stage': 'range', 'tool': 'reset', 'protected_parts': ['skin']}],
+                                cursor=1, structure_protection=0)
+        np.testing.assert_allclose(undone.weight[40, [31, 41]], [0, 0])
+
+    def test_range_locks_take_priority_over_model_override_and_unknown_confirmation(self):
+        brush = {'stage': 'range', 'tool': 'include', 'points': [[20, 20]], 'radius': 3}
+        protected = ['unknown', 'object']
+        include = {**brush, 'allow_protected': True, 'protected_parts': protected}
+        included = self.selection([include], structure_protection=0)
+        self.assertFalse(included.selected[20, 20:22].any())
+        self.assertEqual(included.edit_feedback['skipped_protected_pixels'], 2)
+
+        confirm = {'stage': 'range', 'tool': 'resolve_unknown', 'protected_parts': ['unknown']}
+        confirmed = self.selection([brush, confirm], structure_protection=0)
+        self.assertFalse(confirmed.selected[20, 20])
+        self.assertEqual(confirmed.labels[20, 20], 255)
 
     def test_remove_part_brush_and_lasso_only_unassign_the_chosen_part(self):
         geometries = [
@@ -218,6 +369,74 @@ class WorkbenchMasksTests(unittest.TestCase):
             self.assertEqual(lines.call_count, 1)
             self.assertEqual(geometry.call_count, 2)
             self.assertLess(geometry.call_args.args[0].size, self.editor.labels.size)
+
+    def test_coverage_is_reused_across_history_and_settings_with_exact_replay(self):
+        from gpt_animeimage_denoise.workbench import masks
+
+        old = {'tool': 'protect', 'points': [[52, 37]], 'radius': 7, 'strength': .8}
+        lasso = {'stage': 'parts', 'tool': 'classify', 'module': 'outfit', 'shape': 'polygon',
+                 'points': [[25, 23], [45, 23], [45, 33], [25, 33]]}
+        stroke = {'stage': 'range', 'tool': 'exclude', 'geometry': 'continuous', 'radius': 9,
+                  'points': [[48.5, 36.25], [61.25, 42.5]], 'feather': 4}
+        edits = [old, lasso, stroke]
+        cases = [
+            (edits, 3, {}, 3),
+            (edits, 2, {}, 3),
+            (edits, 3, {}, 3),
+            (edits, 3, {'modules': ['hair', 'outfit'], 'strength': .47, 'structure_protection': .5,
+                        'part_strengths': {'hair': .73}}, 3),
+            ([{**old, 'strength': .3}, lasso, stroke], 3, {}, 3),
+            ([old, lasso, {**stroke, 'feather': 2}], 3, {}, 4),
+            ([{**old, 'tool': 'exclude'}, lasso, stroke], 3, {}, 5),
+            (edits, 3, {}, 5),
+        ]
+        expected = [masks.render_selection(self.editor, settings, records, cursor)
+                    for records, cursor, settings, _ in cases]
+        cache = masks.WorkbenchWeightCache(self.editor)
+        with patch.object(masks, '_rasterize', wraps=masks._rasterize) as rasterize:
+            for (records, cursor, settings, calls), reference in zip(cases, expected, strict=True):
+                actual = masks.render_selection(self.editor, settings, deepcopy(records), cursor, weight_cache=cache)
+                self.assertEqual(rasterize.call_count, calls)
+                for field in ('labels', 'objects', 'unknown', 'selected', 'weight', 'soft_protection'):
+                    np.testing.assert_array_equal(getattr(actual, field), getattr(reference, field))
+                self.assertEqual(actual.edit_feedback, reference.edit_feedback)
+
+    def test_saved_sam_coverage_is_reused_only_with_the_bound_mask_reader(self):
+        from gpt_animeimage_denoise.workbench import masks
+
+        first = np.zeros_like(self.editor.objects)
+        second = first.copy()
+        first[31:36, 43:47] = True
+        second[37:42, 55:59] = True
+        reader = Mock(side_effect=lambda token: first if token == 'legacy' else second)
+        cache = masks.WorkbenchWeightCache(self.editor, object_mask=reader)
+        records = [{'tool': 'sam_object', 'token': 'legacy'},
+                   {'tool': 'exclude', 'stage': 'range', 'shape': 'sam', 'token': 'range'}]
+        reference = masks.render_selection(self.editor, {}, records, 2,
+                                           object_mask=lambda token: first if token == 'legacy' else second)
+        for cursor in (2, 1, 2):
+            actual = masks.render_selection(self.editor, {}, records, cursor, object_mask=reader, weight_cache=cache)
+        self.assertEqual(reader.call_count, 2)
+        np.testing.assert_array_equal(actual.objects, reference.objects)
+        np.testing.assert_array_equal(actual.weight, reference.weight)
+
+        other_reader = lambda token: second if token == 'legacy' else first
+        other = masks.render_selection(self.editor, {}, records, 2, object_mask=other_reader, weight_cache=cache)
+        expected = masks.render_selection(self.editor, {}, records, 2, object_mask=other_reader)
+        np.testing.assert_array_equal(other.objects, expected.objects)
+        np.testing.assert_array_equal(other.weight, expected.weight)
+
+    def test_coverage_cache_stays_bounded_without_evicting_reused_strokes(self):
+        from gpt_animeimage_denoise.workbench import masks
+
+        cache = masks.WorkbenchWeightCache(self.editor)
+        edits = [{'tool': 'exclude', 'points': [[42, 22]], 'radius': radius} for radius in (1, 12)]
+        with patch.object(masks, '_MAX_COVERAGE_CACHE_BYTES', 256), \
+                patch.object(masks, '_rasterize', wraps=masks._rasterize) as rasterize:
+            first = masks.render_selection(self.editor, {}, edits, 2, weight_cache=cache)
+            again = masks.render_selection(self.editor, {}, edits, 2, weight_cache=cache)
+            self.assertEqual(rasterize.call_count, 3)
+            np.testing.assert_array_equal(first.weight, again.weight)
 
     def test_weight_cache_matches_full_feather_across_image_edges_and_large_changes(self):
         from gpt_animeimage_denoise.filters import build_weight

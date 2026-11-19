@@ -29,10 +29,108 @@ class DocumentsTest(unittest.TestCase):
         images = docs._selection_images(session, before)
         after = docs._selection(session.editor, settings, [{'tool': 'exclude', 'points': [[10, 10]], 'radius': 3}], 1)
         exact = docs._selection_images(session, after)
-        with patch.object(docs, '_png', wraps=docs._png) as png:
+        with patch.object(docs, '_indexed_png', wraps=docs._indexed_png) as png:
             reused = docs._selection_images(session, after, previous=(before, images))
         self.assertEqual(reused, exact)
         self.assertEqual(png.call_count, 1)
+
+    def test_adaptive_edge_marker_is_saved_only_for_range_include_brushes(self):
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        brush = {'stage': 'range', 'tool': 'include', 'shape': 'brush', 'radius': 2,
+                 'points': [[10, 10]], 'adaptive_edge': True}
+        payload = {**self.update(ready), 'edits': [brush], 'cursor': 1}
+        saved = self.docs.update(doc, payload)
+        self.assertEqual(saved['edits'], [brush])
+        for invalid in ({**brush, 'tool': 'exclude'}, {**brush, 'adaptive_edge': 1},
+                        {**brush, 'shape': 'polygon', 'points': [[10, 10], [14, 10], [14, 14]]}):
+            with self.assertRaises(ValueError):
+                self.docs.update(doc, {**self.update(saved), 'edits': [invalid], 'cursor': 1})
+
+    def test_history_accepts_range_protection_with_validated_part_names(self):
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        edits = [
+            {'stage': 'range', 'tool': 'exclude', 'radius': 2, 'points': [[10, 10]], 'protected_parts': ['skin']},
+            {'stage': 'range', 'tool': 'reset', 'protected_parts': ['hair', 'unknown']},
+        ]
+        saved = self.docs.update(doc, {**self.update(ready), 'edits': edits, 'cursor': 2})
+        self.assertEqual(saved['edits'], edits)
+        for invalid in (['invalid'], ['skin', 'skin'], 'skin'):
+            with self.assertRaisesRegex(ValueError, '保护分区'):
+                self.docs.update(doc, {**self.update(saved), 'edits': [{**edits[0], 'protected_parts': invalid}], 'cursor': 1})
+
+    def test_saved_adaptive_preview_refreshes_once_without_replacing_the_pinned_image(self):
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        brush = {'stage': 'range', 'tool': 'include', 'radius': 2, 'points': [[10, 10]], 'adaptive_edge': True}
+        queued = self.docs.update(doc, {**self.update(ready), 'edits': [brush], 'cursor': 1})
+        ready = self.ready(doc, queued['revision'])
+        self.docs.pin(doc, ready['revision'])
+        pinned = self.docs.asset(doc, 'a', revision=ready['revision'])
+        self.docs.close()
+        draft = self.workspace / 'documents' / doc / 'draft.json'
+        stored = json.loads(draft.read_text(encoding='utf-8'))
+        stored.pop('_range_edge_version', None)
+        draft.write_text(json.dumps(stored), encoding='utf-8')
+
+        with Documents(self.workspace, self.open_session) as reopened:
+            with self.assertRaises(RevisionConflict):
+                reopened.changes(doc, ready['revision'], stage='range')
+            next_revision = reopened.get(doc)['revision']
+            self.assertEqual(next_revision, ready['revision'] + 1)
+            published = self.ready(doc, next_revision, docs=reopened)
+            self.assertEqual(reopened.get(doc), published)
+            self.assertEqual(published['edits'], [brush])
+            self.assertEqual(published['selection_revision'], ready['selection_revision'] + 1)
+            self.assertEqual(reopened.asset(doc, 'a', revision=ready['revision']), pinned)
+        self.assertEqual(json.loads(draft.read_text(encoding='utf-8'))['_source_epoch'], stored['_source_epoch'])
+
+    def test_weight_overlay_distinguishes_weak_medium_and_strong_weights(self):
+        from gpt_animeimage_denoise.workbench import documents as docs
+
+        session = self.open_session('source.png', self.workspace)
+        mask = docs._selection(session.editor, docs.DEFAULTS, [], 0)
+        mask.weight[12, 4:8] = [0, .1, .5, 1]
+        encoded = docs._selection_images(session, mask)['weight_overlay.png']
+        with Image.open(BytesIO(encoded)) as image:
+            self.assertEqual(image.mode, 'P')
+            pixels = np.asarray(image.convert('RGBA'))[12, 4:8]
+        transparent, weak, middle, strong = pixels.tolist()
+        self.assertEqual(transparent[3], 0)
+        self.assertGreaterEqual(weak[3], 50)
+        self.assertGreater(weak[1], 190)
+        self.assertLess(middle[1], 140)
+        self.assertGreater(middle[2], 240)
+        self.assertEqual(strong[:3], [241, 72, 169])
+        self.assertLess(weak[3], middle[3])
+        self.assertLess(middle[3], strong[3])
+
+    def test_legacy_indexed_weight_overlay_gets_the_new_palette_without_a_new_revision(self):
+        from gpt_animeimage_denoise.workbench.documents import _indexed_png
+
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        revision = ready['revision']
+        indices = np.zeros(self.alpha.shape, np.uint8)
+        indices[12, 4:7] = [0, 28, 140]
+        old_png = _indexed_png(Image.fromarray(indices), bytes([79, 159, 232]) * 256, range(256))
+        path = self.docs._render_path(doc, revision) / 'weight_overlay.png'
+        path.write_bytes(old_png)
+        with patch.object(self.docs, '_open_session') as open_session:
+            data = self.docs.asset(doc, 'weight_overlay', revision=revision)
+            open_session.assert_not_called()
+        with Image.open(BytesIO(data)) as image:
+            pixels = np.asarray(image.convert('RGBA'))[12, 4:7]
+        self.assertEqual(pixels[0, 3], 0)
+        self.assertGreater(pixels[1, 1], 170)
+        np.testing.assert_allclose(pixels[2, :3], [241, 72, 169], atol=1)
+        self.assertEqual(path.read_bytes(), old_png)
+        self.assertEqual(self.docs.get(doc), ready)
 
     def test_changes_palette_prioritizes_weight_and_hides_transparent_pixels(self):
         from gpt_animeimage_denoise.workbench.documents import _changes_overlay
@@ -58,6 +156,59 @@ class DocumentsTest(unittest.TestCase):
             [56, 189, 248], [244, 119, 118], [81, 223, 156], [248, 191, 86], [190, 154, 255], [190, 154, 255]])
         self.assertGreater(pixels[0, 0, 3], pixels[0, 1, 3])
         self.assertEqual(pixels[0, [5, 6], 3].tolist(), [0, 0])
+
+    def test_part_changes_use_destination_colors_and_hatch_only_new_unknown_pixels(self):
+        from gpt_animeimage_denoise.workbench.documents import _part_changes_overlay
+
+        empty = np.zeros((1, 12), bool)
+        editor = SimpleNamespace(labels=np.ones(empty.shape, np.uint8), objects=empty, unknown=empty,
+                                 alpha=np.array([[255, 128, 255, 255, 255, 255, 255, 255, 255, 255, 0, 255]], np.uint8))
+        labels = np.array([[3, 6, 0, 0, 255, 1, 1, 1, 255, 1, 5, 1]], np.uint8)
+        objects, unknown = empty.copy(), empty.copy()
+        objects[0, 3] = True
+        unknown[0, [4, 8]] = True
+
+        changes = _part_changes_overlay(editor, labels, objects, unknown)
+        counts, overlay = changes[:2]
+        self.assertEqual(counts['reclassified'], 6)
+        with Image.open(BytesIO(b64decode(overlay.split(',', 1)[1]))) as encoded:
+            pixels = np.asarray(encoded)
+            self.assertEqual(pixels[0, [0, 1, 2, 3], :3].tolist(),
+                             [[101, 135, 223], [139, 120, 199], [56, 151, 188], [224, 136, 68]])
+            self.assertEqual(pixels[0, [4, 8]].tolist(), [[22, 22, 22, 158], [245, 245, 245, 158]])
+            self.assertEqual(pixels[0, [5, 6, 7, 9, 10, 11], 3].tolist(), [0] * 6)
+            self.assertEqual(pixels[0, [0, 1], 3].tolist(), [180, 90])
+        self.assertEqual(changes[2], ['background', 'hair', 'outfit', 'object', 'unknown'])
+
+    def test_edit_render_defers_corrections_and_saves_small_overlay_assets(self):
+        state = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = state['id']
+        with patch.object(self.docs, '_encode_corrections', wraps=self.docs._encode_corrections) as encode:
+            state = self.ready(doc, state['revision'])
+            edit = {'stage': 'range', 'tool': 'exclude', 'radius': 2, 'points': [[12, 12]]}
+            state = self.docs.update(doc, {**self.update(state), 'edits': [edit], 'cursor': 1})
+            ready = self.ready(doc, state['revision'])
+            self.assertEqual(encode.call_count, 0)
+            revision = ready['revision']
+            self.assertIs(ready['b']['images']['parts_overlay'], True)
+            self.assertIs(ready['b']['images']['weight_overlay'], True)
+            self.assertFalse((self.docs._render_path(doc, revision) / 'weight.png').exists())
+            for view in ('weight_overlay', 'parts_overlay'):
+                with Image.open(BytesIO(self.docs.asset(doc, view, revision=revision))) as image:
+                    self.assertEqual(image.mode, 'P')
+                    self.assertEqual(image.size, (28, 24))
+            with Image.open(BytesIO(self.docs.asset(doc, 'parts_overlay', revision=revision, hidden_parts=('skin',)))) as image:
+                self.assertFalse(np.asarray(image.convert('RGBA'))[..., 3].any())
+            for view in ('parts', 'weight'):
+                with Image.open(BytesIO(self.docs.asset(doc, view, revision=revision))) as image:
+                    np.testing.assert_array_equal(np.asarray(image)[..., 3], self.alpha)
+                    self.assertEqual(image.info['icc_profile'], b'fixture-icc')
+            exported = self.docs.corrections(doc, revision)
+            self.assertEqual(encode.call_count, 1)
+            record = json.loads(exported.read_text(encoding='utf-8'))
+            self.assertEqual(record['source_sha256'], doc)
+            with Image.open(exported.parent / record['protect_mask']) as image:
+                self.assertEqual(image.getpixel((12, 12)), 255)
 
     def test_changes_compare_same_settings_and_track_undo_without_render_side_work(self):
         from gpt_animeimage_denoise.workbench import documents as module
@@ -121,6 +272,49 @@ class DocumentsTest(unittest.TestCase):
                 self.release.set()
             with self.assertRaises(RevisionConflict):
                 pending.result(timeout=3)
+
+    def test_node_changes_use_corrected_parts_as_the_range_baseline(self):
+        state = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = state['id']
+        ready = self.ready(doc, state['revision'])
+        classify = {'stage': 'parts', 'tool': 'classify', 'module': 'outfit', 'points': [[8, 12]], 'radius': 2}
+        exclude = {'stage': 'range', 'tool': 'exclude', 'points': [[20, 12]], 'radius': 2}
+        ready = self.docs.update(doc, {**self.update(ready), 'edits': [classify], 'cursor': 1})
+        ready = self.ready(doc, ready['revision'])
+        parts = self.docs.changes(doc, ready['revision'], stage='parts')
+        range_only = self.docs.changes(doc, ready['revision'], stage='range')
+        self.assertEqual(parts['counts'], {'reclassified': 13})
+        self.assertEqual(parts['parts'], ['outfit'])
+        self.assertEqual(range_only['counts'], {'added': 0, 'removed': 0, 'stronger': 0, 'weaker': 0})
+        self.assertIsNone(range_only['overlay'])
+
+        ready = self.docs.update(doc, {**self.update(ready), 'edits': [classify, exclude], 'cursor': 2})
+        ready = self.ready(doc, ready['revision'])
+        range_only = self.docs.changes(doc, ready['revision'], stage='range')
+        parts = self.docs.changes(doc, ready['revision'], stage='parts')
+        self.assertEqual(parts['counts'], {'reclassified': 13})
+        self.assertEqual(range_only['counts'], {'added': 0, 'removed': 13, 'stronger': 0, 'weaker': 0})
+        for changes, painted_x, other_x in [(parts, 8, 20), (range_only, 20, 8)]:
+            with Image.open(BytesIO(b64decode(changes['overlay'].split(',', 1)[1]))) as overlay:
+                self.assertGreater(overlay.getpixel((painted_x, 12))[3], 0)
+                self.assertEqual(overlay.getpixel((other_x, 12))[3], 0)
+        self.assertEqual(self.docs.changes(doc, ready['revision'], stage='range'), range_only)
+
+        undone = self.docs.update(doc, {**self.update(ready), 'cursor': 1})
+        undone = self.ready(doc, undone['revision'])
+        self.assertIsNone(self.docs.changes(doc, undone['revision'], stage='range')['overlay'])
+        self.assertEqual(self.docs.changes(doc, undone['revision'], stage='parts')['counts'], {'reclassified': 13})
+
+    def test_legacy_range_unlock_is_not_reported_as_reclassification(self):
+        self.objects[12, 14] = True
+        state = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = state['id']
+        ready = self.ready(doc, state['revision'])
+        unlock = {'tool': 'include', 'points': [[14, 12]], 'radius': 1, 'allow_protected': True}
+        ready = self.docs.update(doc, {**self.update(ready), 'edits': [unlock], 'cursor': 1})
+        ready = self.ready(doc, ready['revision'])
+        self.assertIsNone(self.docs.changes(doc, ready['revision'], stage='parts')['overlay'])
+        self.assertEqual(self.docs.changes(doc, ready['revision'], stage='range')['counts']['added'], 1)
 
     def test_concurrent_changes_requests_share_ready_revision(self):
         from gpt_animeimage_denoise.workbench import documents as module
@@ -636,6 +830,141 @@ class DocumentsTest(unittest.TestCase):
         self.ready(doc, state['revision'])
         self.assertEqual(self.docs.asset(doc, 'b', download=True), baseline)
         self.assertEqual(self.strengths, [.0005])
+
+    def test_warm_blend_updates_the_changed_area_and_reuses_an_identical_result(self):
+        from gpt_animeimage_denoise import filters
+
+        state = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = state['id']
+        state = self.ready(doc, state['revision'])
+        exclude = {'stage': 'range', 'tool': 'exclude', 'points': [[14, 12]], 'radius': 2}
+        reassign = {'stage': 'parts', 'tool': 'classify', 'module': 'hair', 'points': [[17, 18]], 'radius': 2}
+        full_blend = filters.blend
+        with patch.object(filters, 'blend', wraps=full_blend) as blend:
+            queued = self.docs.update(doc, {**self.update(state), 'edits': [exclude], 'cursor': 1})
+            ready = self.ready(doc, queued['revision'])
+            self.assertEqual(blend.call_count, 1)
+            self.assertLess(blend.call_args.args[0].size, self.rgb.size)
+            weight = self.docs._selection_value[0].weight
+            expected = full_blend(self.rgb, self.docs._restored, weight)
+            changed = self.docs.asset(doc, 'b', download=True)
+            with Image.open(BytesIO(changed)) as image:
+                np.testing.assert_array_equal(np.asarray(image)[..., :3], expected)
+                np.testing.assert_array_equal(np.asarray(image)[..., 3], self.alpha)
+                self.assertEqual(image.info['icc_profile'], b'fixture-icc')
+
+            queued = self.docs.update(doc, {**self.update(ready), 'edits': [exclude, reassign], 'cursor': 2})
+            ready = self.ready(doc, queued['revision'])
+            self.assertGreater(ready['edit_feedback']['changed_pixels'], 0)
+            self.assertEqual(blend.call_count, 1)
+            self.assertEqual(self.docs.asset(doc, 'b', download=True), changed)
+
+    def test_first_reopened_selection_is_available_during_candidate_restoration(self):
+        from gpt_animeimage_denoise.workbench import documents as module
+
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        original = self.ready(doc, opened['revision'])
+        self.docs.close()
+        restoring, release = Event(), Event()
+        restore = module._restore_candidate
+
+        def hold_restoration(*args):
+            restoring.set()
+            if not release.wait(5):
+                raise RuntimeError('The test did not release candidate restoration')
+            return restore(*args)
+
+        with Documents(self.workspace, self.open_session) as reopened, \
+                patch.object(module, '_restore_candidate', side_effect=hold_restoration):
+            try:
+                edit = {'stage': 'range', 'tool': 'exclude', 'points': [[14, 12]], 'radius': 2}
+                queued = reopened.update(doc, {**self.update(original), 'edits': [edit], 'cursor': 1})
+                self.assertTrue(restoring.wait(3))
+                during = reopened.get(doc)
+                self.assertEqual(during['selection_preview']['revision'], queued['revision'])
+                self.assertEqual(during['b']['revision'], original['revision'])
+                with Image.open(BytesIO(reopened.asset(doc, 'weight_overlay', revision=queued['revision']))) as image:
+                    self.assertEqual(image.convert('RGBA').getpixel((14, 12))[3], 0)
+            finally:
+                release.set()
+            self.ready(doc, queued['revision'], docs=reopened)
+
+    def test_publishes_each_selection_while_previous_result_encoding_is_blocked(self):
+        from gpt_animeimage_denoise.workbench import documents as module
+
+        source = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = source['id']
+        initial = self.ready(doc, source['revision'])
+        self.docs.pin(doc, initial['revision'])
+        original_b = self.docs.asset(doc, 'b', revision=0)
+        started = [Event(), Event()]
+        release = [Event(), Event()]
+        encode = module._png
+
+        def hold_result(rgb, alpha, icc):
+            if rgb.shape == self.rgb.shape:
+                gate = 0 if not started[0].is_set() else 1
+                started[gate].set()
+                if not release[gate].wait(6):
+                    raise RuntimeError('The test did not release PNG encoding')
+            return encode(rgb, alpha, icc)
+
+        def exclude(x):
+            return {'stage': 'range', 'tool': 'exclude', 'points': [[x, 12]], 'radius': 2}
+
+        def early(revision, x):
+            limit = monotonic() + 3
+            while monotonic() < limit:
+                current = self.docs.get(doc)
+                if (current.get('selection_preview') or {}).get('revision') == revision:
+                    break
+                sleep(.01)
+            else:
+                self.fail(f'Selection preview {revision} was not published during encoding')
+            self.assertEqual(current['b']['revision'], 0)
+            self.assertEqual(current['selection_preview']['cursor'], revision)
+            self.assertNotEqual(current['status'], 'ready')
+            with Image.open(BytesIO(self.docs.asset(doc, 'weight_overlay', revision=revision))) as image:
+                self.assertEqual(image.convert('RGBA').getpixel((x, 12))[3], 0)
+            with Image.open(BytesIO(self.docs.asset(doc, 'parts_overlay', revision=revision))) as image:
+                self.assertEqual(image.size, (28, 24))
+            with self.assertRaises(RevisionConflict):
+                self.docs.pin(doc, revision)
+            with self.assertRaises(RevisionConflict):
+                self.docs.asset(doc, 'b', revision=revision, download=True)
+            with self.assertRaises(RevisionConflict):
+                self.docs.asset(doc, 'b', revision=0, download=True)
+            return current
+
+        with patch.object(module, '_png', side_effect=hold_result):
+            try:
+                first = self.docs.update(doc, {**self.update(initial), 'edits': [exclude(10)], 'cursor': 1})
+                self.assertTrue(started[0].wait(3))
+                first = early(first['revision'], 10)
+                second = self.docs.update(doc, {**self.update(first), 'edits': [exclude(10), exclude(18)], 'cursor': 2})
+                second = early(second['revision'], 18)
+                with self.assertRaises(RevisionConflict):
+                    self.docs.asset(doc, 'weight_overlay', revision=first['revision'])
+                limit = monotonic() + 3
+                while self.docs.get(doc)['phase'] != 'encoding' and monotonic() < limit:
+                    sleep(.01)
+                self.assertEqual(self.docs.get(doc)['phase'], 'encoding')
+                third = self.docs.update(doc, {**self.update(second), 'edits': [exclude(10), exclude(18), exclude(23)],
+                                               'cursor': 3})
+                third = early(third['revision'], 23)
+                release[0].set()
+                self.assertTrue(started[1].wait(3))
+                self.assertEqual(self.docs.get(doc)['b']['revision'], 0)
+                release[1].set()
+                newest = self.ready(doc, third['revision'])
+            finally:
+                for event in release:
+                    event.set()
+        self.assertEqual(newest['b']['revision'], 3)
+        self.assertEqual(self.docs.asset(doc, 'a', revision=0, download=True), original_b)
+        with Image.open(BytesIO(self.docs.asset(doc, 'b', revision=3, download=True))) as result:
+            np.testing.assert_array_equal(np.asarray(result)[12, [10, 18, 23], :3], self.rgb[12, [10, 18, 23]])
 
     def test_absolute_mix_is_saved_as_an_edit_and_refuses_binary_export(self):
         state = self.docs.open(self.content.getvalue(), 'sample.png')

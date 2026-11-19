@@ -47,12 +47,13 @@ const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const scopeButtons = [...document.querySelectorAll('[data-scope]')];
 const numberFields = ['strength', 'l0', 'downscale', 'sigma', 'restoration_gain', 'structure_protection'];
 const MASK_VIEWS = ['weight', 'parts', 'suspected_objects'];
-const CHANGE_CATEGORIES = ['added', 'removed', 'stronger', 'weaker', 'reclassified'];
+const SELECTION_ASSETS = [...MASK_VIEWS, 'highlight', 'background_overlay', 'unknown'];
+const CHANGE_CATEGORIES = { parts: ['reclassified'], range: ['added', 'removed', 'stronger', 'weaker'] };
 const RANGE_VIEWS = [...MASK_VIEWS, 'changes'];
 const MAGNETIC_PIN_DISTANCE = 48;
 const MODE_VIEWS = { review: ['compare', 'original', 'result'], flow: [],
   parts: ['compare', 'parts', 'changes', 'suspected_objects'],
-  range: ['weight', 'original', 'result', 'changes'], effect: ['result', 'candidate', 'compare', 'original'] };
+  range: ['compare', 'weight', 'changes'], effect: ['result', 'candidate', 'compare', 'original'] };
 const nodeNames = { parts: '部位分区', range: '处理范围', effect: '降噪效果' };
 const actions = {
   parts: { classify: '归入目标部位', remove_part: '移出当前部位', erase: '擦除本步修改' },
@@ -64,26 +65,50 @@ const state = {
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
-  changesError: null, appliedHistory: null, historyLocation: null, historyDisplayKey: '',
-  displayedResult: null, part: 'hair', protectedParts: new Set(), actions: { parts: 'classify', range: 'include' },
+  changesErrors: new Map(), appliedHistory: null, historyLocation: null, historyDisplayKey: '', partFrame: null,
+  displayedResult: null, part: 'hair', protectedParts: new Set(), rangeProtectedParts: new Set(),
+  hiddenParts: new Set(), partIsolation: null,
+  actions: { parts: 'classify', range: 'include' },
 };
 const isLasso = () => ['lasso', 'magnetic'].includes(state.tool);
 const editingMask = () => state.mode === 'parts' || state.mode === 'range';
 const isBrush = () => editingMask() && !['pan', 'sam_object', 'lasso', 'magnetic'].includes(state.tool);
 const activeAction = () => isBrush() ? state.tool : byId('lasso-action').value;
 const originalPreviewActive = () => state.peek || state.keyboardPeek;
-const partInspectionView = () => state.mode === 'parts' && state.view !== 'parts';
-const partEditsBlocked = () => partInspectionView() || (state.mode === 'parts' && originalPreviewActive());
+const editableMaskView = () => state.mode === 'parts' ? 'parts' : 'weight';
+const maskInspectionView = () => editingMask() && state.view !== editableMaskView();
+const maskEditsBlocked = () => maskInspectionView() || (editingMask() && originalPreviewActive());
 const clone = value => JSON.parse(JSON.stringify(value));
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const route = (suffix = '') => '/api/documents/' + encodeURIComponent(state.doc.id) + suffix;
-const visibleImage = view => state.images.get(view === 'result' ? 'b' : view)?.image;
-const usesPinnedComparison = () => state.mode !== 'parts' && Boolean(state.doc?.a);
-const viewAvailable = view => (view !== 'suspected_objects' && view !== 'unknown') || Boolean(state.doc?.b?.images?.[view]);
+const changesKey = stage => 'changes:' + stage;
+const hiddenPartsQuery = () => [...state.hiddenParts].sort().join(',');
+function viewAsset(view) {
+  if (view === 'parts') {
+    const next = state.images.get(state.hiddenParts.size ? 'filtered-parts' : 'parts');
+    if (next?.hiddenParts === hiddenPartsQuery() && (!state.partFrame || next.revision >= state.partFrame.revision)) {
+      return next;
+    }
+    return state.partFrame;
+  }
+  return state.images.get(view === 'result' ? 'b' : view === 'changes' ? changesKey(state.mode) : view);
+}
+const visibleImage = view => viewAsset(view)?.image;
+const usesPinnedComparison = () => !editingMask() && Boolean(state.doc?.a);
+const selectionPreview = () => state.doc?.selection_preview ?? state.doc?.b;
+function assetSnapshot(view) {
+  if (SELECTION_ASSETS.includes(view)) return selectionPreview();
+  return view === 'a' ? state.doc?.a : state.doc?.b;
+}
+const viewAvailable = view => (view !== 'suspected_objects' && view !== 'unknown') || Boolean(selectionPreview()?.images?.[view]);
 const unknownOverlayAvailable = () => editingMask() && (state.view === 'parts' || state.view === 'weight')
   && viewAvailable('unknown');
+const unknownOverlayVisible = () => unknownOverlayAvailable()
+  && (state.view === 'parts' ? !state.hiddenParts.has('unknown') : state.showUnknown);
 const pendingKey = id => 'gaid-pending-' + id;
 const protectionKey = id => 'gaid-part-protection-' + id;
+const rangeProtectionKey = id => 'gaid-range-protection-' + id;
+const visibilityKey = id => 'gaid-hidden-parts-' + id;
 function status(message, tone = 'neutral') {
   const label = byId('status');
   if (label.textContent !== message) label.textContent = message;
@@ -105,10 +130,11 @@ async function request(url, options = {}) {
   }
   return reply;
 }
-async function post(url, payload) {
+async function post(url, payload, { keepalive = false } = {}) {
+  const body = JSON.stringify(payload);
   return (await request(url, { method: 'POST', headers: {
     'Content-Type': 'application/json', 'X-GAID-Request': '1',
-  }, body: JSON.stringify(payload) })).json();
+  }, body, keepalive: keepalive && new Blob([body]).size <= 60 * 1024 })).json();
 }
 function storage(method, ...args) {
   try { return window.sessionStorage[method](...args); } catch { return undefined; }
@@ -190,7 +216,7 @@ function updateToolGuidance(current) {
   const feedback = state.doc?.edit_feedback;
   const latest = state.doc?.edits?.[state.doc.cursor - 1];
   const editedPart = partLabel(latest?.module || state.part);
-  const feedbackTool = tool === 'pan' && state.mode === 'parts' && latest?.shape === 'sam' ? latest.tool : tool;
+  const feedbackTool = tool === 'pan' && latest?.shape === 'sam' && latest.stage === state.mode ? latest.tool : tool;
   let message = '';
   if (current && !state.gesture?.edit && feedback?.tool === feedbackTool && (!latest?.stage || latest.stage === state.mode)) {
     if (feedback.reason === 'changed' && Number.isInteger(feedback.changed_pixels) && feedback.changed_pixels > 0) {
@@ -221,15 +247,22 @@ function updateToolGuidance(current) {
     }[feedbackTool] || '这里没有手动标记，自动选区照常生效。';
     else if (feedback.reason === 'already_excluded') message = '这里原本就没有选中，不会处理。';
     const protectedCount = feedback.skipped_protected_pixels;
-    if (protectedCount > 0) message += '已跳过 ' + protectedCount.toLocaleString('zh-CN') + ' 个受保护像素。';
+    if (protectedCount > 0) {
+      const count = protectedCount.toLocaleString('zh-CN');
+      if (latest?.stage === 'range') {
+        message = (feedback.changed_pixels > 0 ? message : '') + '已跳过 ' + count + ' 个锁定像素。';
+      } else message += '已跳过 ' + count + ' 个受保护像素。';
+    }
   }
   const skipped = skippedUnknownCount(current);
   byId('unknown-stroke-actions').hidden = !skipped;
+  const unknownLocked = state.mode === 'range' && state.rangeProtectedParts.has('unknown');
+  byId('include-unknown-stroke').disabled = byId('assign-unknown-stroke').disabled = unknownLocked;
   byId('unknown-assignment').hidden = latest?.stage === 'range';
   byId('open-unknown-parts').hidden = latest?.stage !== 'range';
   if (skipped) {
     const skippedMessage = '这笔跳过 ' + skipped.toLocaleString('zh-CN') + ' 个待确认像素。';
-    message = feedback.changed_pixels > 0 ? message + skippedMessage : skippedMessage;
+    message = feedback.changed_pixels > 0 || feedback.skipped_protected_pixels > 0 ? message + skippedMessage : skippedMessage;
   }
   output.hidden = !message;
   if (output.textContent !== message) output.textContent = message;
@@ -239,9 +272,6 @@ function rangeToolName(tool) {
     mix: '指定原图比例', erase: '擦除手动改动', override: '纠正部位', sam_object: '点选外物',
     classify: '归入目标部位', remove_part: '移出当前部位',
     invert: '反选处理范围', reset: '按部位恢复', import: '导入校正' }[tool] || '编辑范围';
-}
-function suggestedRangeView() {
-  return state.mode === 'parts' ? 'parts' : 'weight';
 }
 function editHistoryLabel(edit) {
   const module = partLabel(edit.module);
@@ -255,15 +285,34 @@ function editHistoryLabel(edit) {
   }
   return label + (edit.shape === 'polygon' ? ' · 圈选' : edit.shape === 'sam' ? ' · SAM2' : '');
 }
-function updateRangeHistory(canEdit) {
+function editBelongsToStage(edit, stage) {
+  if (edit.stage) return edit.stage === stage;
+  if (edit.tool === 'import' || edit.tool === 'erase') return true;
+  const parts = edit.tool === 'override' || edit.tool === 'sam_object'
+    || (edit.tool === 'resolve_unknown' && edit.module);
+  return stage === (parts ? 'parts' : 'range');
+}
+function updateEditHistory(canEdit) {
   if (!editingMask()) return;
+  const stage = state.mode, parts = stage === 'parts';
+  const subject = parts ? '部位归属' : '处理权重';
   const history = state.draft?.edits || [], cursor = state.draft?.cursor || 0;
-  const audit = state.images.get('changes'), inAudit = state.view === 'changes';
+  const applied = state.appliedHistory, rows = [];
+  for (let index = cursor - 1; index >= 0 && rows.length < 4; index--) {
+    const edit = history[index];
+    if (!editBelongsToStage(edit, stage)) continue;
+    const included = index < (applied?.cursor ?? 0) && JSON.stringify(applied.edits[index]) === JSON.stringify(edit);
+    const points = edit.tool === 'resolve_unknown' ? history[index - 1]?.points : edit.points;
+    rows.push({ index, label: editHistoryLabel(edit), included, locatable: Boolean(points?.length),
+      focused: state.historyLocation === index });
+  }
+  const audit = viewAsset('changes'), inAudit = state.view === 'changes';
   const current = renderIsCurrent(), now = state.doc?.revision;
   const auditCurrent = Boolean(current && audit?.revision === now);
-  const error = current && state.changesError?.revision === now;
-  const counts = audit?.counts;
-  const showCounts = Boolean(counts && CHANGE_CATEGORIES.some(key => counts[key] > 0));
+  const error = current && state.changesErrors.get(stage) === now;
+  const counts = audit?.counts, categories = CHANGE_CATEGORIES[stage];
+  const showCounts = Boolean(counts && categories.some(key => counts[key] > 0));
+  byId('change-history-title').textContent = parts ? '分区修改记录' : '范围修改记录';
   const button = byId('show-manual-changes');
   button.disabled = !canEdit || inAudit;
   button.textContent = inAudit ? '正在查看' : '查看手动改动';
@@ -271,27 +320,23 @@ function updateRangeHistory(canEdit) {
   byId('changes-counts').hidden = !showCounts;
   byId('retry-changes').hidden = !inAudit || !error;
   if (inAudit) {
+    if (parts) updatePartChangesLegend(audit?.parts ?? []);
+    else for (const key of categories) byId('range-legend-' + key).hidden = !counts?.[key];
+    byId('changes-baseline').textContent = parts ? '与自动分区对比，颜色表示改动后的部位。' : '与按当前分区和设置生成的自动范围对比。';
     byId('changes-status').textContent = auditCurrent
-      ? showCounts ? '显示当前成品 B 的净改动。' : cursor ? '手动操作已保存，当前范围和强度没有净变化。' : '当前无手动改动。'
+      ? showCounts ? '显示' + subject + '的净改动。'
+        : rows.length ? '手动操作已保存，' + subject + '没有净变化。' : '当前无手动改动。'
       : error ? (audit ? '读取当前改动失败，仍显示上次的成品 B。' : '读取手动改动失败。')
         : !current ? (audit ? '显示上次成品 B，新改动待更新。' : '等成品 B 更新后即可核对。')
           : (audit ? '正在读取当前改动，仍显示上次的成品 B。' : '正在读取手动改动…');
-    if (showCounts) for (const key of CHANGE_CATEGORIES) {
-      byId('change-count-' + key).hidden = counts[key] === 0;
-      byId('changes-' + key).textContent = counts[key].toLocaleString('zh-CN') + ' px';
+    if (showCounts) for (const key of [...CHANGE_CATEGORIES.parts, ...CHANGE_CATEGORIES.range]) {
+      const count = categories.includes(key) ? counts[key] : 0;
+      byId('change-count-' + key).hidden = count === 0;
+      byId('changes-' + key).textContent = count.toLocaleString('zh-CN') + ' px';
     }
   }
-  const recent = history.slice(Math.max(0, cursor - 4), cursor);
-  byId('change-history-empty').hidden = Boolean(recent.length);
-  byId('change-history-note').hidden = !recent.length;
-  const applied = state.appliedHistory;
-  const rows = recent.map((edit, i) => {
-    const index = Math.max(0, cursor - recent.length) + i;
-    const included = index < (applied?.cursor ?? 0) && JSON.stringify(applied.edits[index]) === JSON.stringify(edit);
-    const points = edit.tool === 'resolve_unknown' ? history[index - 1]?.points : edit.points;
-    return { index, label: editHistoryLabel(edit), included, locatable: Boolean(points?.length),
-      focused: state.historyLocation === index };
-  }).reverse();
+  byId('change-history-empty').hidden = Boolean(rows.length);
+  byId('change-history-note').hidden = !rows.length;
   const key = JSON.stringify(rows);
   if (state.historyDisplayKey === key) return;
   state.historyDisplayKey = key;
@@ -316,7 +361,12 @@ function updateRangeHistory(canEdit) {
 function updateStatus(current) {
   if (!state.doc || state.opening) return;
   const rangeMode = editingMask();
-  const editing = rangeMode && !partEditsBlocked() ? '，可继续编辑' : '';
+  const editing = rangeMode && !maskEditsBlocked() ? '，可继续编辑' : '';
+  const selectionView = state.view === 'parts' || state.view === 'weight';
+  const layer = selectionView ? viewAsset(state.view) : null;
+  const updatedSelection = selectionView && !originalPreviewActive() && layer?.revision === state.doc.revision
+    && (!layer.overlay || visibleImage('original'))
+    && (state.view !== 'parts' || layer.hiddenParts === hiddenPartsQuery());
   const phases = { queued: '等待处理', loading: '正在读取图片', analyzing: '正在识别分区', analysis: '正在识别分区',
     candidate: '正在生成降噪候选', rendering: '正在合成预览', compose: '正在合成预览',
     encoding: '正在保存结果', saving: '正在保存结果' };
@@ -325,14 +375,18 @@ function updateStatus(current) {
   else if (state.saveFailed) status('修改保存失败，可重试。', 'error');
   else if (state.dirty) status('修改待更新' + editing, 'pending');
   else if (state.doc.status === 'error') status(nodeNames[failedNode()] + '失败。' + (state.doc.error || '可重试此步。'), 'error');
-  else if (state.doc.status !== 'ready') status((state.doc.b ? '正在更新 · ' : '') + (phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
+  else if (state.doc.status !== 'ready' && updatedSelection) {
+    status((state.view === 'parts' ? '分区已更新' : '范围已更新') + ' · 正在生成成品 B' + editing, 'pending');
+  } else if (state.doc.status !== 'ready') status((state.doc.b ? '正在更新 · ' : '') + (phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
   else if (state.mode === 'flow') status('当前流程已完成', 'ready');
   else if (state.view === 'candidate') status(state.images.get('candidate')?.revision === state.doc.revision ? '全图降噪预览已就绪' : '正在载入全图降噪预览', state.images.get('candidate')?.revision === state.doc.revision ? 'ready' : 'pending');
   else if (rangeMode && RANGE_VIEWS.includes(state.view)) {
     const revision = state.doc.revision;
-    if (state.view === 'changes' && state.changesError?.revision === revision) status('改动图读取失败，可在「核对改动」重试。', 'error');
-    else if (state.images.get(state.view)?.revision === revision) {
-    const label = { changes: '改动图已更新', parts: '分区已更新', suspected_objects: '疑似外物已显示' };
+    if (state.view === 'changes' && state.changesErrors.get(state.mode) === revision) status('改动图读取失败，可在「核对改动」重试。', 'error');
+    else if (state.view === 'parts' && viewAsset('parts')?.hiddenParts !== hiddenPartsQuery()) {
+      status('正在更新分区显示' + editing, 'pending');
+    } else if (viewAsset(state.view)?.revision === revision) {
+      const label = { changes: '改动图已更新', parts: '分区已更新', suspected_objects: '疑似外物已显示' };
       status(label[state.view] || '范围已更新', 'ready');
     } else status('正在显示当前图层' + editing, 'pending');
   } else if (current) status('当前成品已就绪', 'ready');
@@ -342,12 +396,13 @@ function updateStatus(current) {
 function updateSamControls() {
   const sam = state.sam;
   const positive = sam?.points.filter(item => !item.negative).length ?? 0;
-  const canPreview = Boolean(sam && !sam.busy && positive && !partEditsBlocked() && renderIsCurrent());
+  const canPreview = Boolean(sam && !sam.busy && positive && !maskEditsBlocked() && renderIsCurrent());
   const action = state.mode === 'parts' ? activeAction() : '';
   const classifying = action === 'classify', removingPart = action === 'remove_part';
   const part = partLabel(state.part);
+  const hasLocks = state.mode === 'range' ? state.rangeProtectedParts.size : classifying && state.protectedParts.size;
   const previewHint = removingPart ? '确认后仅移出轮廓内的' + part + '像素。'
-    : classifying && state.protectedParts.size ? '核对高亮的轮廓。确认时会跳过受保护的分区。'
+    : hasLocks ? '核对高亮的轮廓。确认时会跳过受保护的分区。'
       : '核对高亮的轮廓，确认后应用到当前步骤。';
   const text = !sam ? ''
     : sam.busy === 'preview' ? '正在生成预览，可继续缩放或移动画布。'
@@ -369,14 +424,15 @@ function updateSamControls() {
 }
 function updateControls() {
   const canEdit = Boolean(state.doc && state.draft && !state.opening && state.sam?.busy !== 'apply');
-  const inspectingParts = partInspectionView(), partBlocked = partEditsBlocked();
-  const canDraw = canEdit && !partBlocked;
+  const inspecting = maskInspectionView(), blocked = maskEditsBlocked();
+  const canDraw = canEdit && !blocked;
   const hasImage = Boolean(state.file), current = resultIsCurrent();
   const method = state.options?.methods.find(item => item.id === state.draft?.settings.method);
   byId('open').disabled = byId('empty-open').disabled = byId('open-settings').disabled = !state.options;
   const rangeMode = editingMask();
   const graph = state.mode === 'flow';
   const reviewMode = state.mode === 'review';
+  const nodeName = nodeNames[state.mode] || '';
   document.body.dataset.mode = state.mode;
   byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = !hasImage || graph;
   byId('file-meta').hidden = !hasImage;
@@ -384,9 +440,11 @@ function updateControls() {
   stage.hidden = graph;
   byId('tools').hidden = !rangeMode;
   byId('edit-bar').hidden = !rangeMode;
-  byId('node-breadcrumb').hidden = !nodeNames[state.mode];
-  byId('node-breadcrumb').textContent = nodeNames[state.mode] || '';
-  byId('drawer-title').textContent = nodeNames[state.mode] || '成品检查';
+  const nodeTitle = byId('node-title');
+  byId('back-to-flow').hidden = nodeTitle.hidden = !nodeName;
+  byId('back-to-flow').disabled = !canEdit;
+  if (nodeTitle.textContent !== nodeName) nodeTitle.textContent = nodeName;
+  byId('drawer-title').textContent = nodeName || '成品检查';
   byId('inspector-toggle').hidden = !state.doc || graph;
   if (graph) updateFlow();
   const viewHint = comparing() ? '拖动分割线比较 · 空格拖动画布' : '滚轮缩放 · 空格拖动画布';
@@ -404,14 +462,16 @@ function updateControls() {
   byId('download').disabled = !current;
   byId('download').title = current ? '导出当前成品 B' : '当前成品显示后可导出';
   byId('pin').disabled = !current;
-  byId('export-panel').hidden = !state.doc;
-  byId('correction-export').hidden = byId('correction-import').hidden = !rangeMode;
-  byId('download-a').hidden = !state.doc?.a;
+  const a = state.doc?.a, showCorrections = rangeMode && Boolean(state.doc);
+  const exportPanel = byId('export-panel');
+  exportPanel.hidden = !a && !showCorrections;
+  if (exportPanel.hidden) exportPanel.open = false;
+  byId('correction-export').hidden = byId('correction-import').hidden = !showCorrections;
+  byId('download-a').hidden = byId('download-a').disabled = !a;
   byId('correction-export').disabled = !renderIsCurrent();
-  byId('download-a').disabled = !state.doc?.a;
   byId('correction-import').disabled = !canDraw || state.dirty || Boolean(state.save || state.conflict);
   byId('export-hint').textContent = reviewMode && !current ? '当前成品显示后，即可固定或导出。' : '';
-  const a = state.doc?.a, b = state.images.get('b')?.meta;
+  const b = state.images.get('b')?.meta;
   byId('comparison-a').textContent = !a ? '原图' : state.images.get('a')?.revision === a.revision
     ? '固定对照 · ' + methodLabel(a.method) : '正在载入固定对照';
   byId('comparison-b').textContent = !b ? '等待第一份成品' : methodLabel(b.method)
@@ -419,61 +479,68 @@ function updateControls() {
   for (const id of ['zoom-out', 'zoom-in', 'fit', 'actual', 'peek']) byId(id).disabled = !hasImage;
   for (const [buttons, key, value, disabled] of [
     [viewButtons, 'view', state.view, !hasImage],
-    [toolButtons, 'tool', partBlocked ? 'pan' : isBrush() ? 'brush' : state.tool, !canDraw],
-    [modeButtons, 'mode', reviewMode ? 'review' : 'flow', !canEdit],
+    [toolButtons, 'tool', blocked ? 'pan' : isBrush() ? 'brush' : state.tool, !canDraw],
+    [modeButtons, 'mode', state.mode, !canEdit],
   ]) for (const button of buttons) {
     if (key === 'view') {
       button.hidden = !MODE_VIEWS[state.mode].includes(button.dataset.view) || !viewAvailable(button.dataset.view);
       if (button.dataset.view === 'compare') {
-        const label = state.mode === 'parts' ? '原图 / 成品' : '对比';
+        const label = rangeMode ? '原图 / 成品' : '对比';
+        if (button.textContent !== label) button.textContent = label;
+      } else if (button.dataset.view === 'changes') {
+        const label = state.mode === 'parts' ? '分区改动' : '范围改动';
         if (button.textContent !== label) button.textContent = label;
       }
+    } else if (key === 'mode' && button.dataset.mode === 'flow') {
+      button.hidden = Boolean(nodeName);
     }
     button.disabled = key === 'tool' ? !rangeMode || (button.dataset.tool === 'pan' ? !hasImage : disabled)
       : disabled || (button.dataset.view === 'result' && !state.doc?.b);
     button.setAttribute('aria-pressed', String(button.dataset[key] === value));
   }
   const unknownToggle = byId('show-unknown');
-  unknownToggle.hidden = !unknownOverlayAvailable();
+  unknownToggle.hidden = state.view !== 'weight' || !unknownOverlayAvailable();
   unknownToggle.setAttribute('aria-pressed', String(state.showUnknown));
-  byId('edit-inspector').hidden = !rangeMode || inspectingParts;
+  byId('edit-inspector').hidden = !rangeMode || inspecting;
   byId('range-history').hidden = !rangeMode;
-  for (const mode of ['review', 'parts', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode;
-  if (inspectingParts) byId('parts-inspector').hidden = true;
+  for (const mode of ['review', 'parts', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode || inspecting;
   for (const button of presetButtons) {
     button.disabled = !canEdit || (button.dataset.preset === 'strong' && !method?.uses_l0);
     button.setAttribute('aria-pressed', String(Boolean(presetMatches(button.dataset.preset))));
   }
   for (const button of scopeButtons) {
-    button.disabled = !canEdit;
+    button.disabled = !canDraw;
     const selected = state.draft?.settings.modules || [];
     const expected = state.options ? scopeModules(button.dataset.scope) : [];
     button.setAttribute('aria-pressed', String(canEdit && expected.length === selected.length
       && expected.every(name => selected.includes(name))));
   }
-  for (const field of document.querySelectorAll('#modules input, #part-strengths input')) field.disabled = !canEdit;
+  for (const field of document.querySelectorAll('#modules input, #part-strengths input')) field.disabled = !canDraw;
+  byId('range-protection-all').disabled = !canDraw;
+  for (const lock of byId('range-part-locks').children) lock.disabled = !canDraw;
   for (const id of ['method', ...numberFields, 'radius', 'feather', 'protection', 'retention-percent', 'allow-protected', 'lasso-action', 'invert', 'reset']) {
     byId(id).disabled = !canDraw || (id === 'l0' && !method?.uses_l0) || (id === 'downscale' && !method?.uses_downscale);
   }
-  byId('lasso-options').hidden = !isLasso() || inspectingParts;
-  byId('brush-radius-row').hidden = !isBrush() || inspectingParts;
-  byId('feather-row').hidden = !isBrush() || state.mode !== 'range';
-  byId('action-field').hidden = state.tool === 'pan' || inspectingParts;
-  byId('pan-hint').hidden = state.tool !== 'pan' && !inspectingParts;
-  byId('pan-hint').textContent = inspectingParts ? '在「分区叠加」中修改部位。' : '拖动画布，滚轮缩放';
-  const operation = state.tool === 'pan' ? 'pan' : activeAction();
+  byId('lasso-options').hidden = !isLasso() || inspecting;
+  byId('brush-radius-row').hidden = !isBrush() || inspecting;
+  byId('feather-row').hidden = !isBrush() || inspecting || state.mode !== 'range';
+  const operation = inspecting || state.tool === 'pan' ? 'pan' : activeAction();
+  byId('action-field').hidden = operation === 'pan';
+  byId('pan-hint').hidden = operation !== 'pan';
+  const editHint = state.mode === 'parts' ? '在「分区叠加」中修改部位。' : '在「实际处理」中修改范围。';
+  byId('pan-hint').textContent = inspecting ? editHint : '拖动画布，滚轮缩放';
   byId('protect-row').hidden = !['protect', 'mix'].includes(operation);
   const target = byId('target-shortcut');
   const removingPart = operation === 'remove_part';
-  target.hidden = state.mode !== 'parts' || inspectingParts || !['classify', 'remove_part'].includes(operation);
+  target.hidden = state.mode !== 'parts' || !['classify', 'remove_part'].includes(operation);
   target.style.setProperty('--part-color', partColor(state.part));
   if (state.mode === 'parts') {
     const selectLabel = removingPart ? '选择要移出的部位' : '选择目标部位';
     target.title = selectLabel;
     target.setAttribute('aria-label', selectLabel + '，当前' + partLabel(state.part));
     byId('part-heading').textContent = removingPart ? '要移出的部位' : '目标部位';
-    byId('part-hint').textContent = removingPart ? '点选来源部位，移出的像素会归入待确认。'
-      : '点部位选目标，点锁切换原分区保护。待确认默认可改。';
+    byId('part-hint').textContent = removingPart ? '点选来源部位。移出的像素归入待确认，Ctrl+点击独显。'
+      : '点部位选目标，Ctrl+点击独显。眼睛控制叠加，锁控制保护。';
     const removeOption = [...byId('lasso-action').children].find(option => option.value === 'remove_part');
     if (removeOption) removeOption.disabled = state.part === 'unknown';
   }
@@ -486,10 +553,6 @@ function updateControls() {
   byId('current-tool-name').textContent = state.tool === 'pan' ? '移动画布'
     : state.sam ? 'SAM2 点选' : mag ? '磁性套索' : isLasso() ? '套索' : '画笔';
   byId('brush-panel').hidden = Boolean(state.sam);
-  const suggested = suggestedRangeView();
-  const jump = byId('suggested-range-view');
-  jump.hidden = !canEdit || state.tool === 'pan' || state.view === suggested;
-  jump.textContent = suggested === 'parts' ? '查看识别部位' : '查看实际处理';
   const modules = state.draft?.settings.modules || [];
   byId('scope-summary').textContent = !modules.length ? '当前从空范围开始'
     : modules.length === state.options?.modules.length ? '当前从整图开始'
@@ -508,8 +571,8 @@ function updateControls() {
     ? (state.polygon.length ? state.polygon.length + ' 个顶点，Enter 闭合' : '单击添加顶点') : '空格临时移动';
   updateToolGuidance(renderIsCurrent());
   updateSamControls();
-  updateRangeHistory(canEdit);
-  stage.dataset.tool = state.space || partBlocked ? 'pan' : state.tool;
+  updateEditHistory(canEdit);
+  stage.dataset.tool = state.space || blocked ? 'pan' : state.tool;
   byId('conflict-local').hidden = byId('conflict-remote').hidden = !state.conflict;
   byId('retry').hidden = !state.doc || Boolean(state.conflict || state.save)
     || (!state.saveFailed && (state.doc.status !== 'error' || state.dirty));
@@ -528,6 +591,12 @@ function layout() {
   return { width, height, scale, w, h, x: (width - w) / 2 + state.panX, y: (height - h) / 2 + state.panY };
 }
 function paintImage(image, box) { if (image) ctx.drawImage(image, box.x, box.y, box.w, box.h); }
+function paintOverlay(image, box) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-atop';
+  paintImage(image, box);
+  ctx.restore();
+}
 function drawSam(box) {
   paintImage(state.sam.preview?.image, box);
   for (const { point: [x, y], negative } of state.sam.points) {
@@ -625,12 +694,21 @@ function draw() {
   byId('history-location-label').hidden = !box || state.historyLocation === null || !editingMask() || peek || Boolean(state.sam);
   const maskView = MASK_VIEWS.includes(state.view), suspectedView = state.view === 'suspected_objects';
   const diffView = state.view === 'changes';
-  byId('overlay-legend').hidden = !box || peek || !maskView || suspectedView;
-  byId('objects-legend').hidden = byId('protection-legend').hidden = state.view !== 'parts';
+  const unknown = state.images.get('unknown'), base = viewAsset(state.view);
+  const allPartsHidden = state.view === 'parts' && state.hiddenParts.size === state.options?.modules.length + 2;
+  byId('overlay-legend').hidden = !box || peek || !maskView || suspectedView || allPartsHidden
+    || (state.view === 'weight' && !base?.image);
+  byId('objects-legend').hidden = state.view !== 'parts' || state.hiddenParts.has('object');
+  byId('protection-legend').hidden = state.view !== 'parts';
   byId('weight-legend').hidden = state.view !== 'weight';
+  if (state.view === 'weight') {
+    byId('weight-ramp').hidden = !base?.overlay;
+    byId('weight-legacy-legend').hidden = Boolean(base?.overlay);
+  }
   byId('suspected-objects-legend').hidden = peek || !suspectedView || !visibleImage('suspected_objects');
-  const unknown = state.images.get('unknown'), base = state.images.get(state.view);
-  const showUnknown = Boolean(box && !peek && state.showUnknown && unknownOverlayAvailable()
+  byId('part-changes-legend').hidden = !box || peek || !diffView || state.mode !== 'parts' || !base?.parts?.length;
+  byId('range-changes-legend').hidden = !box || peek || !diffView || state.mode !== 'range' || !base?.image;
+  const showUnknown = Boolean(box && !peek && unknownOverlayVisible()
     && unknown && unknown.revision === base?.revision);
   byId('unknown-legend').hidden = !showUnknown;
   const underlay = byId('art-underlay');
@@ -681,25 +759,37 @@ function draw() {
     byId('right-badge').textContent = 'B  ' + methodLabel(bMeta?.method)
       + (bMeta ? ' / 选区 ' + (bMeta.selection_revision ?? bMeta.revision) : '')
       + (resultIsCurrent() && bMeta?.revision === state.doc.revision ? '' : ' · 待更新');
-  } else if (peek || state.view === 'original') paintImage(original, box);
+  } else if (peek || state.view === 'original' || allPartsHidden) paintImage(original, box);
   else if (diffView) { paintImage(original, box); paintImage(visibleImage('changes'), box); }
-  else paintImage(visibleImage(state.view) || original, box);
+  else if (base?.overlay) { paintImage(original, box); paintOverlay(base.image, box); }
+  else paintImage(base?.image || original, box);
   if (!peek && state.mode === 'parts' && state.view === 'parts') {
+    if (base) state.partFrame = base;
+    const background = state.images.get('background_overlay');
+    if (!base?.overlay && background && background.revision === base?.revision && !state.hiddenParts.has('background')) {
+      paintOverlay(background.image, box);
+    }
     const highlight = state.images.get('highlight');
-    if (highlight?.part === state.part && highlight.revision === base?.revision) paintImage(highlight.image, box);
+    if (!state.hiddenParts.has(state.part) && highlight?.part === state.part && highlight.revision === base?.revision) {
+      const paintHighlight = state.part === 'background' ? paintOverlay : paintImage;
+      paintHighlight(highlight.image, box);
+    }
   }
   if (showUnknown) paintImage(unknown.image, box);
 
   if (!peek && state.sam) {
     ctx.save(); drawSam(box); ctx.restore();
-  } else if (!peek && !partInspectionView() && (maskView || state.tool !== 'pan')) {
+  } else if (!peek && !maskInspectionView() && (maskView || state.tool !== 'pan')) {
     ctx.save();
     ctx.beginPath(); ctx.rect(box.x, box.y, box.w, box.h); ctx.clip();
     // The brush gesture is drawn on the current frame, independently of backend jobs.
-    const overlay = state.images.get(maskView ? state.view : 'b');
+    const overlay = maskView ? base : state.images.get('b');
     if (!diffView && state.draft && (state.dirty || state.save || overlay?.revision !== state.doc?.revision)) {
-      const start = Math.max(overlay?.cursor ?? 0, state.draft.cursor - 32);
+      const publishedCursor = state.view === 'parts' ? state.appliedHistory?.cursor : 0;
+      const start = Math.max(overlay?.cursor ?? publishedCursor ?? 0, state.draft.cursor - 32);
       for (const edit of state.draft.edits.slice(start, state.draft.cursor)) {
+        const hiddenPart = edit.tool === 'remove_part' ? 'unknown' : edit.module;
+        if (state.view === 'parts' && state.hiddenParts.has(hiddenPart)) continue;
         if (!edit.stage || edit.stage === state.mode) strokePath(edit, box);
       }
     }
@@ -739,17 +829,16 @@ function zoomTo(scale, x, y) {
   if (state.magnetic) hoverMagnetic(state.cursor, state.magnetic.straight);
   draw();
 }
-function position(event) {
-  const rect = canvas.getBoundingClientRect();
+function position(event, rect = canvas.getBoundingClientRect()) {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
-function sourcePoint(point, allowOutside = false, toPixel = Math.round) {
-  const box = layout();
+function sourcePoint(point, allowOutside = false, toPixel = Math.round, box = layout()) {
   if (!box) return null;
   const x = (point.x - box.x) / box.scale, y = (point.y - box.y) / box.scale;
   if (!allowOutside && (x < 0 || y < 0 || x >= state.file.width || y >= state.file.height)) return null;
   return [clamp(toPixel(x), 0, state.file.width - 1), clamp(toPixel(y), 0, state.file.height - 1)];
 }
+const brushCoordinate = value => Math.round(value * 64) / 64;
 function refresh() { updateControls(); draw(); }
 
 
@@ -764,23 +853,29 @@ async function decodeImage(blob) {
 }
 function loadAsset(view, revision, meta = null) {
   const part = view === 'highlight' ? state.part : undefined;
-  const cached = state.images.get(view);
-  if (cached?.revision === revision && cached?.part === part) return;
-  const key = view + ':' + revision + (part ? ':' + part : '');
+  const hiddenParts = view === 'parts' ? hiddenPartsQuery() : '';
+  const snapshot = assetSnapshot(view);
+  const overlay = (view === 'parts' || view === 'weight') && Boolean(snapshot?.images?.[view + '_overlay']);
+  const resource = overlay ? view + '_overlay' : view;
+  const asset = hiddenParts ? 'filtered-parts' : view;
+  const cached = state.images.get(asset);
+  if (cached?.revision === revision && cached?.part === part && (cached?.hiddenParts || '') === hiddenParts) return;
+  const key = asset + ':' + revision + (part ? ':' + part : '') + (hiddenParts ? ':' + hiddenParts : '');
   if (state.loading.has(key)) return;
   const epoch = state.epoch;
-  const cursor = state.doc.revision === revision ? state.doc.cursor : 0;
-  const query = (typeof revision === 'number' ? '&revision=' + revision : '') + (part ? '&module=' + encodeURIComponent(part) : '');
-  const promise = request(route('/image?view=' + view + query))
+  const cursor = snapshot?.cursor ?? (state.doc.revision === revision ? state.doc.cursor : 0);
+  const query = (typeof revision === 'number' ? '&revision=' + revision : '') + (part ? '&module=' + encodeURIComponent(part) : '')
+    + (hiddenParts ? '&hide=' + encodeURIComponent(hiddenParts) : '');
+  const wanted = () => epoch === state.epoch && (view === 'original' || revision === assetSnapshot(view)?.revision)
+    && (!hiddenParts || hiddenParts === hiddenPartsQuery()) && (!part || part === state.part);
+  const promise = request(route('/image?view=' + resource + query))
     .then(reply => reply.blob()).then(decodeImage).then(image => {
-      if (epoch !== state.epoch) return;
-      const expected = view === 'original' ? revision : view === 'a' ? state.doc.a?.revision : state.doc.b?.revision;
-      if (revision !== expected || !viewAvailable(view) || (part && part !== state.part)) return;
-      state.images.set(view, { image, revision, meta, cursor, part });
+      if (!wanted() || !viewAvailable(view)) return;
+      state.images.set(asset, { image, revision, meta, cursor, part, hiddenParts, overlay });
       if (view === 'original') prepareMagnetic();
       refresh();
     }).catch(error => {
-      if (epoch === state.epoch && ![404, 409].includes(error.status)) showError(error);
+      if (wanted() && ![404, 409].includes(error.status)) showError(error);
     }).finally(() => {
       if (state.loading.get(key) === promise) state.loading.delete(key);
     });
@@ -788,16 +883,19 @@ function loadAsset(view, revision, meta = null) {
 }
 function loadChanges() {
   if (state.view !== 'changes' || !renderIsCurrent()) return;
-  const revision = state.doc.revision, epoch = state.epoch, key = 'changes:' + revision;
-  if (state.images.get('changes')?.revision === revision || state.loading.has(key)
-      || state.changesError?.revision === revision) return;
-  const cursor = state.doc.cursor;
-  const current = () => epoch === state.epoch && state.view === 'changes'
-    && state.doc.revision === revision && renderIsCurrent();
-  const promise = request(route('/changes?revision=' + revision)).then(reply => reply.json()).then(async value => {
+  const stage = state.mode, revision = state.doc.revision, epoch = state.epoch;
+  const asset = changesKey(stage), key = asset + ':' + revision, categories = CHANGE_CATEGORIES[stage];
+  if (state.images.get(asset)?.revision === revision || state.loading.has(key)
+      || state.changesErrors.get(stage) === revision) return;
+  const current = () => epoch === state.epoch && state.doc?.revision === revision && renderIsCurrent();
+  const visible = () => state.mode === stage && state.view === 'changes';
+  const promise = request(route('/changes?revision=' + revision + '&stage=' + stage)).then(reply => reply.json()).then(async value => {
     if (!current()) return;
     const { counts, overlay } = value;
-    if (value.revision !== revision || !counts || CHANGE_CATEGORIES.some(name => !Number.isSafeInteger(counts[name]) || counts[name] < 0)
+    const parts = stage === 'parts' ? (value.parts ?? []) : [];
+    if (value.stage !== stage || value.revision !== revision || !counts
+        || categories.some(name => !Number.isSafeInteger(counts[name]) || counts[name] < 0)
+        || !Array.isArray(parts) || parts.some(part => !partCategories().includes(part))
         || (overlay !== null && (typeof overlay !== 'string' || !overlay.startsWith('data:image/png;base64,')))) {
       throw new Error('手动改动数据无效。');
     }
@@ -811,12 +909,12 @@ function loadChanges() {
         throw new Error('手动改动图与原图尺寸不一致。');
       }
     }
-    state.images.set('changes', { image, counts, revision, cursor });
-    refresh();
+    state.images.set(asset, { image, counts, revision, parts });
+    if (visible()) refresh();
   }).catch(() => {
     if (current()) {
-      state.changesError = { revision };
-      refresh();
+      state.changesErrors.set(stage, revision);
+      if (visible()) refresh();
     }
   }).finally(() => {
     if (state.loading.get(key) === promise) state.loading.delete(key);
@@ -831,10 +929,16 @@ function ensureAssets() {
   }
   if (usesPinnedComparison() && state.view === 'compare') loadAsset('a', state.doc.a.revision, state.doc.a);
   else if (!state.doc.a) state.images.delete('a');
-  if (state.doc.b && MASK_VIEWS.includes(state.view) && viewAvailable(state.view)) loadAsset(state.view, state.doc.b.revision);
+  const preview = selectionPreview();
+  if (preview && MASK_VIEWS.includes(state.view) && viewAvailable(state.view)) loadAsset(state.view, preview.revision);
   if (state.doc.b && state.view === 'candidate') loadAsset('candidate', state.doc.b.revision);
-  if (state.doc.b && state.mode === 'parts' && state.view === 'parts') loadAsset('highlight', state.doc.b.revision);
-  if (state.showUnknown && unknownOverlayAvailable()) loadAsset('unknown', state.doc.b.revision);
+  if (preview && state.mode === 'parts' && state.view === 'parts') {
+    if (!state.hiddenParts.has(state.part)) loadAsset('highlight', preview.revision);
+    if (!preview.images?.parts_overlay && !state.hiddenParts.has('background')) {
+      loadAsset('background_overlay', preview.revision);
+    }
+  }
+  if (unknownOverlayVisible()) loadAsset('unknown', preview.revision);
   if (state.view === 'changes') loadChanges();
 }
 const graphViews = { source: 'original', parts: 'parts', range: 'weight', effect: 'candidate', result: 'b' };
@@ -906,20 +1010,20 @@ for (const node of Object.keys(graphViews)) byId('node-' + node).addEventListene
   if (node === 'source' || node === 'result') {
     selectMode('review');
     selectView(node === 'source' ? 'original' : 'compare');
+    stage.focus({ preventScroll: true });
   } else selectMode(node);
-  stage.focus({ preventScroll: true });
 });
 function selectView(view) {
   if (!state.file || !MODE_VIEWS[state.mode].includes(view) || !viewAvailable(view)) return;
-  const leavingPartOverlay = state.mode === 'parts' && state.view === 'parts' && view !== 'parts';
-  if (state.sam && view !== (state.mode === 'parts' ? 'parts' : 'original')) {
-    if (state.sam.busy === 'apply') return;
-    leaveSam();
-    state.tool = 'pan';
-  }
+  const leavingMaskView = editingMask() && !maskInspectionView() && view !== state.view;
+  if (leavingMaskView && state.sam?.busy === 'apply') return;
   setKeyboardPeek(false);
   state.view = view;
-  if (leavingPartOverlay) {
+  if (leavingMaskView) {
+    if (state.sam) {
+      state.sam = null;
+      state.tool = 'pan';
+    }
     state.polygon = [];
     state.cursor = null;
     if (state.gesture?.edit) state.gesture = null;
@@ -939,7 +1043,8 @@ function setDrawer(open, restoreFocus = false, pointer = false) {
 function selectMode(mode) {
   if (!state.doc || !Object.hasOwn(MODE_VIEWS, mode) || state.sam?.busy === 'apply') return;
   if (mode === state.mode) return;
-  leaveSam();
+  const previousMode = state.mode;
+  state.sam = null;
   leaveMagnetic();
   setKeyboardPeek(false);
   state.mode = mode;
@@ -956,11 +1061,17 @@ function selectMode(mode) {
     }));
     list.value = state.actions[mode];
     state.tool = state.actions[mode];
+    state.view = editableMaskView();
+  } else {
+    state.view = { review: 'compare', effect: 'result', flow: 'flow' }[mode];
   }
-  state.view = { review: 'compare', parts: 'parts', range: 'weight', effect: 'result', flow: 'flow' }[mode];
   ensureAssets();
   refresh();
-  if (mode === 'flow') requestAnimationFrame(drawFlowWires);
+  if (nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
+  if (mode === 'flow') {
+    if (nodeNames[previousMode]) byId('node-' + previousMode).focus();
+    requestAnimationFrame(drawFlowWires);
+  }
 }
 function setEditAction(action) {
   state.actions[state.mode] = action;
@@ -968,7 +1079,7 @@ function setEditAction(action) {
   if (isBrush()) state.tool = action;
 }
 function selectTool(tool) {
-  if (tool !== 'pan' && (!state.doc || !editingMask() || partEditsBlocked())) return;
+  if (tool !== 'pan' && (!state.doc || !editingMask() || maskEditsBlocked())) return;
   if (tool === 'brush') tool = state.actions[state.mode];
   if (state.sam?.busy === 'apply') return;
   if (editingMask() && Object.hasOwn(actions[state.mode], tool)) {
@@ -976,16 +1087,15 @@ function selectTool(tool) {
   }
   if (state.magnetic && tool === 'magnetic') return;
   leaveMagnetic();
+  state.polygon = [];
   if (tool === 'sam_object') {
     if (state.sam) return;
-    state.sam = { points: [], negative: false, preview: null, busy: null, error: '', previousView: state.view };
+    state.sam = { points: [], negative: false, preview: null, busy: null, error: '' };
     state.tool = tool;
-    if (state.mode === 'parts') refresh();
-    else selectView('original');
+    refresh();
     return;
   }
-  leaveSam();
-  state.polygon = [];
+  state.sam = null;
   state.tool = tool;
   if (tool === 'magnetic') {
     const sourceRevision = renderIsCurrent() ? state.doc.b.revision : null;
@@ -1005,12 +1115,6 @@ function selectTool(tool) {
   ensureAssets(); refresh();
 }
 
-function leaveSam() {
-  if (!state.sam) return;
-  state.view = viewAvailable(state.sam.previousView) ? state.sam.previousView : 'weight';
-  state.sam = null;
-}
-
 function installDraft(doc) {
   state.historyLocation = null;
   state.draft = { settings: clone(doc.settings), edits: clone(doc.edits), cursor: doc.cursor };
@@ -1025,7 +1129,7 @@ function applyMetadata(doc) {
   if (!viewAvailable('unknown')) state.images.delete('unknown');
   if (!viewAvailable('suspected_objects')) {
     state.images.delete('suspected_objects');
-    if (state.view === 'suspected_objects') state.view = state.mode === 'parts' ? 'parts' : 'weight';
+    if (state.view === 'suspected_objects') state.view = editableMaskView();
   }
   state.file = { name: doc.name, width: doc.width, height: doc.height };
   byId('image-name').textContent = state.file.name;
@@ -1039,8 +1143,11 @@ function applyMetadata(doc) {
 function startDocument(doc) {
   state.dirty = state.saveFailed = false;
   state.conflict = null;
-  state.protectedParts = loadProtectedParts(doc.id);
+  state.protectedParts = loadPartSwitches(protectionKey(doc.id), partCategories().filter(part => part !== 'unknown'));
+  state.rangeProtectedParts = loadPartSwitches(rangeProtectionKey(doc.id));
+  state.hiddenParts = loadPartSwitches(visibilityKey(doc.id));
   updatePartTargets();
+  updateRangeProtection();
   installDraft(doc);
   applyMetadata(doc);
   storage('setItem', 'gaid-active-document', doc.id);
@@ -1065,6 +1172,9 @@ function startDocument(doc) {
       }
     } catch { storage('removeItem', pendingKey(doc.id)); }
   }
+  if (doc.status === 'ready' && !state.dirty && !state.conflict) {
+    post(route('/prepare-edit'), { revision: doc.revision }).catch(() => {});
+  }
   schedulePoll();
 }
 function beginDocumentChange() {
@@ -1076,13 +1186,17 @@ function beginDocumentChange() {
   state.dirty = state.saveFailed = false;
   state.images.clear();
   state.loading.clear();
+  state.partFrame = null;
   state.displayedResult = null;
   state.polygon = [];
   state.sam = null;
   leaveMagnetic();
   state.gesture = state.cursor = null;
   state.showUnknown = true;
-  state.changesError = state.appliedHistory = state.historyLocation = null;
+  state.hiddenParts = new Set();
+  state.partIsolation = null;
+  state.changesErrors.clear();
+  state.appliedHistory = state.historyLocation = null;
   state.historyDisplayKey = '';
   state.part = 'hair';
   state.actions = { parts: 'classify', range: 'include' };
@@ -1175,6 +1289,7 @@ function recentButton(entry) {
   fallback.setAttribute('aria-hidden', 'true');
   image.classList.add('recent-thumb');
   image.alt = '';
+  image.draggable = false;
   image.loading = 'lazy';
   image.decoding = 'async';
   image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; });
@@ -1260,7 +1375,7 @@ async function saveDraft() {
   state.dirty = state.saveFailed = false;
   state.save = (async () => {
     try {
-      const doc = await post(endpoint, payload);
+      const doc = await post(endpoint, payload, { keepalive: true });
       if (epoch !== state.epoch) return false;
       state.pendingUnknownResolution = null;
       applyMetadata(doc);
@@ -1299,6 +1414,10 @@ async function flushChanges() {
   return !state.conflict;
 }
 
+const brushRadiusKeys = new Map([['[', -1], [']', 1], ['【', -1], ['】', 1]]);
+const brushWheelStepPixels = 40;
+let brushWheelPixels = 0;
+let brushResizePending = false;
 function updateBrushReadout() {
   const radius = Number(byId('radius').value), feather = byId('feather');
   byId('radius-value').textContent = radius * 2 + ' px';
@@ -1306,6 +1425,22 @@ function updateBrushReadout() {
   feather.max = radius;
   if (Number(feather.value) > radius) feather.value = radius;
   byId('feather-value').textContent = Number(feather.value) + ' px';
+}
+function resizeBrush(direction) {
+  const field = byId('radius'), radius = Number(field.value);
+  const next = clamp(radius + direction, Number(field.min), Number(field.max));
+  if (next === radius) return;
+  field.value = String(next);
+  state.brushSized = true;
+  brushResizePending = true;
+  updateBrushReadout();
+  draw();
+}
+function rememberBrush() {
+  brushResizePending = false;
+  if (preferences.value?.remember_brush) preferences.update({
+    brush_radius: Number(byId('radius').value), brush_feather: Number(byId('feather').value),
+  }, { syncControls: false }).catch(showError);
 }
 function updateReadouts() {
   for (const key of ['strength', 'restoration_gain', 'structure_protection', 'protection']) {
@@ -1330,37 +1465,138 @@ function partLabel(id) {
 function partColor(id) {
   return state.options?.modules.find(item => item.id === id)?.color || { object: '#e08844', unknown: '#89909d' }[id] || '#759bd9';
 }
+function partSwatch(id) {
+  const swatch = document.createElement('i');
+  swatch.className = id === 'unknown' ? 'hatch-key' : 'dot';
+  if (id !== 'unknown') swatch.style.backgroundColor = partColor(id);
+  swatch.setAttribute('aria-hidden', 'true');
+  return swatch;
+}
+function updatePartChangesLegend(parts) {
+  const legend = byId('part-changes-legend'), key = parts.join(',');
+  if (legend.dataset.parts === key) return;
+  legend.dataset.parts = key;
+  legend.replaceChildren(...parts.map(id => {
+    const label = document.createElement('span');
+    label.append(partSwatch(id), partLabel(id));
+    return label;
+  }));
+}
 function partCategories() {
   return [...state.options.modules.map(item => item.id), 'object', 'unknown'];
 }
-function loadProtectedParts(id) {
+function loadPartSwitches(key, defaults = []) {
   const parts = partCategories();
   try {
-    const saved = JSON.parse(storage('getItem', protectionKey(id)) ?? 'null');
+    const saved = JSON.parse(storage('getItem', key) ?? 'null');
     if (Array.isArray(saved) && saved.every(part => parts.includes(part))) return new Set(saved);
   } catch { /* Use the defaults if the remembered switches cannot be read. */ }
-  return new Set(parts.filter(part => part !== 'unknown'));
+  return new Set(defaults);
 }
-function togglePartProtection(id) {
-  if (!state.doc || partEditsBlocked()) return;
-  if (!state.protectedParts.delete(id)) state.protectedParts.add(id);
-  storage('setItem', protectionKey(state.doc.id), JSON.stringify([...state.protectedParts]));
-  updatePartTargets();
+function togglePartProtection(id, mode = 'parts') {
+  if (!state.doc || state.mode !== mode || maskEditsBlocked() || state.sam?.busy === 'apply') return;
+  const range = mode === 'range';
+  const protectedParts = range ? state.rangeProtectedParts : state.protectedParts;
+  if (id === undefined) {
+    const parts = partCategories();
+    if (protectedParts.size === parts.length) protectedParts.clear();
+    else for (const part of parts) protectedParts.add(part);
+  } else if (!protectedParts.delete(id)) {
+    protectedParts.add(id);
+  }
+  const key = range ? rangeProtectionKey(state.doc.id) : protectionKey(state.doc.id);
+  storage('setItem', key, JSON.stringify([...protectedParts]));
+  if (range) {
+    updateRangeProtection();
+    updateToolGuidance(renderIsCurrent());
+  } else updatePartTargets();
   if (state.sam) updateSamControls();
 }
+function togglePartVisibility(id) {
+  if (!state.doc || state.mode !== 'parts' || state.view !== 'parts') return;
+  state.partIsolation = null;
+  if (id === undefined) {
+    state.hiddenParts = new Set(state.hiddenParts.size ? [] : partCategories());
+  } else if (!state.hiddenParts.delete(id)) {
+    state.hiddenParts.add(id);
+  }
+  storage('setItem', visibilityKey(state.doc.id), JSON.stringify([...state.hiddenParts]));
+  updatePartTargets();
+  ensureAssets();
+  refresh();
+}
+function updateProtectionButton(button, id, locked) {
+  button.setAttribute('aria-pressed', String(locked));
+  button.title = (locked ? '取消保护' : '保护') + partLabel(id);
+  button.children[0].children[0].setAttribute('href', locked ? '#icon-lock' : '#icon-unlock');
+}
+function updateRangeProtection() {
+  const rows = byId('range-part-locks').children, count = state.rangeProtectedParts.size;
+  const all = byId('range-protection-all'), allLocked = count === rows.length;
+  byId('range-lock-count').textContent = count ? '已锁 ' + count + ' 个' : '';
+  all.textContent = allLocked ? '解锁全部' : '锁定全部';
+  all.setAttribute('aria-pressed', allLocked ? 'true' : count ? 'mixed' : 'false');
+  for (const lock of rows) {
+    const id = lock.dataset.rangeProtectPart;
+    updateProtectionButton(lock, id, state.rangeProtectedParts.has(id));
+  }
+}
+function protectionButton(id, mode) {
+  const button = document.createElement('button');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.append(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
+  button.type = 'button';
+  button.append(svg);
+  if (mode === 'range') {
+    button.className = 'range-part-lock';
+    button.dataset.rangeProtectPart = id;
+    button.setAttribute('aria-label', partLabel(id) + '范围保护');
+    button.append(partSwatch(id), partLabel(id));
+  } else {
+    button.className = 'part-lock';
+    button.dataset.protectPart = id;
+    button.setAttribute('aria-label', partLabel(id) + '分区保护');
+  }
+  button.addEventListener('click', () => togglePartProtection(id, mode));
+  return button;
+}
 function updatePartTargets() {
-  for (const row of byId('part-targets').children) {
-    const [button, lock] = row.children;
-    const id = button.dataset.part, protectedPart = state.protectedParts.has(id);
+  const rows = byId('part-targets').children;
+  const hidden = state.hiddenParts.size, locked = state.protectedParts.size;
+  const allHidden = hidden === rows.length, allLocked = locked === rows.length;
+  const masterEye = byId('part-visibility-all'), masterLock = byId('part-protection-all');
+  masterEye.setAttribute('aria-pressed', allHidden ? 'false' : hidden ? 'mixed' : 'true');
+  masterEye.title = hidden ? '显示全部分区叠加' : '隐藏全部分区叠加';
+  byId('part-visibility-all-icon').setAttribute('href', allHidden ? '#icon-eye-off' : '#icon-eye');
+  masterLock.setAttribute('aria-pressed', allLocked ? 'true' : locked ? 'mixed' : 'false');
+  masterLock.title = allLocked ? '解锁全部分区' : '锁定全部分区';
+  byId('part-protection-all-icon').setAttribute('href', locked ? '#icon-lock' : '#icon-unlock');
+  for (const row of rows) {
+    const [button, eye, lock] = row.children;
+    const id = button.dataset.part;
+    const shown = !state.hiddenParts.has(id);
     button.setAttribute('aria-pressed', String(id === state.part));
-    lock.setAttribute('aria-pressed', String(protectedPart));
-    lock.title = (protectedPart ? '取消保护' : '保护') + partLabel(id);
-    lock.children[0].children[0].setAttribute('href', protectedPart ? '#icon-lock' : '#icon-unlock');
+    button.title = state.partIsolation?.part === id ? '再次 Ctrl+点击，恢复先前显隐' : 'Ctrl+点击，只显示' + partLabel(id);
+    eye.setAttribute('aria-pressed', String(shown));
+    eye.title = (shown ? '隐藏' : '显示') + partLabel(id) + '叠加';
+    eye.children[0].children[0].setAttribute('href', shown ? '#icon-eye' : '#icon-eye-off');
+    updateProtectionButton(lock, id, state.protectedParts.has(id));
   }
   byId('active-part-name').textContent = partLabel(state.part);
 }
-function setPart(id) {
-  if (state.mode !== 'parts' || partEditsBlocked() || state.sam?.busy === 'apply') return;
+function setPart(id, isolate = false) {
+  if (state.mode !== 'parts' || maskEditsBlocked() || state.sam?.busy === 'apply') return;
+  if (isolate) {
+    const previous = state.partIsolation;
+    if (previous?.part === id) {
+      state.hiddenParts = previous.hiddenParts;
+      state.partIsolation = null;
+    } else {
+      state.partIsolation = { part: id, hiddenParts: previous?.hiddenParts ?? state.hiddenParts };
+      state.hiddenParts = new Set(partCategories().filter(part => part !== id));
+    }
+  }
   state.part = id;
   if (id === 'unknown' && state.actions.parts === 'remove_part') setEditAction('classify');
   updatePartTargets();
@@ -1379,7 +1615,7 @@ function installOptions(options) {
     label.className = 'module-chip'; check.type = 'checkbox'; check.value = item.id;
     check.checked = options.default_modules.includes(item.id); check.disabled = true;
     check.addEventListener('change', () => {
-      if (!state.draft) return;
+      if (!state.draft || maskEditsBlocked()) return;
       state.draft.settings.modules = [...document.querySelectorAll('#modules input:checked')].map(input => input.value);
       edited();
     });
@@ -1392,7 +1628,7 @@ function installOptions(options) {
     range.dataset.module = item.id; range.disabled = true;
     output.textContent = '100%'; output.style.gridColumn = '2'; output.style.gridRow = '1';
     range.addEventListener('input', () => {
-      if (!state.draft) return;
+      if (!state.draft || maskEditsBlocked()) return;
       state.draft.settings.part_strengths ||= {};
       state.draft.settings.part_strengths[item.id] = Number(range.value);
       output.textContent = Math.round(Number(range.value) * 100) + '%';
@@ -1408,24 +1644,25 @@ function installOptions(options) {
   }
   for (const id of [...modules.map(module => module.id), 'object', 'unknown']) {
     const row = document.createElement('div'), button = document.createElement('button');
-    const swatch = document.createElement('i'), lock = document.createElement('button');
+    const eye = document.createElement('button');
     row.className = 'part-target';
     button.className = 'part-choice';
-    button.type = 'button'; button.dataset.part = id; swatch.className = id === 'unknown' ? 'hatch-key' : 'dot';
-    if (id !== 'unknown') swatch.style.backgroundColor = partColor(id);
-    button.append(swatch, partLabel(id));
-    button.addEventListener('click', () => setPart(id));
-    lock.type = 'button'; lock.className = 'part-lock'; lock.dataset.protectPart = id;
-    lock.setAttribute('aria-label', partLabel(id) + '分区保护');
-    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    icon.setAttribute('aria-hidden', 'true');
-    icon.append(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
-    lock.append(icon);
-    lock.addEventListener('click', () => togglePartProtection(id));
-    row.append(button, lock);
+    button.type = 'button'; button.dataset.part = id;
+    button.append(partSwatch(id), partLabel(id));
+    button.addEventListener('click', event => setPart(id, event.ctrlKey));
+    eye.type = 'button'; eye.className = 'part-eye'; eye.dataset.showPart = id;
+    eye.setAttribute('aria-label', '显示' + partLabel(id) + '叠加');
+    const eyeIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    eyeIcon.setAttribute('aria-hidden', 'true');
+    eyeIcon.append(document.createElementNS('http://www.w3.org/2000/svg', 'use'));
+    eye.append(eyeIcon);
+    eye.addEventListener('click', () => togglePartVisibility(id));
+    row.append(button, eye, protectionButton(id, 'parts'));
     byId('part-targets').append(row);
+    byId('range-part-locks').append(protectionButton(id, 'range'));
   }
   updatePartTargets();
+  updateRangeProtection();
   byId('unknown-stroke-module').value = 'skin';
   for (const item of options.methods) {
     const option = document.createElement('option');
@@ -1450,7 +1687,7 @@ function choosePreset(name) {
 }
 
 function chooseScope(scope) {
-  if (!state.draft) return;
+  if (!state.draft || maskEditsBlocked()) return;
   state.draft.settings.modules = scopeModules(scope);
   syncSettings();
   edited();
@@ -1458,7 +1695,7 @@ function chooseScope(scope) {
 
 
 function addEdit(edit) {
-  if (!state.draft || !state.doc || partEditsBlocked()) return;
+  if (!state.draft || !state.doc || maskEditsBlocked()) return;
   const history = state.draft.edits.slice(0, state.draft.cursor);
   const points = history.reduce((sum, item) => sum + (item.points?.length || 0), 0);
   if (history.length >= 2000 || points + (edit.points?.length || 0) > 50000) {
@@ -1470,13 +1707,12 @@ function addEdit(edit) {
   edited(0);
 }
 function resolveUnknownStroke(module) {
-  if (!skippedUnknownCount(renderIsCurrent())) return;
+  if (state.rangeProtectedParts.has('unknown') || !skippedUnknownCount(renderIsCurrent())) return;
   if (module !== undefined && (module === 'background' || !state.options.modules.some(item => item.id === module))) return;
   const last = state.draft.edits[state.draft.cursor - 1];
   if (last.stage === 'range' && module !== undefined) return;
-  const edit = { tool: 'resolve_unknown' };
-  if (last.stage === 'range') edit.stage = 'range';
-  else if (module !== undefined) edit.module = module;
+  const edit = last.stage === 'range' ? rangeOperation('resolve_unknown') : { tool: 'resolve_unknown' };
+  if (module !== undefined) edit.module = module;
   addEdit(edit);
   if (state.draft.edits[state.draft.cursor - 1] !== edit) return;
   state.pendingUnknownResolution = edit;
@@ -1485,13 +1721,13 @@ function resolveUnknownStroke(module) {
   saveDraft();
 }
 function undo() {
-  if (!partEditsBlocked() && state.draft?.cursor > 0) { state.draft.cursor--; edited(); }
+  if (!maskEditsBlocked() && state.draft?.cursor > 0) { state.draft.cursor--; edited(); }
 }
 function redo() {
-  if (!partEditsBlocked() && state.draft && state.draft.cursor < state.draft.edits.length) { state.draft.cursor++; edited(); }
+  if (!maskEditsBlocked() && state.draft && state.draft.cursor < state.draft.edits.length) { state.draft.cursor++; edited(); }
 }
 function closeLasso(includePreview = true) {
-  if (partEditsBlocked()) return;
+  if (maskEditsBlocked()) return;
   const mag = state.magnetic;
   if (mag) {
     const tail = includePreview ? magneticClosingTail(mag) : null;
@@ -1503,8 +1739,14 @@ function closeLasso(includePreview = true) {
   state.polygon = [];
   addEdit({ ...lassoAction(), points });
 }
+function rangeOperation(tool) {
+  const edit = { tool, stage: 'range' };
+  if (state.rangeProtectedParts.size) edit.protected_parts = [...state.rangeProtectedParts];
+  return edit;
+}
 function editOperation() {
-  const tool = activeAction(), edit = { tool, stage: state.mode };
+  const tool = activeAction();
+  const edit = state.mode === 'range' ? rangeOperation(tool) : { tool, stage: state.mode };
   if (tool === 'protect' || tool === 'mix') edit.strength = Number(byId('protection').value);
   if (tool === 'include' && byId('allow-protected').checked) edit.allow_protected = true;
   if (tool === 'classify' || tool === 'remove_part') edit.module = state.part;
@@ -1627,7 +1869,7 @@ function canCloseMagnetic(mag, tail = null) {
 }
 function updateMagneticCloseButton(mag, canEdit = Boolean(state.doc && state.draft && !state.opening)) {
   const button = byId('close-lasso');
-  const disabled = !canEdit || partEditsBlocked() || !canCloseMagnetic(mag, magneticClosingTail(mag));
+  const disabled = !canEdit || maskEditsBlocked() || !canCloseMagnetic(mag, magneticClosingTail(mag));
   if (button.disabled !== disabled) button.disabled = disabled;
 }
 function samePoint(a, b) { return Boolean(a && b && a[0] === b[0] && a[1] === b[1]); }
@@ -1799,7 +2041,7 @@ function resetMagnetic(undo = false) {
 }
 function hoverMagnetic(pos, straight = false, pointerMove = false) {
   const mag = state.magnetic;
-  if (!mag || partInspectionView()) return;
+  if (!mag || maskInspectionView()) return;
   mag.straight = straight;
   if (straight) mag.motion = null;
   const point = pos && sourcePoint(pos, false, Math.floor);
@@ -1826,7 +2068,7 @@ function drawMagneticFrame(mag) {
 }
 function drawMagneticLayer(box = layout()) {
   const mag = state.magnetic;
-  const hidden = !mag || !box || originalPreviewActive() || partInspectionView();
+  const hidden = !mag || !box || maskEditsBlocked();
   if (magneticCanvas.hidden !== hidden) magneticCanvas.hidden = hidden;
   if (hidden) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1919,7 +2161,7 @@ function undoSamPoint() {
 }
 async function previewSamObject() {
   const sam = state.sam;
-  if (!sam || sam.busy || partEditsBlocked() || !renderIsCurrent()) return;
+  if (!sam || sam.busy || maskEditsBlocked() || !renderIsCurrent()) return;
   const positive = sam.points.filter(item => !item.negative).map(item => item.point);
   const negative = sam.points.filter(item => item.negative).map(item => item.point);
   if (!positive.length) return;
@@ -1946,7 +2188,7 @@ async function previewSamObject() {
 async function applySamObject() {
   const sam = state.sam;
   const preview = sam?.preview;
-  if (!preview || sam.busy || partEditsBlocked() || !renderIsCurrent() || preview.revision !== state.doc.revision) return;
+  if (!preview || sam.busy || maskEditsBlocked() || !renderIsCurrent() || preview.revision !== state.doc.revision) return;
   const epoch = state.epoch;
   sam.busy = 'apply'; sam.error = '';
   refresh();
@@ -1958,7 +2200,6 @@ async function applySamObject() {
     } else {
       state.sam = null;
       state.tool = 'pan';
-      state.view = suggestedRangeView();
       installDraft(doc);
       applyMetadata(doc);
     }
@@ -1975,20 +2216,21 @@ async function applySamObject() {
 }
 function startGesture(event) {
   if (!state.file || state.gesture || ![0, 1].includes(event.button)) return;
-  if (state.keyboardPeek && state.mode !== 'parts') {
+  if (state.keyboardPeek && !editingMask()) {
     setKeyboardPeek(false);
     draw();
   }
   const pos = position(event);
-  if (state.tool === 'pan' || state.space || event.button === 1 || partEditsBlocked()) {
+  if (state.tool === 'pan' || state.space || event.button === 1 || maskEditsBlocked()) {
     if (state.magnetic) state.magnetic.motion = null;
     state.gesture = { id: event.pointerId, start: pos, panX: state.panX, panY: state.panY };
   } else if (state.doc) {
-    const point = sourcePoint(pos, false, state.magnetic ? Math.floor : Math.round);
+    const toPixel = state.magnetic ? Math.floor : isBrush() ? brushCoordinate : Math.round;
+    const point = sourcePoint(pos, false, toPixel);
     if (!point) return;
     if (state.historyLocation !== null) {
       state.historyLocation = null;
-      updateRangeHistory(true);
+      updateEditHistory(true);
     }
     if (state.tool === 'sam_object') {
       event.preventDefault();
@@ -2015,9 +2257,10 @@ function startGesture(event) {
       return;
     }
     const radius = Number(byId('radius').value);
-    const edit = { ...editOperation(), shape: 'brush', points: [point], radius,
+    const edit = { ...editOperation(), shape: 'brush', geometry: 'continuous', points: [point], radius,
       feather: state.mode === 'parts' ? 0 : Math.min(radius, Number(byId('feather').value)) };
-    state.gesture = { id: event.pointerId, edit };
+    if (edit.stage === 'range' && edit.tool === 'include') edit.adaptive_edge = true;
+    state.gesture = { id: event.pointerId, edit, previousPoint: null, lastPoint: point };
     byId('stroke-feedback').hidden = true;
     byId('unknown-stroke-actions').hidden = true;
   }
@@ -2026,9 +2269,32 @@ function startGesture(event) {
   event.preventDefault();
   draw();
 }
+function appendBrushSamples(gesture, event, bounds = canvas.getBoundingClientRect(), box = layout()) {
+  if (!box) return;
+  const { points, radius } = gesture.edit;
+  const maxShift = Math.min(radius / 4, 2 / box.scale);
+  for (const sample of [...(event.getCoalescedEvents?.() || []), event]) {
+    if (points.length >= 5000) break;
+    const point = sourcePoint(position(sample, bounds), true, brushCoordinate, box);
+    const { previousPoint, lastPoint } = gesture;
+    if (samePoint(point, lastPoint)) continue;
+    if (previousPoint) {
+      // Soften the interior point while keeping the brush tip at the pointer.
+      const dx = (previousPoint[0] + point[0] - 2 * lastPoint[0]) / 4;
+      const dy = (previousPoint[1] + point[1] - 2 * lastPoint[1]) / 4;
+      const amount = Math.min(1, maxShift / Math.hypot(dx, dy));
+      points[points.length - 1] = [brushCoordinate(lastPoint[0] + amount * dx),
+        brushCoordinate(lastPoint[1] + amount * dy)];
+    }
+    points.push(point);
+    gesture.previousPoint = lastPoint;
+    gesture.lastPoint = point;
+  }
+}
 function moveGesture(event) {
-  const pos = position(event);
-  state.cursor = sourcePoint(pos) ? pos : null;
+  const bounds = canvas.getBoundingClientRect(), box = layout();
+  const pos = position(event, bounds);
+  state.cursor = sourcePoint(pos, false, Math.round, box) ? pos : null;
   const gesture = state.gesture;
   if (state.magnetic && !gesture) {
     hoverMagnetic(state.cursor, Boolean(event.altKey), true);
@@ -2036,13 +2302,12 @@ function moveGesture(event) {
   }
   if (gesture?.id === event.pointerId) {
     if (gesture.edit) {
-      if (partEditsBlocked()) {
+      if (maskEditsBlocked()) {
         state.gesture = null;
         draw();
         return;
       }
-      const point = sourcePoint(pos, true), points = gesture.edit.points, last = points.at(-1);
-      if ((point[0] !== last[0] || point[1] !== last[1]) && points.length < 5000) points.push(point);
+      appendBrushSamples(gesture, event, bounds, box);
     } else {
       state.panX = gesture.panX + pos.x - gesture.start.x;
       state.panY = gesture.panY + pos.y - gesture.start.y;
@@ -2050,12 +2315,49 @@ function moveGesture(event) {
   }
   draw();
 }
+function simplifyBrushPath(points, tolerance) {
+  if (points.length < 3) return points;
+  const keep = new Uint8Array(points.length);
+  const threshold = tolerance * tolerance;
+  // Bound the work on very long strokes while retaining each block endpoint.
+  for (let start = 0; start < points.length - 1; start += 64) {
+    const end = Math.min(start + 64, points.length - 1);
+    keep[start] = keep[end] = 1;
+    const pending = [[start, end]];
+    while (pending.length) {
+      const [first, last] = pending.pop();
+      const [x, y] = points[first];
+      const dx = points[last][0] - x, dy = points[last][1] - y;
+      const length2 = dx * dx + dy * dy;
+      let farthest = 0, distance2 = threshold;
+      for (let i = first + 1; i < last; i++) {
+        const px = points[i][0] - x, py = points[i][1] - y;
+        const along = length2 ? clamp((px * dx + py * dy) / length2, 0, 1) : 0;
+        const offsetX = px - along * dx, offsetY = py - along * dy;
+        const offset2 = offsetX * offsetX + offsetY * offsetY;
+        if (offset2 > distance2) {
+          farthest = i;
+          distance2 = offset2;
+        }
+      }
+      if (farthest) {
+        keep[farthest] = 1;
+        pending.push([first, farthest], [farthest, last]);
+      }
+    }
+  }
+  return points.filter((_, index) => keep[index]);
+}
 function endGesture(event) {
-  if (state.gesture?.id !== event.pointerId) return;
-  const { edit } = state.gesture;
+  const gesture = state.gesture;
+  if (gesture?.id !== event.pointerId) return;
   state.gesture = null;
-  if (edit && event.type !== 'pointercancel' && !partEditsBlocked()) addEdit(edit);
-  else {
+  if (gesture.edit && event.type !== 'pointercancel' && !maskEditsBlocked()) {
+    const box = layout();
+    appendBrushSamples(gesture, event, canvas.getBoundingClientRect(), box);
+    if (box) gesture.edit.points = simplifyBrushPath(gesture.edit.points, Math.min(.5, .35 / box.scale));
+    addEdit(gesture.edit);
+  } else {
     updateToolGuidance(renderIsCurrent());
     draw();
   }
@@ -2114,7 +2416,7 @@ async function exportCorrection() {
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
 async function importCorrection(files) {
-  if (!state.doc || partEditsBlocked() || !(await flushChanges())) return;
+  if (!state.doc || maskEditsBlocked() || !(await flushChanges())) return;
   const epoch = state.epoch, revision = state.doc.revision;
   try {
     const selected = Array.from(files), records = selected.filter(file => /\.json$/i.test(file.name));
@@ -2128,7 +2430,7 @@ async function importCorrection(files) {
       }
       masks[file.name] = btoa(binary);
     }
-    if (epoch !== state.epoch || partEditsBlocked()) return;
+    if (epoch !== state.epoch || maskEditsBlocked()) return;
     if (revision !== state.doc.revision || state.dirty || state.save) throw new Error('选区已修改，请重新导入校正。');
     const doc = await post(route('/corrections/import'), { revision, record, files: masks });
     if (epoch !== state.epoch) return;
@@ -2193,14 +2495,13 @@ byId('conflict-remote').addEventListener('click', () => {
 });
 for (const button of viewButtons) button.addEventListener('click', () => selectView(button.dataset.view));
 byId('show-manual-changes').addEventListener('click', () => selectView('changes'));
-byId('suggested-range-view').addEventListener('click', () => selectView(suggestedRangeView()));
 byId('retry-changes').addEventListener('click', () => {
-  state.changesError = null;
+  state.changesErrors.delete(state.mode);
   loadChanges();
   refresh();
 });
 byId('show-unknown').addEventListener('click', () => {
-  if (!unknownOverlayAvailable()) return;
+  if (state.view !== 'weight' || !unknownOverlayAvailable()) return;
   state.showUnknown = !state.showUnknown;
   ensureAssets();
   refresh();
@@ -2208,6 +2509,7 @@ byId('show-unknown').addEventListener('click', () => {
 byId('include-unknown-stroke').addEventListener('click', () => resolveUnknownStroke());
 byId('assign-unknown-stroke').addEventListener('click', () => resolveUnknownStroke(byId('unknown-stroke-module').value));
 byId('open-unknown-parts').addEventListener('click', () => selectMode('parts'));
+byId('back-to-flow').addEventListener('click', () => selectMode('flow'));
 for (const button of modeButtons) button.addEventListener('click', () => selectMode(button.dataset.mode));
 for (const button of scopeButtons) button.addEventListener('click', () => chooseScope(button.dataset.scope));
 for (const button of toolButtons) button.addEventListener('click', () => {
@@ -2239,15 +2541,11 @@ byId('retention-percent').addEventListener('change', event => {
 byId('allow-protected').addEventListener('change', refresh);
 byId('lasso-action').addEventListener('change', event => {
   const tool = event.target.value;
-  if (partEditsBlocked() || !Object.hasOwn(actions[state.mode] || {}, tool)) return;
+  if (maskEditsBlocked() || !Object.hasOwn(actions[state.mode] || {}, tool)) return;
   setEditAction(tool);
   refresh();
 });
-for (const id of ['radius', 'feather']) byId(id).addEventListener('change', () => {
-  if (preferences.value?.remember_brush) preferences.update({
-    brush_radius: Number(byId('radius').value), brush_feather: Number(byId('feather').value),
-  }).catch(showError);
-});
+for (const id of ['radius', 'feather']) byId(id).addEventListener('change', rememberBrush);
 byId('close-lasso').addEventListener('click', () => closeLasso());
 byId('magnetic-undo').addEventListener('click', () => { resetMagnetic(true); stage.focus({ preventScroll: true }); });
 byId('magnetic-radius').addEventListener('input', () => {
@@ -2260,8 +2558,8 @@ byId('sam-undo-point').addEventListener('click', undoSamPoint);
 byId('sam-cancel').addEventListener('click', () => selectTool('pan'));
 byId('sam-preview').addEventListener('click', previewSamObject);
 byId('sam-apply').addEventListener('click', applySamObject);
-byId('invert').addEventListener('click', () => { addEdit({ tool: 'invert', stage: 'range' }); selectView('weight'); });
-byId('reset').addEventListener('click', () => { addEdit({ tool: 'reset', stage: 'range' }); selectView('weight'); });
+byId('invert').addEventListener('click', () => { addEdit(rangeOperation('invert')); selectView('weight'); });
+byId('reset').addEventListener('click', () => { addEdit(rangeOperation('reset')); selectView('weight'); });
 byId('zoom-in').addEventListener('click', () => { const box = layout(); if (box) zoomTo(box.scale * 1.25); });
 byId('zoom-out').addEventListener('click', () => { const box = layout(); if (box) zoomTo(box.scale / 1.25); });
 byId('fit').addEventListener('click', () => { state.fit = true; state.panX = state.panY = 0; draw(); });
@@ -2272,7 +2570,7 @@ function setKeyboardPeek(active) {
   peekButton.setAttribute('aria-pressed', String(active));
 }
 function redrawOriginalPreview() {
-  if (state.mode === 'parts') refresh();
+  if (editingMask()) refresh();
   else draw();
 }
 peekButton.addEventListener('pointerdown', event => {
@@ -2293,9 +2591,28 @@ peekButton.addEventListener('click', event => {
 canvas.addEventListener('wheel', event => {
   const box = layout();
   if (!box) return;
+  const { deltaMode, deltaY, deltaX } = event;
+  const resize = event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && isBrush() && !maskEditsBlocked();
+  const delta = resize ? deltaY || deltaX : deltaY;
+  if (!delta) return;
   event.preventDefault();
+  if (resize) {
+    const direction = Math.sign(delta);
+    // Accumulate small trackpad deltas and limit each wheel event to one size step.
+    const pixels = deltaMode === 0 ? Math.min(Math.abs(delta), brushWheelStepPixels) : brushWheelStepPixels;
+    if (brushWheelPixels * direction < 0) brushWheelPixels = 0;
+    brushWheelPixels += direction * pixels;
+    if (Math.abs(brushWheelPixels) >= brushWheelStepPixels) {
+      brushWheelPixels -= direction * brushWheelStepPixels;
+      const point = position(event);
+      state.cursor = sourcePoint(point, false, Math.round, box) ? point : null;
+      resizeBrush(-direction);
+    }
+    return;
+  }
+  brushWheelPixels = 0;
   const point = position(event);
-  zoomTo(box.scale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), point.x, point.y);
+  zoomTo(box.scale * (delta < 0 ? 1.15 : 1 / 1.15), point.x, point.y);
 }, { passive: false });
 canvas.addEventListener('pointerdown', startGesture);
 canvas.addEventListener('pointermove', moveGesture);
@@ -2349,7 +2666,14 @@ viewer.addEventListener('dragleave', event => {
 viewer.addEventListener('drop', event => {
   event.preventDefault();
   indicateDrop(false);
-  openFile(event.dataTransfer.files[0]);
+  const transfer = event.dataTransfer;
+  if (transfer.types?.includes('text/uri-list')) {
+    const origin = window.location.origin;
+    const hasWorkbenchPreview = transfer.getData('text/uri-list').split(/\r?\n/).some(uri =>
+      uri.startsWith(origin) && /^\/api\/documents\/[0-9a-f]{64}\/thumbnail(?:[?#]|$)/.test(uri.slice(origin.length)));
+    if (hasWorkbenchPreview) return;
+  }
+  openFile(transfer.files[0]);
 });
 window.addEventListener('paste', event => {
   const file = event.clipboardData?.files[0];
@@ -2376,25 +2700,32 @@ window.addEventListener('keydown', event => {
     }
   }
   if (open?.contains(event.target) || event.target.tagName === 'SUMMARY') return;
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) || event.target.isContentEditable) return;
   const key = event.key.toLowerCase();
-  if (editingMask() && !partEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'z') {
+  const radiusDirection = brushRadiusKeys.get(key);
+  const brushSlider = radiusDirection && (event.target === byId('radius') || event.target === byId('feather'));
+  if ((/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) && !brushSlider) || event.target.isContentEditable) return;
+  if (editingMask() && !maskEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'z') {
     event.preventDefault();
     if (state.sam) { if (!event.shiftKey) undoSamPoint(); }
     else if (state.magnetic?.segments.length || state.magnetic?.intent) { if (!event.shiftKey) resetMagnetic(true); }
     else (event.shiftKey ? redo : undo)();
     return;
   }
-  if (editingMask() && !partEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'y') {
+  if (editingMask() && !maskEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'y') {
     event.preventDefault();
     if (!state.sam && !state.magnetic?.segments.length && !state.magnetic?.intent) redo();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && key === 'o') { event.preventDefault(); byId('file').click(); return; }
-  if (key === 'alt' && state.magnetic && !partEditsBlocked()) {
+  if (key === 'alt' && state.magnetic && !maskEditsBlocked()) {
     event.preventDefault(); hoverMagnetic(state.cursor, true); return;
   }
   if (event.ctrlKey || event.metaKey || event.altKey || !state.file) return;
+  if (radiusDirection && !event.isComposing && !event.defaultPrevented && isBrush() && !maskEditsBlocked()) {
+    event.preventDefault();
+    resizeBrush(radiusDirection);
+    return;
+  }
   if (key === ' ' && event.target.tagName !== 'BUTTON') { event.preventDefault(); state.space = true; refresh(); }
   if (key === 'x' && state.mode !== 'flow' && !state.peek) { state.peek = true; redrawOriginalPreview(); }
   if (key === 'escape') {
@@ -2402,8 +2733,8 @@ window.addEventListener('keydown', event => {
     else if (state.magnetic) { event.preventDefault(); resetMagnetic(); }
     else { state.polygon = []; refresh(); }
   }
-  if (key === 'backspace' && state.magnetic && !partEditsBlocked()) { event.preventDefault(); resetMagnetic(true); }
-  if (key === 'enter' && event.target.tagName !== 'BUTTON' && !partEditsBlocked() &&
+  if (key === 'backspace' && state.magnetic && !maskEditsBlocked()) { event.preventDefault(); resetMagnetic(true); }
+  if (key === 'enter' && event.target.tagName !== 'BUTTON' && !maskEditsBlocked() &&
       (state.polygon.length >= 3 || canCloseMagnetic(state.magnetic, magneticClosingTail(state.magnetic)))) {
     event.preventDefault(); closeLasso();
   }
@@ -2414,22 +2745,47 @@ window.addEventListener('keydown', event => {
   }
 });
 window.addEventListener('keyup', event => {
+  const shiftReleased = event.key === 'Shift' && !event.shiftKey;
+  if (shiftReleased) brushWheelPixels = 0;
+  if (brushResizePending && (shiftReleased || brushRadiusKeys.has(event.key) || event.code === 'BracketLeft' || event.code === 'BracketRight')) rememberBrush();
   if (event.key === ' ') { state.space = false; refresh(); }
   if (event.key === 'Alt' && state.magnetic) hoverMagnetic(state.cursor, false);
   if (event.key.toLowerCase() === 'x' && state.peek) { state.peek = false; redrawOriginalPreview(); }
 });
 window.addEventListener('blur', () => {
+  brushWheelPixels = 0;
+  if (brushResizePending) rememberBrush();
   state.space = state.peek = false;
   if (state.magnetic) hoverMagnetic(null, false);
   refresh();
 });
-window.addEventListener('pagehide', persistPending);
+let activePageId = null;
+function registerPage() {
+  if (activePageId || state.exited) return;
+  activePageId = crypto.randomUUID();
+  post('/api/page', { id: activePageId, open: true }, { keepalive: true }).catch(() => {});
+}
+window.addEventListener('pageshow', registerPage);
+window.addEventListener('pagehide', () => {
+  persistPending();
+  if (state.dirty) saveDraft();
+  if (!activePageId || state.exited) return;
+  const id = activePageId;
+  activePageId = null;
+  post('/api/page', { id, open: false }, { keepalive: true }).catch(() => {});
+});
+registerPage();
+installDockableTools({ workspace: byId('workspace'), stage, toolbar: byId('tools'),
+  grip: byId('tools-handle'), compact: compactInspector });
 new ResizeObserver(draw).observe(stage);
 new ResizeObserver(drawFlowWires).observe(byId('flow-map'));
 byId('error-node').addEventListener('click', () => selectMode(failedNode()));
 byId('inspector-toggle').addEventListener('click', event => {
   setDrawer(document.body.dataset.drawer !== 'open', false, event.detail > 0);
 });
+byId('part-visibility-all').addEventListener('click', () => togglePartVisibility());
+byId('part-protection-all').addEventListener('click', () => togglePartProtection());
+byId('range-protection-all').addEventListener('click', () => togglePartProtection(undefined, 'range'));
 byId('target-shortcut').addEventListener('click', event => {
   if (compactInspector.matches) setDrawer(true, false, event.detail > 0);
   else [...byId('part-targets').children].map(row => row.children[0]).find(button => button.dataset.part === state.part)?.focus();
@@ -2446,9 +2802,10 @@ async function exitWorkbench() {
   beginDocumentChange();
   state.opening = false;
   state.exited = true;
-  byId('empty-help').textContent = '双击启动脚本可继续编辑。';
+  byId('empty-help').textContent = '可以关闭此标签页。双击启动脚本可重新打开工作台。';
   refresh();
   status('已退出工作台');
+  window.close();
 }
 
 const preferences = createWorkbenchSettings({
@@ -2456,21 +2813,21 @@ const preferences = createWorkbenchSettings({
   onExit: exitWorkbench,
   onChange(value, fields) {
     if (!fields || 'theme' in fields) setThemePreference(value.theme);
-    if (!fields || 'remember_brush' in fields || 'brush_radius' in fields || 'brush_feather' in fields) {
-      if (value.remember_brush) {
-        byId('radius').value = value.brush_radius;
-        byId('feather').max = value.brush_radius;
-        byId('feather').value = value.brush_feather;
-        state.brushSized = true;
-        updateBrushReadout();
-      }
+    if (value.remember_brush && (!fields || 'remember_brush' in fields || 'brush_radius' in fields || 'brush_feather' in fields)) {
+      byId('radius').value = value.brush_radius;
+      byId('feather').max = value.brush_radius;
+      byId('feather').value = value.brush_feather;
+      state.brushSized = true;
+      updateBrushReadout();
     }
   },
 });
 preferences.load().catch(showError);
 request('/api/options').then(reply => reply.json()).then(options => {
   installOptions(options);
-  const previous = storage('getItem', 'gaid-active-document');
+  const linkedDraft = /^#draft=([0-9a-f]{64})$/.exec(window.location.hash)?.[1];
+  if (linkedDraft) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  const previous = linkedDraft || storage('getItem', 'gaid-active-document');
   if (previous) openRecent(previous);
 }).catch(error => {
   status('无法连接本机服务，请确认工作台已启动后刷新页面。', 'error');

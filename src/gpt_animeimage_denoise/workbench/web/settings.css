@@ -34,7 +34,7 @@
 .pref-percentage input { width: 69px; }
 .defaults-parts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 20px; }
 .defaults-parts > div { min-width: 0; display: flex; gap: 4px; align-items: center; justify-content: space-between; border-top: 1px solid var(--edge); padding-block: 6px; }
-.defaults-parts > div > label:first-child, .remember-brush { display: inline-flex; gap: 6px; align-items: center; }
+.defaults-parts > div > label:first-child, .remember-brush, .exit-on-close { display: inline-flex; gap: 6px; align-items: center; }
 .defaults-parts .pref-percentage { font-size: 11px; }
 .defaults-parts .pref-percentage input { width: 57px; height: 28px; padding-inline: 5px; }
 .settings-scroll input[type="checkbox"], .appearance-choices input { accent-color: var(--accent); }

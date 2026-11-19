@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer, current_thread
 from time import monotonic, sleep
 import traceback
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -14,21 +14,23 @@ from uuid import uuid4
 
 from ..denoisers import uses_l0
 from ..editor import DEFAULT_MODULES, MODULES
-from .documents import WORKBENCH_METHODS
+from .documents import PART_PALETTE, WORKBENCH_METHODS
 from .storage import StorageBusy, _file_lock, _replace_json
 
 
 _WEB = Path(__file__).with_name('web')
 _STATIC = {'/': ('index.html', 'text/html'), '/style.css': ('style.css', 'text/css'),
            '/app.js': ('app.js', 'text/javascript'),
+           '/tools.js': ('tools.js', 'text/javascript'),
            '/settings.js': ('settings.js', 'text/javascript'), '/settings.css': ('settings.css', 'text/css'),
            '/magnetic-lasso-worker.js': ('magnetic-lasso-worker.js', 'text/javascript')}
-_PARTS = {'skin': ('皮肤', '#db896c'), 'face': ('面部', '#e1b450'), 'hair': ('头发', '#6587df'),
-          'eyes': ('眼睛', '#36a5a0'), 'mouth': ('嘴巴', '#d978a4'), 'outfit': ('服饰', '#8b78c7'),
-          'background': ('背景', '#93a6bc')}
+_PART_LABELS = {'skin': '皮肤', 'face': '面部', 'hair': '头发', 'eyes': '眼睛',
+                'mouth': '嘴巴', 'outfit': '服饰', 'background': '背景'}
 _DEFAULTS = {'method': 'l0', 'l0': .0005, 'downscale': .6, 'strength': 1,
              'restoration_gain': .25, 'sigma': 12, 'structure_protection': .2}
 _DOCUMENT = re.compile(r'/api/documents/([0-9a-f]{64})(?:/(.*))?')
+_PAGE_ID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
+_PAGE_CLOSE_GRACE = 4
 _FOLDER_DIALOG = Lock()
 
 
@@ -36,6 +38,51 @@ class _RequestError(ValueError):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+class _PagePresence:
+    def __init__(self, server):
+        self._server = server
+        self._lock = Lock()
+        self._active = set()
+        self._departed = set()
+        self._timer = None
+
+    def update(self, identifier, opened):
+        with self._lock:
+            if identifier in self._departed:
+                return  # A delayed open cannot revive a page that already departed.
+            if opened:
+                self._active.add(identifier)
+                self._cancel()
+                return
+            self._active.discard(identifier)
+            self._departed.add(identifier)
+            if not self._active and self._timer is None and self._enabled():
+                self._timer = Timer(_PAGE_CLOSE_GRACE, self._exit_if_empty)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def _enabled(self):
+        return self._server.documents.preferences.read()['exit_on_close'] is True
+
+    def _exit_if_empty(self):
+        with self._lock:
+            if self._timer is not current_thread():
+                return
+            self._timer = None
+            if self._active or not self._enabled():
+                return
+        self._server.shutdown()
+
+    def _cancel(self):
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def close(self):
+        with self._lock:
+            self._cancel()
 
 
 def _choose_folder(initial):
@@ -57,7 +104,8 @@ def _choose_folder(initial):
 
 
 def _options():
-    return {'modules': [{'id': name, 'label': _PARTS[name][0], 'color': _PARTS[name][1]} for name in MODULES],
+    return {'modules': [{'id': name, 'label': _PART_LABELS[name], 'color': '#' + bytes(PART_PALETTE[name]).hex()}
+                        for name in MODULES],
             'default_modules': list(DEFAULT_MODULES), 'defaults': dict(_DEFAULTS),
             'methods': [{'id': name, 'label': label, 'uses_l0': uses_l0(name),
                          'uses_downscale': name.startswith('esrgan')}
@@ -170,6 +218,9 @@ def create_server(workspace, *, port=0):
             identifier, action = match.groups()
             if not post and action is None:
                 return self._json(documents.get(identifier))
+            if post and action == 'prepare-edit':
+                documents.prepare_edit(identifier, _revision(self._read_json()))
+                return self._json({})
             if not post and action == 'thumbnail':
                 query = parse_qs(path.query, keep_blank_values=True)
                 view = query.get('view', ['original'])[0]
@@ -178,10 +229,14 @@ def create_server(workspace, *, port=0):
                     raise ValueError('请指定节点缩略图的修订号。')
                 return self._send(200, documents.thumbnail(identifier, view, None if value is None else int(value)), 'image/png')
             if not post and action == 'changes':
-                values = parse_qs(path.query, keep_blank_values=True).get('revision', [])
+                query = parse_qs(path.query, keep_blank_values=True)
+                values = query.get('revision', [])
                 if len(values) != 1 or not values[0].isdecimal() or len(values[0]) > 16:
                     raise ValueError('请指定要核对的成品版本。')
-                return self._json(documents.changes(identifier, int(values[0])))
+                stages = query.get('stage', [None])
+                if len(stages) != 1:
+                    raise ValueError('请选择要核对的编辑阶段。')
+                return self._json(documents.changes(identifier, int(values[0]), stage=stages[0]))
             if not post and action in ('image', 'download'):
                 query = parse_qs(path.query)
                 download = action == 'download'
@@ -191,8 +246,12 @@ def create_server(workspace, *, port=0):
                     raise ValueError('请指定要导出的结果及版本。')
                 if value is not None and (not value.isdecimal() or len(value) > 16):
                     raise ValueError('图像版本无效。')
+                hidden = query.get('hide', [])
+                if len(hidden) > 1:
+                    raise ValueError('请选择要隐藏的分区。')
                 data = documents.asset(identifier, view, download=download,
-                                       revision=int(value) if value is not None else None, module=query.get('module', [None])[0])
+                                       revision=int(value) if value is not None else None, module=query.get('module', [None])[0],
+                                       hidden_parts=hidden[0].split(',') if hidden else ())
                 name = Path(documents.get(identifier)['name']).stem + '-gaid.png' if download else None
                 return self._send(200, data, 'image/png', download=name)
             if post and action == 'edit':
@@ -236,6 +295,14 @@ def create_server(workspace, *, port=0):
                     return self._json(_options())
                 if not post and path.path == '/api/instance':
                     return self._json({'instance': self.server.instance})
+                if post and path.path == '/api/page':
+                    value = self._read_json(512)
+                    identifier, opened = value.get('id'), value.get('open')
+                    if (set(value) != {'id', 'open'} or not isinstance(identifier, str)
+                            or not _PAGE_ID.fullmatch(identifier) or type(opened) is not bool):
+                        raise ValueError('工作台页面状态无效。')
+                    self.server.pages.update(identifier, opened)
+                    return self._json({'open': opened})
                 if post and path.path == '/api/exit':
                     if self._read_json():
                         raise ValueError('退出工作台的请求须为空。')
@@ -265,6 +332,8 @@ def create_server(workspace, *, port=0):
 
     class LocalServer(ThreadingHTTPServer):
         def server_close(self):
+            if hasattr(self, 'pages'):
+                self.pages.close()
             super().server_close()
             if hasattr(self, 'documents'):
                 self.documents.close()
@@ -273,6 +342,7 @@ def create_server(workspace, *, port=0):
     server.instance = uuid4().hex
     try:
         server.documents = Documents(workspace)
+        server.pages = _PagePresence(server)
     except Exception:
         server.server_close()
         raise

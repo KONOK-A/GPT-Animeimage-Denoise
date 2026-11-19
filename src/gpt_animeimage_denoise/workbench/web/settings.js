@@ -7,9 +7,9 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
   const fields = new Map();
   let value, read, queue = Promise.resolve(), defaults, saved, busy = false, visit = 0;
 
-  function install(next, changed) {
+  function install(next, changed, syncControls = true) {
     value = next;
-    onChange(next, changed);
+    if (syncControls) onChange(next, changed);
     return next;
   }
   function load() {
@@ -17,9 +17,9 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       .then(next => install(next)).catch(error => { read = null; throw error; });
     return read;
   }
-  function update(patch) {
+  function update(patch, { syncControls = true } = {}) {
     const task = queue.then(() => load()).then(() => post('/api/settings', patch))
-      .then(next => install(next, patch));
+      .then(next => install(next, patch, syncControls));
     queue = task.catch(() => {});
     return task;
   }
@@ -114,6 +114,7 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       byId('pref-cache-dir').value = saved.cache_dir;
       byId('pref-theme-' + saved.theme).checked = true;
       byId('pref-remember-brush').checked = saved.remember_brush;
+      byId('pref-exit-on-close').checked = saved.exit_on_close;
       byId('pref-brush-size').value = saved.brush_radius * 2;
       byId('pref-brush-feather').value = saved.brush_feather;
       brushState();
@@ -143,7 +144,7 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       defaults: next, export_dir: byId('pref-export-dir').value.trim(), cache_dir: byId('pref-cache-dir').value.trim(),
       theme: themeNames.find(name => byId('pref-theme-' + name).checked) || 'system',
       remember_brush: byId('pref-remember-brush').checked, brush_radius: Number(byId('pref-brush-size').value) / 2,
-      brush_feather: Number(byId('pref-brush-feather').value),
+      brush_feather: Number(byId('pref-brush-feather').value), exit_on_close: byId('pref-exit-on-close').checked,
     };
     const patch = Object.fromEntries(Object.entries(values).filter(([key, setting]) => JSON.stringify(setting) !== JSON.stringify(saved[key])));
     setBusy(true); message('正在保存…');
