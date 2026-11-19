@@ -16,6 +16,16 @@ py -3.12 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
+### 切换 CPU 或 CUDA 版 PyTorch
+
+已有安装时，先退出工作台和使用同一 `.venv` 的 GAID 进程。在项目根目录运行下面的命令切到 NVIDIA CUDA 12.8 版。要切到 CPU 版，将最后的 `cuda` 改为 `cpu`。
+
+```powershell
+& .\.venv\Scripts\python.exe -X utf8 .\tools\switch_pytorch.py cuda
+```
+
+脚本会先下载项目锁定版本的 `torch` 和 `torchvision` wheel。两个都下载成功后才从本地替换，下载失败时保留现有安装。完成后会实际导入这两个包，显示构建版本和 GAID 在 `auto` 模式下可用的设备。
+
 ### 首次出图
 
 把 `image.png` 放到项目根目录，运行整图纯 L0。`--whole` 跳过部位分区，此命令无需模型权重。
@@ -38,7 +48,7 @@ py -3.12 -m venv .venv
 
 ### 工作台
 
-准备好分区模型后，双击 [start-workbench.vbs](start-workbench.vbs)，浏览器会打开本地工作台。需要查看终端日志时运行 [start-workbench.cmd](start-workbench.cmd)。
+准备好分区模型后，双击 [start-workbench.vbs](start-workbench.vbs)，浏览器会打开本地工作台。环境缺少依赖时会弹出缺失项和修复步骤。需要查看终端日志时运行 [start-workbench.cmd](start-workbench.cmd)。
 
 1. 打开、拖入或粘贴图片。工作台会在后台生成成品，默认处理皮肤、面部和头发。
 2. 在「成品检查」拖动分割线查看差异，也可以把当前成品固定为对照 A。
