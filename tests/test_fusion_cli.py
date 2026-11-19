@@ -1,10 +1,14 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO, TextIOWrapper
+import json
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+from PIL import Image
 
 from gpt_animeimage_denoise import __version__, cli
 
@@ -45,6 +49,54 @@ class FusionCLITest(unittest.TestCase):
         self.assertEqual(code, 0)
         preview.assert_called_once_with(Path('case'), Path('preview.png'),
                                         strength=.5, restoration_gain=.35, sigma=36.)
+
+    def test_whole_cli_process_and_batch_without_region_models(self):
+        root = Path(self.enterContext(TemporaryDirectory()))
+        images = root / 'images'
+        images.mkdir()
+        image = images / 'source.png'
+        Image.new('RGB', (16, 12), 'navy').save(image)
+        output = StringIO()
+        modules = {'gpt_animeimage_denoise.fusion_models': None}
+        environment = {'GPT_ANIMEIMAGE_DENOISE_MODEL_DIR': str(root / 'missing-models')}
+        with (mock.patch.dict(sys.modules, modules), mock.patch.dict('os.environ', environment),
+              redirect_stdout(output)):
+            code = cli.main(['process', str(image), '--out', str(root / 'single'),
+                             '--whole', '--device', 'cpu'])
+            self.assertEqual(code, 0)
+            case = Path(json.loads(output.getvalue())['output'])
+            self.assertTrue(case.name.endswith('-whole'))
+            self.assertEqual(json.loads((case / 'report.json').read_text(encoding='utf-8'))['profile'], 'whole')
+            code = cli.main(['batch', '--directory', str(images), '--out', str(root / 'batch'),
+                             '--whole', '--device', 'cpu'])
+        self.assertEqual(code, 0)
+        records = json.loads((root / 'batch/records.json').read_text(encoding='utf-8'))
+        self.assertEqual([(entry['profile'], entry['status']) for entry in records], [('whole', 'complete')])
+        self.assertFalse((root / 'missing-models').exists())
+
+    def test_whole_rejects_part_specific_options(self):
+        cases = (['process', 'source.png', '--edits', 'changes.json'],
+                 ['batch', '--directory', 'images', '--edits-dir', 'edits'],
+                 ['process', 'source.png', '--policy', 'policy.json'])
+        for args in cases:
+            with self.subTest(args=args), redirect_stderr(StringIO()) as errors:
+                with self.assertRaises(SystemExit) as result:
+                    cli.main([*args, '--whole', '--out', 'out'])
+                self.assertEqual(result.exception.code, 2)
+                self.assertIn('--whole cannot be combined with', errors.getvalue())
+
+    def test_whole_rejects_invalid_cuda_devices_before_batch(self):
+        import torch
+
+        with (mock.patch.object(torch.cuda, 'is_available', return_value=True),
+              mock.patch.object(torch.cuda, 'device_count', return_value=1),
+              mock.patch('gpt_animeimage_denoise.fusion_pipeline.process_batch', return_value=[]) as batch,
+              redirect_stderr(StringIO())):
+            for device in ('cuda:bad', 'cuda:3'):
+                with self.subTest(device=device):
+                    code = cli.main(['batch', '--directory', 'images', '--out', 'out', '--whole', '--device', device])
+                    self.assertEqual(code, 1)
+            batch.assert_not_called()
 
     def test_retired_legacy_profile_is_rejected_by_the_parser(self):
         with self.assertRaises(SystemExit) as context:

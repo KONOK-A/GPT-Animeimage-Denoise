@@ -42,6 +42,34 @@ class PreviewTest(unittest.TestCase):
             self.assertEqual(actual.info['icc_profile'], b'fixture-icc')
         self.assertEqual((case / 'report.json').read_bytes(), report)
 
+    def test_whole_image_preview_preserves_the_source_grid_and_metadata(self):
+        from gpt_animeimage_denoise.preview import preview_case
+
+        segmented = self.run_case('shared')
+        segmented_report = (segmented / 'report.json').read_bytes()
+        options = {'profile': 'whole', 'case_id': 'case', 'l0_fn': L0(), 'structure_protection': 0}
+        report = fusion_pipeline.process_image(self.source, segmented.parent, None, **options)
+        case = segmented.parent / report['folder']
+        self.assertEqual(case.name, 'case-whole')
+        self.assertEqual((segmented / 'report.json').read_bytes(), segmented_report)
+        self.assertFalse((case / 'person_labels.png').exists())
+        np.testing.assert_array_equal(np.load(case / 'weight.npy'), self.alpha > 0)
+        with Image.open(case / 'result.png') as image:
+            pixels = np.asarray(image)
+            self.assertEqual(image.size, (40, 32))
+            self.assertEqual(image.info['icc_profile'], b'fixture-icc')
+            np.testing.assert_array_equal(pixels[..., 3], self.alpha)
+            np.testing.assert_array_equal(pixels[..., :3][self.alpha == 0], self.rgb[self.alpha == 0])
+            self.assertTrue(np.any(pixels[..., :3][self.alpha > 0] != self.rgb[self.alpha > 0]))
+        self.assertTrue(fusion_pipeline.process_image(self.source, segmented.parent, None, **options)['resumed'])
+
+        target = self.root / 'whole-preview.png'
+        preview_case(case, target, strength=.5)
+        expected = fusion_pipeline.process_image(self.source, self.root / 'expected', None, strength=.5, **options)
+        with Image.open(target) as actual, Image.open(self.root / 'expected' / expected['folder'] / 'result.png') as full:
+            np.testing.assert_array_equal(np.asarray(actual), np.asarray(full))
+            self.assertEqual(actual.info['icc_profile'], b'fixture-icc')
+
     def test_rejects_changed_weight_and_native_destination(self):
         from gpt_animeimage_denoise.preview import preview_case
 

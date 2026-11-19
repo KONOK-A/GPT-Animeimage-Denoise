@@ -24,6 +24,7 @@ OUTPUT_FILES = ['original.png', 'result.png', 'person_labels.png', 'raw_labels.p
                 'objects.png', 'suspected_objects.png', 'unknown.png', 'conflict.png', 'consensus.png',
                 'protected.png', 'source_map.png', 'weight.npy', 'weight.png',
                 'preview.png', 'regions.json', *['module_' + name + '.png' for name in MODULES]]
+WHOLE_OUTPUT_FILES = ('original.png', 'result.png', 'protected.png', 'weight.npy', 'weight.png', 'preview.png')
 WORKBENCH_FILES = ('person_labels.png', 'objects.png', 'unknown.png', 'suspected_objects.png')
 
 DEFAULT_STRUCTURE_PROTECTION = 0.2
@@ -35,9 +36,25 @@ def _code_hash(names):
     return _digest({name: _sha(root / name) for name in names})
 
 
-def _targets(output, folder):
-    return [folder / name for name in [*OUTPUT_FILES, 'report.json', 'report.json.tmp', 'regions.json.tmp']] + [
+def _targets(output, folder, files=OUTPUT_FILES):
+    names = [*files, 'report.json']
+    temporary = [name + '.tmp' for name in names if name.endswith('.json')]
+    return [folder / name for name in names + temporary] + [
         output / name for name in ('records.json', 'records.json.tmp', 'summary.csv', 'summary.csv.tmp')]
+
+
+def _case_id_for_profile(case_id, profile):
+    return f'{case_id}-whole' if profile == 'whole' else str(case_id)
+
+
+def _assert_case_profile(folder, profile):
+    try:
+        report = json.loads((folder / 'report.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return
+    previous = report.get('profile') if isinstance(report, dict) else None
+    if previous in ('fusion', 'reference', 'whole') and (previous == 'whole') != (profile == 'whole'):
+        raise ValueError(f'Case {folder.name!r} already belongs to the {previous} profile. Choose a different output directory.')
 
 
 def _pack(value, arrays):
@@ -249,32 +266,41 @@ def _load_policy(policy, policy_path):
 
 def _finish_settings(profile, structure_protection, restoration_gain):
     if structure_protection is None:
-        structure_protection = DEFAULT_STRUCTURE_PROTECTION if profile == 'fusion' else 1.0
+        structure_protection = 1.0 if profile == 'reference' else DEFAULT_STRUCTURE_PROTECTION
     if restoration_gain is None:
-        restoration_gain = DEFAULT_RESTORATION_GAIN if profile == 'fusion' else 1.0
+        restoration_gain = 1.0 if profile == 'reference' else DEFAULT_RESTORATION_GAIN
     return (validate_unit_interval(structure_protection, 'structure_protection'),
             validate_unit_interval(restoration_gain, 'restoration_gain'))
+
+
+def _validate_blend_settings(sigma, strength):
+    if not math.isfinite(sigma) or sigma <= 0:
+        raise ValueError('sigma must be a finite positive value')
+    if not math.isfinite(strength) or not 0 <= strength <= 1:
+        raise ValueError('strength must be finite in 0..1')
 
 
 def process_image(source, output_root, models, *, profile='fusion', case_id=None,
                   lam=None, sigma=12, strength=1, edits_path=None, split='',
                   policy=None, policy_path=None, l0_fn=None, denoiser='l0',
                   sr_fn=None, downscale=.6, structure_protection=None,
-                  restoration_gain=None, _input_paths=(), on_stage=None, _workbench=False):
+                  restoration_gain=None, device=None, _input_paths=(), on_stage=None, _workbench=False):
     """Preserve source bytes, alpha, ICC and every final W=0 pixel exactly."""
     def stage(name):
         if on_stage is not None:
             on_stage(name)
 
-    if profile not in ('fusion', 'reference'):
-        raise ValueError('fusion_pipeline supports reference/fusion profiles only')
+    if profile not in ('fusion', 'reference', 'whole'):
+        raise ValueError('Invalid processing profile')
+    whole = profile == 'whole'
+    if whole and (_workbench or any(value is not None for value in (edits_path, policy, policy_path))):
+        raise ValueError('Whole-image processing cannot use part corrections, policies, or workbench analysis')
     denoiser, lam = resolve_denoiser(denoiser, lam)
-    if not math.isfinite(lam) or lam <= 0 or not math.isfinite(sigma) or sigma <= 0:
-        raise ValueError('lambda and sigma must be finite positive values')
-    if not math.isfinite(strength) or not 0 <= strength <= 1:
-        raise ValueError('strength must be finite in 0..1')
+    _validate_blend_settings(sigma, strength)
     structure_protection, restoration_gain = _finish_settings(profile, structure_protection, restoration_gain)
-    policy, policy_path, policy_hash = _load_policy(policy, policy_path)
+    policy_hash = None
+    if not whole:
+        policy, policy_path, policy_hash = _load_policy(policy, policy_path)
     if profile == 'reference':
         policy = dict(policy, semantic_repair='off', outfit_reference='off')
     source = Path(source).resolve(); output = Path(output_root).resolve()
@@ -282,19 +308,24 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     if case_id is None:
         stem = re.sub(r'[^\w-]+', '-', source.stem).strip('-')[:64] or 'image'
         case_id = stem + '-' + input_hash[:10]
+    case_id = _case_id_for_profile(case_id, profile)
     folder = _case_folder(output, case_id)
+    case_files = WHOLE_OUTPUT_FILES if whole else OUTPUT_FILES
     rgb, original_alpha, icc = _read_source(source)
-    edits = load_edits(edits_path, rgb.shape[:2], input_hash)
+    edits = None if whole else load_edits(edits_path, rgb.shape[:2], input_hash)
+    edit_inputs = () if edits is None else edits['input_paths']
+    edit_hashes = {} if edits is None else edits['hashes']
     policy_inputs = [policy_path] if policy_path is not None else []
-    inputs = list(dict.fromkeys([source, *edits['input_paths'], *policy_inputs, *map(Path, _input_paths)]))
-    _assert_inputs_safe(_targets(output, folder), inputs)
-    input_snapshots = {str(path): _sha(path) for path in [source, *edits['input_paths']]}
+    inputs = list(dict.fromkeys([source, *edit_inputs, *policy_inputs, *map(Path, _input_paths)]))
+    _assert_inputs_safe(_targets(output, folder, case_files), inputs)
+    _assert_case_profile(folder, profile)
+    input_snapshots = {str(path): _sha(path) for path in [source, *edit_inputs]}
     if policy_path is not None:
         input_snapshots[str(policy_path)] = policy_hash
     code = _code_hash(['fusion_pipeline.py', 'corrections.py', 'fusion.py', 'auto_sam.py',
                        'fusion_models.py', 'grouping.py', 'filters.py', 'pipeline.py', 'denoisers.py', 'semantic_repair.py',
                        '../denoise.py', '../l0_cuda.py', '../tiled_inference.py'])
-    device = str(getattr(models, 'device', 'cpu'))
+    device = str(device if device is not None else getattr(models, 'device', 'cpu'))
     stage('candidate')
     denoiser_config = describe_denoiser(denoiser, device, sr_fn=sr_fn, downscale=downscale)
     l0_implementation = (json.loads(json.dumps(_l0_callable_signature(l0_fn), allow_nan=False))
@@ -303,94 +334,102 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     if uses_sr(denoiser) and sr_fn is None:
         sr_model_path = Path(denoiser_config['model']['path']).resolve()
         inputs.append(sr_model_path)
-        _assert_inputs_safe(_targets(output, folder), inputs)
+        _assert_inputs_safe(_targets(output, folder, case_files), inputs)
         if sr_model_path.is_file():
             model_digest = _sha(sr_model_path)
             if model_digest != denoiser_config['model']['expected_sha256']:
                 raise ValueError('Denoiser model checksum differs from configured model')
             input_snapshots[str(sr_model_path)] = model_digest
-    stage('analysis')
+    if not whole:
+        stage('analysis')
     parameters = {'profile': profile, 'lambda': float(lam), 'sigma_at_2048': float(sigma),
-                  'strength': float(strength), 'device': device, 'models': str(models.signature),
+                  'strength': float(strength), 'device': device, 'models': None if whole else str(models.signature),
                   'structure_protection': structure_protection, 'restoration_gain': restoration_gain,
                   'implementation': code, 'policy': policy, 'policy_sha256': policy_hash,
                   'l0_implementation': l0_implementation,
                   'l0_enabled': uses_l0(denoiser),
                   'denoiser': denoiser, 'denoiser_config': denoiser_config}
-    fingerprint = _digest({'source_sha256': input_hash, 'parameters': parameters, 'edits': edits['hashes']})
+    fingerprint = _digest({'source_sha256': input_hash, 'parameters': parameters, 'edits': edit_hashes})
     warnings = []
-    resumed = _resume(folder, fingerprint, warnings, WORKBENCH_FILES if _workbench else OUTPUT_FILES)
+    resumed = _resume(folder, fingerprint, warnings, WORKBENCH_FILES if _workbench else case_files)
     if resumed is not None:
         if any(_sha(path) != digest for path, digest in input_snapshots.items()):
             raise RuntimeError('Source, edits or policy changed while processing; cached result not reused')
         resumed['split'] = split
         return resumed
     started = time.perf_counter()
-    segment_rgb = rgb
-    if original_alpha is not None:
-        alpha = original_alpha.astype(np.float32)[..., None] / 255
-        segment_rgb = np.rint(rgb * alpha + 255 * (1 - alpha)).astype(np.uint8)
-    evidence_identity = {'source_sha256': input_hash, 'models': str(models.signature), 'device': device,
-        'preprocessing': 'exif-original-grid-white-alpha-v1', 'dual_view': profile == 'fusion',
-        'see_views': ['white', 'original'] if profile == 'fusion' else ['white'],
-        'code': _code_hash(['fusion_models.py', 'fusion_pipeline.py', 'pipeline.py'])}
-    evidence = None; evidence_hit = False
-    if _workbench:
-        # The editor uses the final grid, so bulk inference arrays and automatic
-        # SAM proposals only need to live until the masks have been resolved.
-        evidence = models.segment_evidence(segment_rgb, dual_view=True)
-        _validate_evidence(evidence, rgb.shape[:2], True)
-    elif profile == 'reference':
-        # Canonical white labels are identical in single/full evidence. Reuse
-        # an existing validated full cache, without requesting a new dual view.
-        full_identity = dict(evidence_identity, dual_view=True, see_views=['white', 'original'])
-        evidence, evidence_hit = _cached(output, 'evidence', full_identity, None,
-            lambda value: _validate_evidence(value, rgb.shape[:2], True), warnings, inputs)
-        if evidence_hit:
-            evidence_identity = full_identity
-    if evidence is None:
-        evidence, evidence_hit = _cached(output, 'evidence', evidence_identity,
-            lambda: models.segment_evidence(segment_rgb, dual_view=profile == 'fusion'),
-            lambda value: _validate_evidence(value, rgb.shape[:2], profile == 'fusion'), warnings, inputs)
-    candidate_models = models
-    if not _workbench:
-        candidate_models = _CandidateCache(models, output, dict(evidence_identity, policy=policy,
-            edits=edits['hashes'], sam_code=_code_hash(['auto_sam.py', 'corrections.py'])), warnings, inputs)
-    if profile == 'reference':
-        regions = reference_regions(evidence)
-        regions['policy'] = dict(policy, profile='reference')
+    if whole:
+        protected = (original_alpha == 0 if original_alpha is not None
+                     else np.zeros(rgb.shape[:2], dtype=bool))
+        allowed = ~protected
     else:
-        regions = fuse_evidence(evidence, policy=policy)
-        regions = refine_regions(segment_rgb, evidence, regions, candidate_models, policy=policy)
-    _validate_regions(regions, rgb.shape[:2])
-    manual_masks, manual_records = _manual_sam(segment_rgb, edits, candidate_models)
-    regions = apply_corrections(regions, edits, manual_masks)
-    regions['sam_records'] = [*regions.get('sam_records', []), *manual_records]
-    unknown = regions['person_labels'] == 255
-    suspected_objects = regions.get('suspected_objects', np.zeros_like(unknown))
-    suspected_objects &= ~regions['objects']
-    # The default scope stays skin/face/hair, even if an upstream allowed mask is broader.
-    default_scope = np.isin(regions['person_labels'], [1, 2, 3])
-    reviewed_allow = edits['allow_mask'].copy()
-    for entry, mask in manual_masks:
-        if entry['action'] == 'allow':
-            reviewed_allow |= mask
-    regions['allowed'] &= default_scope | reviewed_allow
-    regions['protected'] |= unknown | regions['objects']
-    if original_alpha is not None:
-        regions['protected'] |= original_alpha == 0
-    regions['allowed'] &= ~regions['protected']
-    release = getattr(models, 'release', None)
-    if release is not None:
-        release()
+        segment_rgb = rgb
+        if original_alpha is not None:
+            alpha = original_alpha.astype(np.float32)[..., None] / 255
+            segment_rgb = np.rint(rgb * alpha + 255 * (1 - alpha)).astype(np.uint8)
+        evidence_identity = {'source_sha256': input_hash, 'models': str(models.signature), 'device': device,
+            'preprocessing': 'exif-original-grid-white-alpha-v1', 'dual_view': profile == 'fusion',
+            'see_views': ['white', 'original'] if profile == 'fusion' else ['white'],
+            'code': _code_hash(['fusion_models.py', 'fusion_pipeline.py', 'pipeline.py'])}
+        evidence = None; evidence_hit = False
+        if _workbench:
+            # The editor uses the final grid, so bulk inference arrays and automatic
+            # SAM proposals only need to live until the masks have been resolved.
+            evidence = models.segment_evidence(segment_rgb, dual_view=True)
+            _validate_evidence(evidence, rgb.shape[:2], True)
+        elif profile == 'reference':
+            # Canonical white labels are identical in single/full evidence. Reuse
+            # an existing validated full cache, without requesting a new dual view.
+            full_identity = dict(evidence_identity, dual_view=True, see_views=['white', 'original'])
+            evidence, evidence_hit = _cached(output, 'evidence', full_identity, None,
+                lambda value: _validate_evidence(value, rgb.shape[:2], True), warnings, inputs)
+            if evidence_hit:
+                evidence_identity = full_identity
+        if evidence is None:
+            evidence, evidence_hit = _cached(output, 'evidence', evidence_identity,
+                lambda: models.segment_evidence(segment_rgb, dual_view=profile == 'fusion'),
+                lambda value: _validate_evidence(value, rgb.shape[:2], profile == 'fusion'), warnings, inputs)
+        candidate_models = models
+        if not _workbench:
+            candidate_models = _CandidateCache(models, output, dict(evidence_identity, policy=policy,
+                edits=edits['hashes'], sam_code=_code_hash(['auto_sam.py', 'corrections.py'])), warnings, inputs)
+        if profile == 'reference':
+            regions = reference_regions(evidence)
+            regions['policy'] = dict(policy, profile='reference')
+        else:
+            regions = fuse_evidence(evidence, policy=policy)
+            regions = refine_regions(segment_rgb, evidence, regions, candidate_models, policy=policy)
+        _validate_regions(regions, rgb.shape[:2])
+        manual_masks, manual_records = _manual_sam(segment_rgb, edits, candidate_models)
+        regions = apply_corrections(regions, edits, manual_masks)
+        regions['sam_records'] = [*regions.get('sam_records', []), *manual_records]
+        unknown = regions['person_labels'] == 255
+        suspected_objects = regions.get('suspected_objects', np.zeros_like(unknown))
+        suspected_objects &= ~regions['objects']
+        # The default scope stays skin/face/hair, even if an upstream allowed mask is broader.
+        default_scope = np.isin(regions['person_labels'], [1, 2, 3])
+        reviewed_allow = edits['allow_mask'].copy()
+        for entry, mask in manual_masks:
+            if entry['action'] == 'allow':
+                reviewed_allow |= mask
+        regions['allowed'] &= default_scope | reviewed_allow
+        regions['protected'] |= unknown | regions['objects']
+        if original_alpha is not None:
+            regions['protected'] |= original_alpha == 0
+        regions['allowed'] &= ~regions['protected']
+        release = getattr(models, 'release', None)
+        if release is not None:
+            release()
     if _workbench:
         grid = (regions['person_labels'], regions['objects'], unknown, suspected_objects)
         del evidence, regions, segment_rgb
     else:
+        if not whole:
+            allowed, protected = regions['allowed'], regions['protected']
         scale = min(rgb.shape[:2]) / 2048
         effective_sigma = float(sigma) * scale
-        weight = build_weight(regions['allowed'], regions['protected'], rgb,
-            feather_radius=16 * scale, structure_radius=5 * scale, gradient_threshold=4,
+        weight = build_weight(allowed, protected, rgb,
+            feather_radius=0 if whole else 16 * scale, structure_radius=5 * scale, gradient_threshold=4,
             structure_protection=structure_protection)
         weight *= np.float32(strength); weight[weight < 1 / 255] = 0
     stage('candidate')
@@ -438,7 +477,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     report = {'id': str(case_id), 'folder': str(case_id), 'status': 'complete', 'profile': profile,
         'source': str(source), 'source_sha256': input_hash, 'size': [rgb.shape[1], rgb.shape[0]],
         'fingerprint': fingerprint, 'parameters': parameters, 'split': split, 'resumed': False,
-        'edits': edits['hashes'], 'input_paths': [str(p) for p in inputs],
+        'edits': edit_hashes, 'input_paths': [str(p) for p in inputs],
         'candidate_cache_identity': candidate_identity, 'candidate_cache_stage': candidate_stage,
         'warnings': warnings}
     if _workbench:
@@ -463,38 +502,45 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     _save_rgb(folder / 'result.png', result, original_alpha, icc)
     np.save(folder / 'weight.npy', weight, allow_pickle=False)
     Image.fromarray(np.ceil(weight * 255).astype(np.uint8)).save(folder / 'weight.png')
-    for name in ('person_labels', 'raw_labels', 'source_map'):
-        Image.fromarray(regions[name]).save(folder / (name + '.png'))
-    for name, mask in [('objects', regions['objects']), ('suspected_objects', suspected_objects),
-                       ('unknown', unknown),
-                       ('conflict', regions['conflict']), ('consensus', regions['consensus']),
-                       ('protected', regions['protected']),
-                       *[('module_' + name, regions['person_labels'] == number) for name, number in MODULES.items()]]:
-        Image.fromarray(mask.astype(np.uint8) * 255).save(folder / (name + '.png'))
+    Image.fromarray(protected.astype(np.uint8) * 255).save(folder / 'protected.png')
+    if not whole:
+        for name in ('person_labels', 'raw_labels', 'source_map'):
+            Image.fromarray(regions[name]).save(folder / (name + '.png'))
+        for name, mask in [('objects', regions['objects']), ('suspected_objects', suspected_objects),
+                           ('unknown', unknown),
+                           ('conflict', regions['conflict']), ('consensus', regions['consensus']),
+                           *[('module_' + name, regions['person_labels'] == number) for name, number in MODULES.items()]]:
+            Image.fromarray(mask.astype(np.uint8) * 255).save(folder / (name + '.png'))
+        diagnostics = {key: value for key, value in regions.items()
+                       if not isinstance(value, np.ndarray) and not key.startswith('_')}
+        diagnostics.update(modules=MODULES, unknown_label=255,
+            note='Unknown predictions remain protected and count as incomplete. Provisional policy awaits reviewed references.')
+        _json(folder / 'regions.json', diagnostics)
     preview = Image.fromarray(result); preview.thumbnail((512, 512), Image.Resampling.LANCZOS)
     preview.save(folder / 'preview.png')
-    diagnostics = {key: value for key, value in regions.items() if not isinstance(value, np.ndarray) and not key.startswith('_')}
-    diagnostics.update(modules=MODULES, unknown_label=255,
-        note='Unknown predictions remain protected and count as incomplete. Provisional policy awaits reviewed references.')
-    _json(folder / 'regions.json', diagnostics)
     if any(_sha(path) != digest for path, digest in input_snapshots.items()):
         raise RuntimeError('Source, edits or policy changed while processing; result not marked complete')
     change = np.any(result != rgb, axis=2)
     report.update({
-        'effective_sigma': effective_sigma, 'provenance': evidence['provenance'],
-        'sam_records': regions['sam_records'],
+        'effective_sigma': effective_sigma,
         'metrics': {'active_percent': float((weight > 0).mean() * 100),
-                    'unknown_percent': float(unknown.mean() * 100), 'objects_percent': float(regions['objects'].mean() * 100),
-                    'suspected_objects_percent': float(suspected_objects.mean() * 100),
                     'changed_pixels': int(change.sum()), 'protected_changed_pixels': 0},
-        'cache_hits': {'evidence': evidence_hit, 'l0': l0_hit, 'candidate': l0_hit, 'sr': sr_hit, 'sam': candidate_models.hits},
+        'cache_hits': {'l0': l0_hit, 'candidate': l0_hit, 'sr': sr_hit},
         'sr_cache_identity': sr_identity,
-        'sam_cache_misses': candidate_models.misses,
         'source_unchanged': True, 'no_neural_training': True, 'quality_accepted': False,
-        'review_status': 'needs_review' if unknown.any() or suspected_objects.any() else 'ready',
-        'quality_status': 'pending_reference_review' if regions.get('policy', {}).get('provisional', True) else 'not_evaluated',
+        'review_status': 'ready', 'quality_status': 'not_evaluated',
         'elapsed_seconds': time.perf_counter() - started,
-        'output_hashes': {name: _sha(folder / name) for name in OUTPUT_FILES}})
+        'output_hashes': {name: _sha(folder / name) for name in case_files}})
+    if not whole:
+        report.update(provenance=evidence['provenance'], sam_records=regions['sam_records'],
+                      sam_cache_misses=candidate_models.misses,
+                      review_status='needs_review' if unknown.any() or suspected_objects.any() else 'ready',
+                      quality_status='pending_reference_review' if regions.get('policy', {}).get('provisional', True)
+                      else 'not_evaluated')
+        report['metrics'].update(unknown_percent=float(unknown.mean() * 100),
+                                 objects_percent=float(regions['objects'].mean() * 100),
+                                 suspected_objects_percent=float(suspected_objects.mean() * 100))
+        report['cache_hits'].update(evidence=evidence_hit, sam=candidate_models.hits)
     _json(folder / 'report.json', report)
     return report
 
@@ -549,17 +595,23 @@ def process_batch(manifest=None, output_root=None, models=None, *, directory=Non
                   edits_dir=None, profile='fusion', split='all', limit=None, lam=None,
                   sigma=12, strength=1, policy=None, policy_path=None, l0_fn=None,
                   denoiser='l0', sr_fn=None, downscale=.6, structure_protection=None,
-                  restoration_gain=None):
+                  restoration_gain=None, device=None):
     """Process directory OR frozen manifest, pairing edits by explicit ID and SHA."""
     if (manifest is None) == (directory is None):
         raise ValueError('Specify exactly one directory or manifest')
-    if profile not in ('fusion', 'reference') or split not in ('tune', 'holdout', 'all'):
+    if profile not in ('fusion', 'reference', 'whole') or split not in ('tune', 'holdout', 'all'):
         raise ValueError('Invalid profile or split')
+    whole = profile == 'whole'
+    if whole and any(value is not None for value in (edits_dir, policy, policy_path)):
+        raise ValueError('Whole-image processing cannot use part corrections or policies')
     structure_protection, restoration_gain = _finish_settings(profile, structure_protection, restoration_gain)
     denoiser, lam = resolve_denoiser(denoiser, lam)
+    _validate_blend_settings(sigma, strength)
     if limit is not None and (type(limit) is not int or limit < 1):
         raise ValueError('limit must be positive')
-    _, policy_path, policy_hash = _load_policy(policy, policy_path)
+    policy_hash = None
+    if not whole:
+        _, policy_path, policy_hash = _load_policy(policy, policy_path)
     output = Path(output_root).resolve()
     manifest_path = None
     if directory is not None:
@@ -597,15 +649,23 @@ def process_batch(manifest=None, output_root=None, models=None, *, directory=Non
     if policy_path is not None:
         all_inputs.append(policy_path)
     if uses_sr(denoiser) and sr_fn is None:
-        configuration = describe_denoiser(denoiser, str(getattr(models, 'device', 'cpu')),
-                                         downscale=downscale)
+        sr_device = str(device if device is not None else getattr(models, 'device', 'cpu'))
+        configuration = describe_denoiser(denoiser, sr_device, downscale=downscale)
         all_inputs.append(Path(configuration['model']['path']).resolve())
+    case_files = WHOLE_OUTPUT_FILES if whole else OUTPUT_FILES
+    folders = set()
     for item in items:
-        _assert_inputs_safe(_targets(output, _case_folder(output, item['id'])), all_inputs)
+        folder = _case_folder(output, _case_id_for_profile(item['id'], profile))
+        if folder in folders:
+            raise ValueError('Batch case IDs resolve to the same output directory')
+        folders.add(folder)
+        _assert_inputs_safe(_targets(output, folder, case_files), all_inputs)
+        _assert_case_profile(folder, profile)
     _assert_inputs_safe([output / name for name in ('records.json', 'records.json.tmp', 'summary.csv', 'summary.csv.tmp')], all_inputs)
     records = []
     for item in items:
-        case_id = str(item['id']); folder = _case_folder(output, case_id)
+        case_id = _case_id_for_profile(item['id'], profile)
+        folder = _case_folder(output, case_id)
         try:
             source = Path(item['path']).resolve()
             if item.get('sha256') and _sha(source) != item['sha256']:
@@ -615,17 +675,18 @@ def process_batch(manifest=None, output_root=None, models=None, *, directory=Non
                 data = json.loads(edit.read_text(encoding='utf-8'))
                 if data.get('source_sha256') != _sha(source):
                     raise ValueError('Batch edits ID matched but source_sha256 differs')
-            record = process_image(source, output, models, profile=profile, case_id=case_id,
+            record = process_image(source, output, models, profile=profile, case_id=str(item['id']),
                 lam=lam, sigma=sigma, strength=strength, edits_path=edit, split=item.get('split', ''),
                 policy=policy, policy_path=policy_path, l0_fn=l0_fn, denoiser=denoiser, sr_fn=sr_fn,
                 downscale=downscale, structure_protection=structure_protection,
-                restoration_gain=restoration_gain, _input_paths=all_inputs)
+                restoration_gain=restoration_gain, device=device, _input_paths=all_inputs)
         except Exception as error:
             record = {'id': case_id, 'folder': case_id, 'status': 'error', 'profile': profile,
                 'split': item.get('split', ''), 'source': str(item['path']),
                 'input_paths': [str(path) for path in all_inputs],
                 'error': type(error).__name__ + ': ' + str(error), 'no_neural_training': True}
             _assert_inputs_safe([folder / 'report.json', folder / 'report.json.tmp'], all_inputs)
+            _assert_case_profile(folder, profile)
             folder.mkdir(parents=True, exist_ok=True); _json(folder / 'report.json', record)
         records.append(record)
         write_records(output, records, input_paths=all_inputs)

@@ -83,19 +83,40 @@ class FusionPipelineTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_image(self, **kwargs):
+    def run_image(self, *, case_id='case', **kwargs):
         from gpt_animeimage_denoise import fusion_pipeline as pipeline
         with mock.patch.object(pipeline, 'fuse_evidence', side_effect=regions), \
              mock.patch.object(pipeline, 'reference_regions', side_effect=regions), \
              mock.patch.object(pipeline, 'refine_regions', side_effect=lambda rgb, ev, reg, models, policy=None: reg):
             return pipeline.process_image(self.source, self.output, self.models,
-                                          case_id='case', l0_fn=self.l0, denoiser='l0', **kwargs)
+                                          case_id=case_id, l0_fn=self.l0, denoiser='l0', **kwargs)
 
     def edit(self, **values):
         path = self.root / 'edit.json'
         path.write_text(json.dumps(dict(version=2, source_sha256=hashlib.sha256(self.source.read_bytes()).hexdigest(),
                                        size=[40, 32], **values)), encoding='utf-8')
         return path
+
+    def test_whole_manifest_cannot_overwrite_a_segmented_case_with_the_same_output_id(self):
+        from gpt_animeimage_denoise import fusion_pipeline as pipeline
+
+        self.run_image(case_id='sample-whole')
+        case = self.output / 'sample-whole'
+        report = (case / 'report.json').read_bytes()
+        result = (case / 'result.png').read_bytes()
+        manifest = {'items': [{'id': 'sample', 'path': str(self.source), 'status': 'eligible'}]}
+        with self.assertRaisesRegex(ValueError, 'already belongs to'):
+            pipeline.process_batch(manifest, self.output, None, profile='whole', l0_fn=self.l0)
+        self.assertEqual((case / 'report.json').read_bytes(), report)
+        self.assertEqual((case / 'result.png').read_bytes(), result)
+
+    def test_whole_batch_rejects_invalid_sigma_before_writing_cases(self):
+        from gpt_animeimage_denoise import fusion_pipeline as pipeline
+
+        manifest = {'items': [{'id': 'sample', 'path': str(self.source), 'status': 'eligible'}]}
+        with self.assertRaisesRegex(ValueError, 'sigma must be'):
+            pipeline.process_batch(manifest, self.output, None, profile='whole', sigma=float('nan'))
+        self.assertFalse(self.output.exists())
 
     def test_protected_unknown_objects_and_nondefault_modules_are_unchanged(self):
         report = self.run_image()

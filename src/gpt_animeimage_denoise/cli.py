@@ -17,19 +17,21 @@ def _fraction(value):
 
 
 def _model_args(parser):
-    assets_root = model_root()
     parser.epilog = ('Set GPT_ANIMEIMAGE_DENOISE_MODEL_DIR to choose the model root. '
                      'It defaults to ./models relative to the current directory.')
     parser.add_argument('--device', default='auto', help='auto, cpu, cuda or cuda:N')
-    parser.add_argument('--assets', type=Path, default=assets_root / 'v2',
+    parser.add_argument('--assets', type=Path,
                         help='Region model directory (defaults to <model root>/v2)')
-    parser.add_argument('--anime-assets', type=Path, default=assets_root / 'AnimeSeg',
+    parser.add_argument('--anime-assets', type=Path,
                         help='AnimeSeg model directory (defaults to <model root>/AnimeSeg)')
     parser.add_argument('--lambda', '--l0', dest='lam', type=float, default=None,
                         help='L0 strength; defaults to 0.0005 or the named L0 preset')
     parser.add_argument('--sigma', type=float, default=12, help='Residual sigma at short-edge 2048')
-    parser.add_argument('--profile', choices=['reference', 'fusion'], default='fusion',
-                        help='Processing profile (default: fusion)')
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument('--profile', choices=['reference', 'fusion'], default='fusion',
+                          help='Part-segmentation profile (default: fusion)')
+    profiles.add_argument('--whole', dest='profile', action='store_const', const='whole',
+                          help='Denoise the whole visible image without part segmentation')
     parser.add_argument('--strength', type=_fraction, default=1, help='Blend strength in 0..1')
     parser.add_argument('--structure-protection', type=_fraction,
                         help='Automatic line protection in 0..1 (fusion default 0.2, reference default 1)')
@@ -57,7 +59,7 @@ def main(argv=None):
     inventory.add_argument('--prior-seen', action='append', default=[],
                            help='Previously seen filename or task prefix (repeatable)')
 
-    process = commands.add_parser('process', help='Denoise one image by character region',
+    process = commands.add_parser('process', help='Denoise one image by part or over the whole image',
                                   description='Save result.png, weight.png, and report.json in a case directory.')
     process.add_argument('input', type=Path, help='Source image to process')
     process.add_argument('--out', type=Path, required=True, help='Output root for the case directory and cache')
@@ -89,6 +91,12 @@ def main(argv=None):
     _model_args(batch)
 
     args = parser.parse_args(argv)
+    if getattr(args, 'profile', None) == 'whole':
+        part_options = ['--' + name.replace('_', '-')
+                        for name in ('assets', 'anime_assets', 'policy', 'edits', 'edits_dir')
+                        if getattr(args, name, None) is not None]
+        if part_options:
+            parser.error('--whole cannot be combined with ' + ', '.join(part_options))
     try:
         if args.command == 'ui':
             from .workbench import launch_workbench
@@ -115,16 +123,27 @@ def main(argv=None):
         device = ('cuda' if torch.cuda.is_available() else 'cpu') if args.device == 'auto' else args.device
         if device != 'cpu' and not device.startswith('cuda'):
             raise ValueError('device must be auto/cpu/cuda/cuda:N')
-        if device.startswith('cuda') and not torch.cuda.is_available():
-            raise RuntimeError('CUDA is unavailable; select --device cpu')
+        if device.startswith('cuda'):
+            index = torch.device(device).index
+            if not torch.cuda.is_available():
+                raise RuntimeError('CUDA is unavailable. Select --device cpu.')
+            if index is not None and index >= torch.cuda.device_count():
+                raise ValueError(f'CUDA device {index} is unavailable')
 
-        from .fusion_models import FusionModels
         from .fusion_pipeline import process_batch, process_image, write_records
 
         options = dict(profile=args.profile, strength=args.strength, lam=args.lam, sigma=args.sigma,
                        policy_path=args.policy, denoiser=args.denoiser, downscale=args.downscale,
                        structure_protection=args.structure_protection, restoration_gain=args.restoration_gain)
-        models = FusionModels(args.assets, device, anime_assets=args.anime_assets)
+        models = None
+        if args.profile == 'whole':
+            options['device'] = device
+        else:
+            from .fusion_models import FusionModels
+
+            assets_root = model_root()
+            models = FusionModels(args.assets or assets_root / 'v2', device,
+                                  anime_assets=args.anime_assets or assets_root / 'AnimeSeg')
         try:
             if args.command == 'batch':
                 records = process_batch(args.manifest, args.out, models, directory=args.directory,
@@ -138,7 +157,8 @@ def main(argv=None):
                               'output': str(args.out / result['folder'])}, ensure_ascii=False))
             return 0
         finally:
-            models.release()
+            if models is not None:
+                models.release()
     except Exception as error:
         print(type(error).__name__ + ': ' + str(error), file=sys.stderr)
         return 1

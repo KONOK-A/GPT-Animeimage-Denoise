@@ -42,6 +42,19 @@
 
 ## 整图去噪
 
+给 `process` 或 `batch` 加 `--whole`，即可跳过部位分区和分区模型。默认纯 L0 无需模型权重。选择 ESRGAN 或 APISR 时只需对应的降噪模型。
+
+```powershell
+.\.venv\Scripts\gaid.exe process .\image.png --out .\outputs\whole --whole
+.\.venv\Scripts\gaid.exe batch --directory .\images --out .\outputs\whole-batch --whole
+```
+
+全图可见像素均可参与降噪，`--method`、`--strength`、线条保护和渐变恢复等设置照常生效。完全透明的像素保持原状，成品保留定向后的原尺寸、Alpha 和 ICC。部位校正、分区路径和 `--profile` 用于部位分区模式。
+
+整图案例以 `-whole` 结尾。`result.png`、`weight.png` 和 `report.json` 位于案例目录，报告中的 `profile` 为 `whole`。可以用 `preview` 从同一案例调整强度。
+
+### 独立 `gaid-whole` 入口
+
 ```powershell
 .\.venv\Scripts\gaid-whole.exe .\image.png --out .\outputs\whole --method l0_0.0005 --device cpu
 ```

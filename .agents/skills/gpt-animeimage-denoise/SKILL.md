@@ -17,7 +17,7 @@ description: Use the local GPT AnimeImage Denoise tool to reduce fish-scale arti
 
 使用源码仓库内的入口时，GAID 仓库是 `SKILL.md` 所在目录向上的第三级目录。使用这个仓库的 `.venv` 解释器和 `models/`，或机器上已配置的 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR`。用户级安装路径移动或失效时，用有效的 GAID 环境重新运行该仓库的 `tools/install_agent_skill.py`。
 
-GAID CLI 从 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR` 读取模型根目录。变量未设置时，默认用调用目录下的 `./models`。`process` 和 `batch` 的分区模型目录默认为 `<模型根目录>/v2` 与 `<模型根目录>/AnimeSeg`，可分别用 `--assets` 和 `--anime-assets` 指定。
+GAID CLI 从 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR` 读取模型根目录。变量未设置时，默认用调用目录下的 `./models`。按部位处理时，`process` 和 `batch` 的分区模型目录默认为 `<模型根目录>/v2` 与 `<模型根目录>/AnimeSeg`，可分别用 `--assets` 和 `--anime-assets` 指定。
 
 ## 查询 CLI 和创建清单
 
@@ -62,6 +62,14 @@ $result = Join-Path $case.output 'result.png'
 
 批量处理也用同一个解释器和模型路径。单图命令结束后，读取最后一行 JSON 的 `output` 取得案例目录。`result.png` 是全尺寸成品，`original.png` 是同方向的原图。`weight.png` 越亮表示降噪权重越高，黑色处保持原图。`report.json` 记录输入、参数和状态。报错时查看 stderr，遇到 CUDA 不可用或显存不足可以改用 `--device cpu`。
 
+## 整图去噪
+
+用户要求整图降噪或跳过部位分区时，把上述执行行改成 `$log = & $python @gaidArgs process $source --out $runDir --whole`。批量处理可在 `batch` 后加同一选项，并沿用已定位的解释器、模型路径和任务目录。
+
+- `--whole` 默认用纯 L0，无需模型权重。指定 `esrgan`、`esrgan-l0` 或 `apisr` 时只使用相应的降噪模型。
+- 全图可见像素都可参与处理。`--strength`、线条保护和渐变恢复照常生效。结果保留定向后的原尺寸、Alpha 和 ICC，完全透明像素保持原状。
+- 整图案例以 `-whole` 结尾，`report.json` 的 `profile` 为 `whole`。用 `result.png` 交付成品，必要时用 `preview` 减轻强度，并检查背景纹理、衣料和线条。
+
 ## 核对、微调、交付
 
 打开成品，核对宽高与定向后的原图和报告 `size` 一致。源图带有 Alpha 或 ICC 色彩配置时一并核对。逐张在原尺寸下比较 `original.png` 和 `result.png` 的同坐标裁片，既看平坦色面上的鱼鳞纹是否减轻，也看发丝、线稿、高光和渐变是否保真。局部试算时给裁片四周留出上下文，比较中央区域，再回到整图成品复核。
@@ -89,5 +97,3 @@ $result = Join-Path $case.output 'result.png'
 3. 比较返修区域与上一版的同位置裁片，并逐像素验证返修蒙版为零处与上一版一致。首次降噪时，以定向后的原图核对降噪权重为零的像素。
 
 命令行处理或预览时核对单图状态 `complete`，工作台导出时确认当前成品 B 已更新。给出选定的原尺寸 PNG 路径或可点击链接，说明处理的部位和采用的设置。若只能检查文件和权重，或某处仍有明显纹理，说明实际核对范围和剩余问题。默认保留源文件和案例，用户需要时再附报告和权重图。
-
-用户明确希望整图平滑时，先检查源图的 EXIF 方向。带旋转或镜像方向标记时，用 `PIL.ImageOps.exif_transpose` 将方向写入像素并另存副本，再把副本作为输入。用同一个解释器调用整图入口 `& $python -P -X utf8 -m denoise $source --out $runDir --method l0_0.0005`，无需分区和超分模型。输出 `<输入文件名去掉扩展名>_l0_0.0005.png` 后，核对宽高与定向后的原图一致。此方法输出 RGB，去掉透明通道和 ICC。整图处理仍需保留这些信息时，在工作台手动设定处理范围并导出。其他参数见 GAID 仓库的 `docs/cli.md`。

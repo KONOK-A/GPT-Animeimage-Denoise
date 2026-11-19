@@ -25,8 +25,8 @@ def preview_case(case_dir, output, *, strength=None, restoration_gain=None, sigm
     report_path = case / 'report.json'
     cache = (case.parent / '.cache').resolve()
     report = json.loads(report_path.read_text(encoding='utf-8'))
-    if report.get('status') != 'complete' or report.get('profile') not in ('fusion', 'reference'):
-        raise ValueError('Preview requires a completed fusion or reference case directory')
+    if report.get('status') != 'complete' or report.get('profile') not in ('fusion', 'reference', 'whole'):
+        raise ValueError('Preview requires a completed GAID case directory')
     if not report.get('candidate_cache_identity') or not report.get('candidate_cache_stage'):
         raise ValueError('Preview requires the exact float candidate cache; run process again for this source')
 
