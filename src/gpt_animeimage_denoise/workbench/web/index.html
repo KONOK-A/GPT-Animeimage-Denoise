@@ -23,6 +23,8 @@
 </head>
 <body data-mode="review">
   <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M6.5 10h.5m3 0h.5m3 0h.5m3 0h.5M8 14h8"/></symbol>
+    <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5m0-8h.01"/></symbol>
     <symbol id="icon-open" viewBox="0 0 24 24"><path d="M3 7V5h6l2 2h10v3M3 9v10h16l3-9H7l-4 9"/></symbol>
     <symbol id="icon-undo" viewBox="0 0 24 24"><path d="M9 5 4 10l5 5m-4-5h8a6 6 0 0 1 6 6v3"/></symbol>
     <symbol id="icon-redo" viewBox="0 0 24 24"><path d="m15 5 5 5-5 5m4-5h-8a6 6 0 0 0-6 6v3"/></symbol>
@@ -60,7 +62,7 @@
       </div>
       <div class="document-actions">
         <input id="file" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,image/png,image/jpeg,image/webp,image/bmp,image/tiff" hidden>
-        <button id="open" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
+        <button id="open" class="button" type="button" title="打开图片（Ctrl+O）" aria-keyshortcuts="Control+O Meta+O" disabled><svg aria-hidden="true"><use href="#icon-open"/></svg>打开</button>
         <details id="recent-panel" class="popover">
           <summary id="recent-toggle" class="button"><svg aria-hidden="true"><use href="#icon-recent"/></svg>近期</summary>
           <div class="recent-menu">
@@ -88,7 +90,7 @@
         </div>
       </details>
       <div class="top-export">
-        <button id="download" class="button primary" type="button" disabled><svg aria-hidden="true"><use href="#icon-download"/></svg><span>导出 PNG</span></button>
+        <button id="download" class="button primary" type="button" aria-keyshortcuts="Control+S Meta+S" disabled><svg aria-hidden="true"><use href="#icon-download"/></svg><span>导出 PNG</span></button>
         <details id="export-panel" class="popover export-panel" hidden>
           <summary id="more-actions" class="button" aria-label="更多导出选项">⌄</summary>
           <div class="export-list">
@@ -104,10 +106,10 @@
   <main id="workspace" class="workspace">
     <div class="workspace-navigation">
       <nav id="workspace-modes" class="workspace-modes" aria-label="工作台视图">
-        <button id="back-to-flow" class="node-back" type="button" hidden>返回流程</button>
+        <button id="back-to-flow" class="node-back" type="button" title="返回编辑流程（F）" hidden>返回流程</button>
         <h1 id="node-title" class="node-title" aria-current="page" tabindex="-1" hidden></h1>
-        <button type="button" data-mode="review" aria-pressed="true" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品检查</button>
-        <button type="button" data-mode="flow" aria-pressed="false" disabled><svg aria-hidden="true"><use href="#icon-flow"/></svg>编辑流程</button>
+        <button type="button" data-mode="review" aria-pressed="true" title="成品检查（R）" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品检查</button>
+        <button type="button" data-mode="flow" aria-pressed="false" title="编辑流程（F）" disabled><svg aria-hidden="true"><use href="#icon-flow"/></svg>编辑流程</button>
         <button id="inspector-toggle" type="button" aria-controls="inspector" aria-expanded="false">参数</button>
       </nav>
       <div class="statusbar">
@@ -118,7 +120,14 @@
           <button id="conflict-local" type="button" hidden>保留本页修改</button>
           <button id="conflict-remote" type="button" hidden>载入已保存版本</button>
         </div>
-        <span id="viewer-hint" hidden>滚轮缩放，空格拖动画布</span>
+        <div class="status-actions">
+          <span id="viewer-hint" hidden>滚轮缩放，空格拖动画布</span>
+          <button id="open-shortcuts" type="button" aria-haspopup="dialog" aria-controls="shortcuts-dialog" aria-keyshortcuts="Shift+/" title="查看快捷键（?）">
+            <svg aria-hidden="true"><use href="#icon-keyboard"/></svg>
+            <span>快捷键</span>
+            <kbd aria-hidden="true">?</kbd>
+          </button>
+        </div>
       </div>
     </div>
     <nav id="tools" class="tools" data-placement="docked" aria-label="画布工具" hidden>
@@ -126,11 +135,11 @@
         <svg aria-hidden="true"><use href="#icon-tool-grip"/></svg>
         <svg class="tools-dock-icon" aria-hidden="true"><use href="#icon-tool-dock"/></svg>
       </button>
-      <button data-tool="pan" type="button" aria-pressed="true" aria-label="移动画布" title="移动（按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
+      <button data-tool="pan" type="button" aria-pressed="true" aria-label="移动画布" title="移动画布（H，或按住空格临时移动）"><svg aria-hidden="true"><use href="#icon-pan"/></svg><span>移动</span></button>
       <button data-tool="brush" type="button" aria-pressed="false" aria-label="画笔" title="画笔 B · Shift+滚轮调直径" disabled><svg aria-hidden="true"><use href="#icon-brush"/></svg><span>画笔</span></button>
       <button data-tool="lasso" type="button" aria-pressed="false" aria-label="套索" title="多边形套索 L" disabled><svg aria-hidden="true"><use href="#icon-lasso"/></svg><span>套索</span></button>
       <button data-tool="magnetic" type="button" aria-pressed="false" aria-label="磁性套索" title="磁性套索 G" disabled><svg aria-hidden="true"><use href="#icon-magnetic"/></svg><span>磁性套索</span></button>
-      <button data-tool="sam_object" type="button" aria-pressed="false" aria-label="SAM2 点选" title="SAM2 点选" disabled><svg aria-hidden="true"><use href="#icon-object-point"/></svg><span>SAM2 点选</span></button>
+      <button data-tool="sam_object" type="button" aria-pressed="false" aria-label="SAM2 点选" title="SAM2 点选（S）" disabled><svg aria-hidden="true"><use href="#icon-object-point"/></svg><span>SAM2 点选</span></button>
     </nav>
     <section id="viewer" class="viewer" aria-label="图像画布">
       <div class="viewbar" id="viewbar" hidden>
@@ -145,7 +154,16 @@
           <button data-view="suspected_objects" type="button" aria-pressed="false" disabled hidden>疑似外物</button>
           <button id="show-unknown" class="button unknown-toggle" type="button" aria-pressed="true" hidden><i class="hatch-key" aria-hidden="true"></i>显示待确认</button>
         </div>
-        <button id="peek" type="button" title="按住 X 查看原图，按 Enter 或空格切换预览" aria-pressed="false" disabled><span>按住看原图</span> <kbd>X</kbd></button>
+        <div class="viewbar-tools">
+          <div id="compare-reference" class="comparison-reference" role="group" aria-label="左侧对照" hidden>
+            <span aria-hidden="true">左侧</span>
+            <div class="comparison-reference-options">
+              <button id="compare-reference-original" type="button" title="左侧使用原图，按 A 切换对照" aria-pressed="false">原图</button>
+              <button id="compare-reference-a" type="button" title="左侧使用固定的对照 A，按 A 切换对照" aria-pressed="true">对照 A</button>
+            </div>
+          </div>
+          <button id="peek" type="button" title="按住 X 查看原图，按 Enter 或空格切换预览" aria-pressed="false" disabled><span>按住看原图</span> <kbd>X</kbd></button>
+        </div>
       </div>
       <div class="edit-bar" id="edit-bar" role="group" aria-label="当前工具参数" hidden>
         <label class="action-field" id="action-field"><span>动作</span><select id="lasso-action" aria-label="编辑动作" disabled></select></label>
@@ -238,11 +256,11 @@
       </div>
       <div id="viewer-footer" class="viewer-footer" hidden>
         <div class="zoom-tools" id="zoom-tools" role="group" aria-label="缩放" hidden>
-          <button id="zoom-out" type="button" aria-label="缩小" disabled>−</button>
+          <button id="zoom-out" type="button" aria-label="缩小" title="缩小（-）" disabled>−</button>
           <output id="zoom-level" aria-label="缩放比例">—</output>
-          <button id="zoom-in" type="button" aria-label="放大" disabled>+</button>
-          <button id="fit" type="button" disabled>适合</button>
-          <button id="actual" type="button" title="按原像素显示" disabled>1:1</button>
+          <button id="zoom-in" type="button" aria-label="放大" title="放大（+ 或 =）" disabled>+</button>
+          <button id="fit" type="button" title="适合窗口（0）" aria-keyshortcuts="0" disabled>适合</button>
+          <button id="actual" type="button" title="按原像素显示（1）" aria-keyshortcuts="1" disabled>1:1</button>
         </div>
       </div>
       <div id="notice" class="notice" role="alert" hidden>
@@ -262,7 +280,7 @@
               <div><span class="version-letter" aria-hidden="true">B</span><span id="comparison-b">等待第一份成品</span></div>
             </div>
             <button id="pin" class="button" type="button" disabled><svg aria-hidden="true"><use href="#icon-pin"/></svg>固定当前成品为对照 A</button>
-            <p>固定后，左侧保留这一版，右侧显示后续调整。</p>
+            <p>固定后，可在画布上方切换左侧对照。</p>
           </div>
           <div class="panel view-help">
             <h2>检查细节</h2>
@@ -289,6 +307,30 @@
             <div id="part-targets" class="part-targets"></div>
           </div>
         </section>
+        <section id="range-inspector" aria-label="处理范围设置" hidden>
+          <div id="range-scope" class="panel range-scope">
+            <div class="section-heading"><h2 id="range-scope-heading">参与处理</h2><span id="coverage"></span></div>
+            <div class="scope-actions" role="group" aria-label="初始处理范围">
+              <button data-scope="auto" type="button" disabled>默认</button>
+              <button data-scope="empty" type="button" disabled>清空</button>
+              <button data-scope="all" type="button" disabled>整图</button>
+            </div>
+            <div class="range-part-table">
+              <div class="range-part-header">
+                <span>部位</span>
+                <span>强度</span>
+                <button id="range-protection-all" class="range-part-lock" type="button" aria-label="锁定全部分区" title="锁定全部分区" disabled>
+                  <svg aria-hidden="true"><use id="range-protection-icon" href="#icon-unlock"/></svg>
+                </button>
+              </div>
+              <div id="range-part-list" role="group" aria-labelledby="range-scope-heading"></div>
+            </div>
+            <div class="text-actions range-scope-actions">
+              <button id="invert" type="button" class="text-button" title="反转未锁定部位的选区" disabled>反选</button>
+              <button id="reset" type="button" class="text-button" title="清除未锁定部位的手动补入、移出和反选，按当前勾选恢复自动处理范围。Ctrl+Z 可撤销。" disabled>按部位恢复</button>
+            </div>
+          </div>
+        </section>
         <section id="edit-inspector" aria-label="选区工具" hidden>
           <section id="brush-panel" class="panel edit-panel">
             <div class="section-heading"><h2 id="current-tool-name">移动画布</h2><span id="tool-hint">当前工具</span></div>
@@ -303,8 +345,7 @@
               <button id="open-unknown-parts" class="text-button" type="button" hidden>到部位分区修正归属</button>
             </div>
             <div id="allow-protected-row" class="allow-protected-row" hidden>
-              <label for="allow-protected"><input type="checkbox" id="allow-protected" disabled>允许补选模型建议保留的区域</label>
-              <p>只对画笔或套索标出的区域生效。完全透明的像素仍保留。</p>
+              <label for="allow-protected" title="补选选区内的模型保留区域。完全透明的像素仍保留。"><input type="checkbox" id="allow-protected" disabled>允许补选自动保留区域</label>
             </div>
             <div id="lasso-options" hidden>
               <div id="magnetic-options" hidden>
@@ -330,8 +371,8 @@
             </div>
             <p id="sam-status" class="panel-hint" role="status"></p>
             <div class="sam-actions">
-              <button id="sam-preview" class="button" type="button" disabled>生成预览</button>
-              <button id="sam-apply" class="button primary" type="button" disabled>应用选区</button>
+              <button id="sam-preview" class="button" type="button" title="在画布上按 Enter 生成预览" disabled>生成预览</button>
+              <button id="sam-apply" class="button primary" type="button" title="在画布上再次按 Enter 应用选区" disabled>应用选区</button>
             </div>
             <div class="text-actions">
               <button id="sam-undo-point" class="text-button" type="button" disabled>撤回上一点</button>
@@ -339,40 +380,10 @@
             </div>
           </section>
         </section>
-        <section id="range-inspector" aria-label="处理范围设置" hidden>
-          <details id="range-scope" class="panel range-scope" open>
-            <summary><strong>参与处理的部位</strong><span id="coverage"></span><span id="scope-summary" class="scope-summary"></span></summary>
-            <div class="scope-body">
-              <div class="scope-actions" role="group" aria-label="初始处理范围">
-                <button data-scope="auto" type="button" disabled>默认</button>
-                <button data-scope="empty" type="button" disabled>清空</button>
-                <button data-scope="all" type="button" disabled>整图</button>
-              </div>
-              <p class="panel-hint">勾选部位后，可以在图上补入或移出局部。</p>
-              <div id="modules" class="module-grid"></div>
-              <details class="fold">
-                <summary>分部位强度</summary>
-                <div id="part-strengths" class="part-strengths"></div>
-              </details>
-              <details id="range-protection" class="fold range-locks">
-                <summary id="range-lock-heading">保护分区<span id="range-lock-count"></span></summary>
-                <div class="range-lock-actions">
-                  <p class="panel-hint">手动工具会跳过已锁部位。</p>
-                  <button id="range-protection-all" class="text-button" type="button" disabled>锁定全部</button>
-                </div>
-                <div id="range-part-locks" class="range-lock-grid" role="group" aria-labelledby="range-lock-heading"></div>
-              </details>
-              <div class="text-actions">
-                <button id="invert" type="button" class="text-button" disabled>反选</button>
-                <button id="reset" type="button" class="text-button" disabled>按部位恢复</button>
-              </div>
-            </div>
-          </details>
-        </section>
         <details id="range-history" class="panel range-history" hidden>
           <summary id="change-history-title">手动修改记录</summary>
-          <div class="section-heading">
-            <h2>核对改动</h2>
+          <div id="change-history-toolbar" class="section-heading">
+            <h2 id="change-history-audit-heading">核对改动</h2>
             <button id="show-manual-changes" class="button" type="button" disabled>查看手动改动</button>
           </div>
           <div id="changes-details" hidden>
@@ -393,35 +404,59 @@
         </details>
         <section id="effect-inspector" aria-label="调整效果" hidden>
           <div class="panel">
-            <div class="section-heading"><h2>降噪效果</h2></div>
+            <div class="section-heading effect-heading">
+              <h2>降噪效果</h2>
+              <button id="reset-effect-defaults" class="text-button" type="button" title="将降噪算法、整体强度和高级参数恢复为工作台的内置默认值。" disabled>恢复内置默认值</button>
+            </div>
             <label class="method-field" for="method">降噪算法<select id="method" disabled></select></label>
             <div class="range-row">
               <label for="strength">整体强度</label><output id="strength-value" for="strength">100%</output>
               <input id="strength" type="range" min="0" max="1" step="0.01" disabled>
             </div>
-            <p class="panel-hint">整体强度应用于选中的部位。</p>
-            <div class="presets" role="group" aria-label="快捷参数操作">
-              <button data-preset="soft" type="button" aria-pressed="false" title="只改整体强度为 65%" disabled>强度 65%</button>
-              <button data-preset="strong" id="strong-preset" type="button" aria-pressed="false" title="只改 L0 参数为 0.001" disabled>L0 0.001</button>
-              <button data-preset="standard" type="button" aria-pressed="false" title="恢复标准算法与效果参数" disabled>恢复标准</button>
+            <div class="effect-field-actions">
+              <p class="panel-hint">作用于已选部位。</p>
+              <button id="set-strength-65" class="text-button" type="button" aria-label="将整体强度设为 65%" disabled>设为 65%</button>
             </div>
           </div>
           <details class="panel advanced">
             <summary>高级设置</summary>
             <div class="advanced-fields">
-              <div class="number-grid">
-                <label for="l0" id="l0-field">L0 参数<input id="l0" type="number" min="0.000001" step="any" inputmode="decimal" disabled></label>
+              <div class="effect-algorithm-fields">
+                <div id="l0-field">
+                  <div class="effect-field-actions">
+                    <label for="l0" title="数值越大，平滑越强。">L0 平滑</label>
+                    <button id="set-l0-001" class="text-button" type="button" aria-label="将 L0 平滑设为 0.001" disabled>设为 0.001</button>
+                  </div>
+                  <input id="l0" type="number" min="0.000001" step="any" inputmode="decimal" disabled>
+                </div>
                 <label for="downscale" id="downscale-field">预缩放<input id="downscale" type="number" min="0.01" max="1" step="any" inputmode="decimal" disabled></label>
               </div>
               <div class="range-row">
-                <label for="restoration_gain">渐变恢复</label><output id="restoration_gain-value" for="restoration_gain">25%</output>
-                <input id="restoration_gain" type="range" min="0" max="1" step="0.01" disabled>
+                <div class="effect-parameter-title">
+                  <label for="restoration_gain">渐变恢复</label>
+                  <button id="restoration_gain-help-toggle" class="parameter-help-toggle" type="button" aria-label="渐变恢复说明" aria-controls="restoration_gain-help" aria-expanded="false"><svg aria-hidden="true"><use href="#icon-info"/></svg></button>
+                </div>
+                <output id="restoration_gain-value" for="restoration_gain">25%</output>
+                <input id="restoration_gain" type="range" min="0" max="1" step="0.01" aria-describedby="restoration_gain-help" disabled>
+                <p id="restoration_gain-help" class="effect-help-copy" hidden>补回降噪时削弱的明暗和色彩渐变。数值越高，恢复越多。0% 关闭渐变恢复。</p>
               </div>
               <div class="range-row">
-                <label for="structure_protection">线条保护</label><output id="structure_protection-value" for="structure_protection">20%</output>
-                <input id="structure_protection" type="range" min="0" max="1" step="0.01" disabled>
+                <div class="effect-parameter-title">
+                  <label for="structure_protection">线条保护</label>
+                  <button id="structure_protection-help-toggle" class="parameter-help-toggle" type="button" aria-label="线条保护说明" aria-controls="structure_protection-help" aria-expanded="false"><svg aria-hidden="true"><use href="#icon-info"/></svg></button>
+                </div>
+                <output id="structure_protection-value" for="structure_protection">20%</output>
+                <input id="structure_protection" type="range" min="0" max="1" step="0.01" aria-describedby="structure_protection-help" disabled>
+                <p id="structure_protection-help" class="effect-help-copy" hidden>让识别出的线条和轮廓附近少降噪。数值越高，保护越强。0% 关闭线条保护。</p>
               </div>
-              <label for="sigma">渐变尺度<input id="sigma" type="number" min="0.01" max="256" step="any" inputmode="decimal" disabled></label>
+              <div>
+                <div class="effect-parameter-title">
+                  <label for="sigma">渐变尺度</label>
+                  <button id="sigma-help-toggle" class="parameter-help-toggle" type="button" aria-label="渐变尺度说明" aria-controls="sigma-help" aria-expanded="false"><svg aria-hidden="true"><use href="#icon-info"/></svg></button>
+                </div>
+                <input id="sigma" type="number" min="0.01" max="256" step="any" inputmode="decimal" aria-describedby="sigma-help" disabled>
+                <p id="sigma-help" class="effect-help-copy" hidden>渐变恢复开启时有效。数值越大，越偏向恢复大块平缓的过渡。数值越小，也会补回较细的变化。以图片短边 2048 px 为基准。</p>
+              </div>
             </div>
           </details>
         </section>
@@ -483,6 +518,13 @@
         <button id="prefs-save" type="submit" class="button primary">保存设置</button>
       </footer>
     </form>
+  </dialog>
+  <dialog id="shortcuts-dialog" class="settings-dialog shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <header class="settings-header">
+      <h1 id="shortcuts-title">工作台快捷键</h1>
+      <button id="shortcuts-close" type="button" aria-label="关闭快捷键速查">×</button>
+    </header>
+    <div id="shortcuts-list" class="settings-scroll shortcuts-grid"></div>
   </dialog>
 </body>
 </html>

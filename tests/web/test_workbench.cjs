@@ -68,7 +68,7 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
   for (const [key, values] of [
     ['view', [...html.matchAll(/<button data-view="([^"]+)"/g)].map(([, view]) => view)],
     ['tool', [...html.matchAll(/<button data-tool="([^"]+)"/g)].map(([, tool]) => tool)],
-    ['preset', ['standard', 'soft', 'strong']], ['mode', ['review', 'flow']],
+    ['mode', ['review', 'flow']],
     ['scope', ['auto', 'empty', 'all']], ['theme-option', ['system', 'light', 'dark']],
   ]) {
     nodes[key] = values.map(value => {
@@ -117,10 +117,7 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
         const match = /^(button)?\[data-(.+)\]$/.exec(selector);
         if (match) return match[2] === 'tool' && !match[1]
           ? [...nodes.tool, elements.get('stage')] : nodes[match[2]];
-        const groups = selector.startsWith('#modules') ? ['modules', ...(selector.includes('#part-strengths') ? ['part-strengths'] : [])]
-          : ['part-strengths'];
-        const inputs = groups.flatMap(group => elements.get(group).children.flatMap(label => label.children).filter(node => node?.tagName === 'INPUT'));
-        return selector.endsWith(':checked') ? inputs.filter(input => input.checked) : inputs;
+        return [];
       },
     },
     window: {
@@ -278,14 +275,17 @@ test('the tool handle detaches, clamps, snaps and restores the active tool witho
   assert.equal(h.run('state.tool'), 'lasso');
 });
 
-test('Space on a disclosure does not trigger the canvas pan shortcut', async () => {
+test('a focused disclosure handles Space locally and still allows flow navigation', async () => {
   const h = harness();
   await tick();
   await h.run('openFile(file)');
   let prevented = false;
-  h.window.fire('keydown', { key: ' ', target: new Element('summary'), preventDefault() { prevented = true; } });
+  const summary = new Element('summary');
+  h.window.fire('keydown', { key: ' ', target: summary, preventDefault() { prevented = true; } });
   assert.equal(prevented, false);
   assert.equal(h.run('state.space'), false);
+  h.window.fire('keydown', { key: 'f', target: summary, preventDefault() {} });
+  assert.equal(h.run('state.mode'), 'flow');
 });
 
 test('canvas click bubbling does not reset an in-progress polygon', async () => {
@@ -295,6 +295,132 @@ test('canvas click bubbling does not reset an in-progress polygon', async () => 
   h.run("selectMode('range'); selectTool('lasso'); state.polygon = [[15,16]]");
   h.elements.get('stage').fire('click');
   assert.equal(h.run('state.polygon.length'), 1);
+});
+
+test('shortcut tools match the toolbar and keep the current brush action', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range'); selectTool('exclude'); selectTool('lasso')");
+  const key = (value, extra = {}) => h.window.fire('keydown', { key: value, preventDefault() {}, ...extra });
+  key('b');
+  assert.equal(h.run('state.tool'), 'exclude');
+  key('s');
+  assert.equal(h.run('state.tool'), 'sam_object');
+  key('h');
+  assert.equal(h.run('state.tool'), 'pan');
+  key('i');
+  assert.equal(h.run('state.tool'), 'include');
+  key('d', { isComposing: true });
+  assert.equal(h.run('state.tool'), 'include');
+  key('d', { target: new Element('input') });
+  assert.equal(h.run('state.tool'), 'include');
+  h.run("selectMode('parts')");
+  key('d');
+  assert.equal(h.run('state.tool'), 'remove_part');
+  key('c');
+  assert.equal(h.run('state.tool'), 'classify');
+});
+
+test('keyboard export uses the current displayed B and ignores held-key repeats', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const key = repeat => h.window.fire('keydown', { key: 's', ctrlKey: true, repeat, preventDefault() {} });
+  const exports = () => h.api.requests.filter(item => item.route.includes('/download?view=b'));
+  key(false);
+  await tick();
+  assert.equal(exports().length, 0);
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  key(false);
+  key(true);
+  await tick();
+  assert.deepEqual(exports().map(item => item.route), ['/api/documents/source/download?view=b&revision=0']);
+});
+
+test('keyboard view controls share fit, actual scale and comparison state', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  await h.run('pin()');
+  await tick();
+  const key = (value, target = h.window) => h.window.fire('keydown', { key: value, target, preventDefault() {} });
+  const original = h.elements.get('compare-reference-original'), pinned = h.elements.get('compare-reference-a');
+  original.click();
+  key('a', original);
+  assert.equal(pinned['aria-pressed'], 'true');
+  assert.equal(pinned.focused, true);
+  key('a', h.elements.get('stage'));
+  assert.equal(original.focused, undefined);
+  assert.equal(h.elements.get('left-badge').textContent, '原图');
+  key('1');
+  assert.equal(h.run('layout().scale'), 1);
+  assert.equal(h.run('state.fit'), false);
+  key('+');
+  assert.equal(h.run('layout().scale'), 1.25);
+  key('0');
+  assert.equal(h.run('state.fit'), true);
+  key('f');
+  assert.equal(h.run('state.mode'), 'flow');
+  assert.equal(h.elements.get('node-parts').focused, true);
+  key('r');
+  assert.equal(h.run('state.mode'), 'review');
+  assert.equal(h.elements.get('stage').focused, true);
+  assert.equal(h.elements.get('left-badge').textContent, '原图');
+});
+
+test('clicking the comparison canvas takes keyboard focus', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.run('comparing()'), true);
+  stroke(h, [[200, 120]]);
+  assert.equal(h.elements.get('stage').focused, true);
+});
+
+test('the shortcut guide opens from question mark and takes precedence over workbench commands', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const dialog = h.elements.get('shortcuts-dialog');
+  assert.ok(dialog);
+  h.window.fire('keydown', { key: '?', shiftKey: true, preventDefault() {} });
+  assert.equal(dialog.open, true);
+  h.window.fire('keydown', { key: 'f', preventDefault() {} });
+  assert.equal(h.run('state.mode'), 'review');
+  h.elements.get('shortcuts-close').click();
+  assert.equal(dialog.open, false);
+  h.elements.get('open-shortcuts').click();
+  assert.equal(dialog.open, true);
+});
+
+test('Enter previews and applies a SAM2 selection in separate presses', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  h.run("selectMode('range'); selectTool('sam_object')");
+  stroke(h, [[300, 220]]);
+  const enter = repeat => h.window.fire('keydown', { key: 'Enter', repeat, preventDefault() {} });
+  enter(false);
+  await tick();
+  assert.equal(h.api.requests.filter(item => item.route.endsWith('/sam-selection')).length, 1);
+  assert.equal(h.run('state.draft.cursor'), 0);
+  enter(true);
+  await tick();
+  assert.equal(h.api.requests.filter(item => item.route.endsWith('/sam-selection/apply')).length, 0);
+  enter(false);
+  await tick();
+  assert.equal(h.run('state.draft.edits[0].shape'), 'sam');
 });
 
 test('manual changes are lazy, describe actual counts, and keep the selected tool', async () => {
@@ -424,7 +550,8 @@ test('a saved no-op can be located without changing tool, view or edit history',
   h.run("selectMode('range'); selectTool('exclude'); selectView('changes')");
   await tick();
   assert.match(h.elements.get('changes-status').textContent, /没有净变化/);
-  assert.equal(h.elements.get('change-history-note').hidden, false);
+  assert.equal(h.elements.get('change-history-note').hidden, true);
+  assert.equal(h.elements.get('show-manual-changes').hidden, true);
   h.elements.get('change-history-list').children[0].children[2].click();
   assert.equal(h.run('state.historyLocation'), 0);
   assert.equal(h.elements.get('history-location-label').hidden, false);
@@ -455,10 +582,58 @@ test('quick strength in the effect editor keeps the algorithm and displays the r
   h.run("selectMode('effect')");
   assert.equal(h.run('state.view'), 'result');
   assert.equal(h.run("visibleImage('result') === visibleImage('b')"), true);
-  h.run("state.draft.settings.method = 'esrgan-l0'; state.draft.settings.l0 = .0007; choosePreset('soft')");
+  h.run("state.draft.settings.method = 'esrgan-l0'; state.draft.settings.l0 = .0007; refresh()");
+  const shortcut = h.elements.get('set-strength-65');
+  assert.ok(shortcut, 'overall strength exposes its own shortcut');
+  shortcut.click();
   assert.equal(h.run('state.draft.settings.strength'), .65);
   assert.equal(h.run('state.draft.settings.method'), 'esrgan-l0');
   assert.equal(h.run('state.draft.settings.l0'), .0007);
+  assert.equal(shortcut.disabled, true);
+  assert.equal(shortcut['aria-pressed'], undefined);
+});
+
+test('L0 quick adjustment and the effect reset are scoped separately', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('effect'); state.draft.settings.modules = ['hair']; state.draft.settings.part_strengths = {hair:.6}; refresh()");
+  const reset = h.elements.get('reset-effect-defaults'), l0 = h.elements.get('set-l0-001');
+  assert.ok(reset && l0, 'the effect reset and L0 shortcut are separate actions');
+  assert.equal(reset.disabled, true);
+  l0.click();
+  assert.equal(h.run('state.draft.settings.l0'), .001);
+  assert.equal(l0.disabled, true);
+  assert.equal(reset.disabled, false);
+  reset.click();
+  assert.equal(h.run('state.draft.settings.l0'), .0005);
+  assert.equal(h.run('state.draft.settings.strength'), 1);
+  assert.equal(h.run("state.draft.settings.modules.join(',')"), 'hair');
+  assert.equal(h.run('state.draft.settings.part_strengths.hair'), .6);
+  assert.equal(reset.disabled, true);
+});
+
+test('effect parameter help opens one explanation at a time without adjusting the image', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('effect')");
+  const help = name => h.elements.get(name + '-help');
+  const toggle = name => h.elements.get(name + '-help-toggle');
+  assert.ok(toggle('restoration_gain') && toggle('structure_protection') && toggle('sigma'));
+  const settings = h.run('JSON.stringify(state.draft.settings)');
+  toggle('restoration_gain').click();
+  assert.equal(help('restoration_gain').hidden, false);
+  assert.equal(toggle('restoration_gain')['aria-expanded'], 'true');
+  assert.equal(help('structure_protection').hidden, true);
+  toggle('sigma').click();
+  assert.equal(help('restoration_gain').hidden, true);
+  assert.equal(help('sigma').hidden, false);
+  toggle('sigma').click();
+  assert.equal(help('sigma').hidden, true);
+  assert.equal(toggle('sigma')['aria-expanded'], 'false');
+  assert.equal(h.run('JSON.stringify(state.draft.settings)'), settings);
+  assert.equal(h.run('state.dirty'), false);
 });
 
 test('brush mode has explicit controls and only fetches the visible mask after edits', async () => {
@@ -658,6 +833,59 @@ test('settings save and reload the preference to exit with the last page', async
   assert.equal(field.checked, true);
 });
 
+test('the comparison can switch between original and pinned A and remember the choice', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const group = h.elements.get('compare-reference');
+  assert.ok(group, 'the comparison offers a left reference selector');
+  const original = h.elements.get('compare-reference-original');
+  const pinned = h.elements.get('compare-reference-a');
+  assert.equal(group.hidden, true);
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  await h.run('pin()');
+  await tick();
+  assert.equal(group.hidden, false);
+  assert.equal(pinned['aria-pressed'], 'true');
+  assert.match(h.elements.get('left-badge').textContent, /^A  /);
+  h.run('zoomTo(1.6); state.split = .37; draw()');
+  const viewport = h.run('JSON.stringify([state.zoom, state.fit, state.panX, state.panY, state.split])');
+  original.click();
+  assert.equal(original['aria-pressed'], 'true');
+  assert.equal(h.elements.get('left-badge').textContent, '原图');
+  assert.equal(h.run('state.doc.a.revision'), 0);
+  assert.equal(h.run('state.images.get("b").revision'), 0);
+  assert.equal(h.run('JSON.stringify([state.zoom, state.fit, state.panX, state.panY, state.split])'), viewport);
+  await h.run("openRecent('source')");
+  await tick();
+  assert.equal(h.elements.get('left-badge').textContent, '原图');
+  pinned.click();
+  await tick();
+  assert.match(h.elements.get('left-badge').textContent, /^A  /);
+  assert.equal(h.api.requests.filter(item => item.route.endsWith('/pin')).length, 1);
+});
+
+test('a delayed A frame cannot replace the original after switching references', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  const pending = deferred();
+  h.api.beforeDecode = url => url.includes('view=a') ? pending.promise : undefined;
+  h.api.mutate({ a: { revision: 0, method: 'l0' } });
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  assert.equal(h.elements.get('compare-reference').hidden, false);
+  h.elements.get('compare-reference-original').click();
+  pending.resolve();
+  await tick();
+  assert.equal(h.run("state.images.has('a')"), true);
+  assert.equal(h.elements.get('left-badge').textContent, '原图');
+  assert.equal(h.elements.get('compare-reference-original')['aria-pressed'], 'true');
+});
+
 for (const [mode, editable] of [['parts', 'parts'], ['range', 'weight']]) {
   test(mode + ' comparison combines the original and B even when a pinned A exists', async () => {
     const h = harness();
@@ -676,6 +904,7 @@ for (const [mode, editable] of [['parts', 'parts'], ['range', 'weight']]) {
     view('compare').click();
     await tick();
     assert.equal(h.elements.get('divider').hidden, false);
+    assert.equal(h.elements.get('compare-reference').hidden, true);
     assert.equal(h.elements.get('left-badge').textContent, '原图');
     assert.equal(h.run('JSON.stringify([state.fit, state.zoom, state.panX, state.panY])'), viewport);
     assert.equal(h.api.requests.some(item => item.route.includes('view=a')), false);
@@ -2031,14 +2260,42 @@ test('part protection defaults to known parts and snapshots the switches for eac
   assert.equal(unknown['aria-pressed'], 'true');
 });
 
+test('each range part row keeps its selection, strength and lock independently editable', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.run("selectMode('range')");
+  const list = h.elements.get('range-part-list');
+  assert.ok(list, 'the range controls share one part list');
+  const distinctParts = list.children.map(row => row.dataset.rangePart);
+  assert.equal(new Set(distinctParts).size, 9);
+  const hair = list.children.find(row => row.dataset.rangePart === 'hair');
+  const [member, strength, lock] = hair.children;
+  const [enabled] = member.children, [slider, output] = strength.children;
+  assert.equal(enabled.checked, true);
+  assert.equal(output.textContent, '100%');
+  lock.click();
+  slider.value = '.64';
+  slider.fire('input');
+  assert.equal(output.textContent, '64%');
+  assert.equal(h.run("state.draft.settings.part_strengths.hair"), .64);
+  enabled.checked = false;
+  enabled.fire('change');
+  assert.equal(h.run("state.draft.settings.modules.includes('hair')"), false);
+  assert.equal(lock['aria-pressed'], 'true');
+  const object = list.children.find(row => row.dataset.rangePart === 'object');
+  assert.equal(object.children[0].children.some(child => child.tagName === 'INPUT'), false);
+  assert.equal(object.children[2].dataset.rangeProtectPart, 'object');
+});
+
 test('range locks are independent of classification and snapshot local and bulk edits', async () => {
   const h = harness();
   await tick();
   await h.run('openFile(file)');
   h.run("selectMode('range')");
-  const locks = h.elements.get('range-part-locks');
+  const locks = h.elements.get('range-part-list');
   assert.ok(locks, 'range editing exposes its own locks');
-  const skin = locks.children.find(button => button.dataset.rangeProtectPart === 'skin');
+  const skin = locks.children.find(row => row.dataset.rangePart === 'skin').children[2];
   const all = h.elements.get('range-protection-all');
   assert.equal(skin['aria-pressed'], 'false');
   skin.click();

@@ -41,10 +41,16 @@ for (const button of themeOptions) button.addEventListener('click', () => {
 const canvas = byId('canvas'), stage = byId('stage'), ctx = canvas.getContext('2d');
 const magneticCanvas = byId('magnetic-canvas'), magneticCtx = magneticCanvas.getContext('2d');
 const viewButtons = [...document.querySelectorAll('[data-view]')];
+const comparisonButtons = [
+  ['original', byId('compare-reference-original')], ['a', byId('compare-reference-a')],
+];
 const toolButtons = [...document.querySelectorAll('button[data-tool]')];
-const presetButtons = [...document.querySelectorAll('[data-preset]')];
+const effectActions = [
+  ['soft', byId('set-strength-65')], ['strong', byId('set-l0-001')], ['standard', byId('reset-effect-defaults')],
+];
 const modeButtons = [...document.querySelectorAll('button[data-mode]')];
 const scopeButtons = [...document.querySelectorAll('[data-scope]')];
+const rangeRows = [];
 const numberFields = ['strength', 'l0', 'downscale', 'sigma', 'restoration_gain', 'structure_protection'];
 const MASK_VIEWS = ['weight', 'parts', 'suspected_objects'];
 const SELECTION_ASSETS = [...MASK_VIEWS, 'highlight', 'background_overlay', 'unknown'];
@@ -59,10 +65,20 @@ const actions = {
   parts: { classify: '归入目标部位', remove_part: '移出当前部位', erase: '擦除本步修改' },
   range: { include: '加入处理范围', exclude: '移出处理范围', protect: '局部减弱', mix: '指定原图比例', erase: '擦除本步修改' },
 };
+const toolShortcuts = {
+  h: ['pan', '移动画布'], b: ['brush', '画笔（沿用当前动作）'], l: ['lasso', '套索'],
+  g: ['magnetic', '磁性套索'], s: ['sam_object', 'SAM2 点选'],
+};
+const actionShortcuts = {
+  parts: { c: 'classify', d: 'remove_part', e: 'erase' },
+  range: { i: 'include', d: 'exclude', p: 'protect', m: 'mix', e: 'erase' },
+};
+const zoomShortcuts = { '0': 'fit', '1': 'actual', '+': 'zoom-in', '=': 'zoom-in', '-': 'zoom-out' };
 const state = {
   options: null, doc: null, file: null, draft: null, dirty: false, save: null, saveFailed: false, conflict: null,
   epoch: 0, opening: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0,
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
+  leftReference: 'a',
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
   changesErrors: new Map(), appliedHistory: null, historyLocation: null, historyDisplayKey: '', partFrame: null,
@@ -94,7 +110,12 @@ function viewAsset(view) {
   return state.images.get(view === 'result' ? 'b' : view === 'changes' ? changesKey(state.mode) : view);
 }
 const visibleImage = view => viewAsset(view)?.image;
-const usesPinnedComparison = () => !editingMask() && Boolean(state.doc?.a);
+const canChooseComparisonReference = () => state.view === 'compare' && !editingMask() && Boolean(state.doc?.a);
+const usesPinnedComparison = () => state.leftReference === 'a' && canChooseComparisonReference();
+function pinnedComparisonAsset() {
+  const a = state.images.get('a');
+  return usesPinnedComparison() && a?.revision === state.doc.a.revision ? a : null;
+}
 const selectionPreview = () => state.doc?.selection_preview ?? state.doc?.b;
 function assetSnapshot(view) {
   if (SELECTION_ASSETS.includes(view)) return selectionPreview();
@@ -109,6 +130,7 @@ const pendingKey = id => 'gaid-pending-' + id;
 const protectionKey = id => 'gaid-part-protection-' + id;
 const rangeProtectionKey = id => 'gaid-range-protection-' + id;
 const visibilityKey = id => 'gaid-hidden-parts-' + id;
+const comparisonKey = id => 'gaid-left-reference-' + id;
 function status(message, tone = 'neutral') {
   const label = byId('status');
   if (label.textContent !== message) label.textContent = message;
@@ -181,7 +203,7 @@ function resultIsCurrent() {
   return renderIsCurrent() && state.displayedResult === state.doc.b.revision;
 }
 function comparing() {
-  const reference = (usesPinnedComparison() && visibleImage('a')) || visibleImage('original');
+  const reference = pinnedComparisonAsset()?.image || visibleImage('original');
   return state.view === 'compare' && !originalPreviewActive() && Boolean(visibleImage('b') && reference);
 }
 function skippedUnknownCount(current) {
@@ -195,14 +217,12 @@ function updateToolGuidance(current) {
   const tool = state.tool === 'pan' ? 'pan' : activeAction();
   const region = isLasso() ? '圈住的区域' : '画过的区域';
   const descriptions = {
-    pan: '拖动画布查看细节，选择左侧工具开始修改。',
+    pan: state.mode === 'range' ? '' : '拖动画布查看细节，选择左侧工具开始修改。',
     classify: '把' + region + '中可编辑的像素归入目标部位。',
     remove_part: '把' + region + '的' + partLabel(state.part) + '像素移到待确认。',
-    include: byId('allow-protected').checked
-      ? '把' + region + '加入处理范围，包括模型建议保留的像素。透明和手动保护仍生效。'
-      : '把未选区域加入处理范围。可在下方允许手动补选模型建议保留的像素。',
-    exclude: '把' + region + '移出处理范围，保留原像素。需要重新处理时可用补选。',
-    protect: '保留部分原图，让这里少降噪。设为 100% 时，' + (isLasso() ? '圈内' : '笔画中心') + '完全保留。',
+    include: byId('allow-protected').checked ? '补入' + region + '，含自动保留区。' : '把未选区域加入处理范围。',
+    exclude: '把' + region + '移出处理范围，保留原像素。',
+    protect: '减弱 100% 时，' + (isLasso() ? '圈内' : '笔心') + '保留原图。',
     mix: (isLasso() ? '圈内的已选区域' : '笔刷中心的已选区域') + '混合 ' + Number(byId('retention-percent').value)
       + '% 原图。',
     erase: state.mode === 'parts' ? '擦掉这一步的分区修正，恢复原有归属。' : '擦掉本步手动标记。想保留原像素可用「移出」。',
@@ -314,8 +334,11 @@ function updateEditHistory(canEdit) {
   const showCounts = Boolean(counts && categories.some(key => counts[key] > 0));
   byId('change-history-title').textContent = parts ? '分区修改记录' : '范围修改记录';
   const button = byId('show-manual-changes');
+  byId('change-history-toolbar').hidden = !parts && inAudit;
+  byId('change-history-audit-heading').hidden = !parts;
+  button.hidden = !parts && inAudit;
   button.disabled = !canEdit || inAudit;
-  button.textContent = inAudit ? '正在查看' : '查看手动改动';
+  button.textContent = inAudit ? '正在查看' : parts ? '查看手动改动' : '查看范围改动';
   byId('changes-details').hidden = !inAudit;
   byId('changes-counts').hidden = !showCounts;
   byId('retry-changes').hidden = !inAudit || !error;
@@ -336,7 +359,7 @@ function updateEditHistory(canEdit) {
     }
   }
   byId('change-history-empty').hidden = Boolean(rows.length);
-  byId('change-history-note').hidden = !rows.length;
+  byId('change-history-note').hidden = !parts || !rows.length;
   const key = JSON.stringify(rows);
   if (state.historyDisplayKey === key) return;
   state.historyDisplayKey = key;
@@ -460,7 +483,7 @@ function updateControls() {
   byId('undo').disabled = !canDraw || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === 0;
   byId('redo').disabled = !canDraw || !rangeMode || Boolean(state.sam) || drawingMagnetic || state.draft.cursor === state.draft.edits.length;
   byId('download').disabled = !current;
-  byId('download').title = current ? '导出当前成品 B' : '当前成品显示后可导出';
+  byId('download').title = current ? '导出当前成品 B（Ctrl+S）' : '当前成品显示后可导出（Ctrl+S）';
   byId('pin').disabled = !current;
   const a = state.doc?.a, showCorrections = rangeMode && Boolean(state.doc);
   const exportPanel = byId('export-panel');
@@ -472,8 +495,13 @@ function updateControls() {
   byId('correction-import').disabled = !canDraw || state.dirty || Boolean(state.save || state.conflict);
   byId('export-hint').textContent = reviewMode && !current ? '当前成品显示后，即可固定或导出。' : '';
   const b = state.images.get('b')?.meta;
-  byId('comparison-a').textContent = !a ? '原图' : state.images.get('a')?.revision === a.revision
-    ? '固定对照 · ' + methodLabel(a.method) : '正在载入固定对照';
+  const waitingForA = usesPinnedComparison() && !pinnedComparisonAsset();
+  byId('comparison-a').textContent = !a ? '原图'
+    : waitingForA ? '正在载入固定对照' : '固定对照 · ' + methodLabel(a.method);
+  byId('compare-reference').hidden = !canChooseComparisonReference();
+  for (const [reference, button] of comparisonButtons) {
+    button.setAttribute('aria-pressed', String(reference === state.leftReference));
+  }
   byId('comparison-b').textContent = !b ? '等待第一份成品' : methodLabel(b.method)
     + (current ? ' · 当前成品' : b.revision === state.doc?.revision && renderIsCurrent() ? ' · 待查看' : ' · 上一版');
   for (const id of ['zoom-out', 'zoom-in', 'fit', 'actual', 'peek']) byId(id).disabled = !hasImage;
@@ -504,9 +532,8 @@ function updateControls() {
   byId('edit-inspector').hidden = !rangeMode || inspecting;
   byId('range-history').hidden = !rangeMode;
   for (const mode of ['review', 'parts', 'range', 'effect']) byId(mode + '-inspector').hidden = state.mode !== mode || inspecting;
-  for (const button of presetButtons) {
-    button.disabled = !canEdit || (button.dataset.preset === 'strong' && !method?.uses_l0);
-    button.setAttribute('aria-pressed', String(Boolean(presetMatches(button.dataset.preset))));
+  for (const [name, button] of effectActions) {
+    button.disabled = !canEdit || (name === 'strong' && !method?.uses_l0) || Boolean(presetMatches(name));
   }
   for (const button of scopeButtons) {
     button.disabled = !canDraw;
@@ -515,9 +542,11 @@ function updateControls() {
     button.setAttribute('aria-pressed', String(canEdit && expected.length === selected.length
       && expected.every(name => selected.includes(name))));
   }
-  for (const field of document.querySelectorAll('#modules input, #part-strengths input')) field.disabled = !canDraw;
   byId('range-protection-all').disabled = !canDraw;
-  for (const lock of byId('range-part-locks').children) lock.disabled = !canDraw;
+  for (const { check, strength, lock } of rangeRows) {
+    lock.disabled = !canDraw;
+    if (check) check.disabled = strength.disabled = !canDraw;
+  }
   for (const id of ['method', ...numberFields, 'radius', 'feather', 'protection', 'retention-percent', 'allow-protected', 'lasso-action', 'invert', 'reset']) {
     byId(id).disabled = !canDraw || (id === 'l0' && !method?.uses_l0) || (id === 'downscale' && !method?.uses_downscale);
   }
@@ -548,15 +577,9 @@ function updateControls() {
   byId('allow-protected-row').hidden = state.mode !== 'range' || operation !== 'include';
   byId('l0-field').hidden = !method?.uses_l0;
   byId('downscale-field').hidden = !method?.uses_downscale;
-  byId('strong-preset').hidden = !method?.uses_l0;
   const mag = state.magnetic;
   byId('current-tool-name').textContent = state.tool === 'pan' ? '移动画布'
     : state.sam ? 'SAM2 点选' : mag ? '磁性套索' : isLasso() ? '套索' : '画笔';
-  byId('brush-panel').hidden = Boolean(state.sam);
-  const modules = state.draft?.settings.modules || [];
-  byId('scope-summary').textContent = !modules.length ? '当前从空范围开始'
-    : modules.length === state.options?.modules.length ? '当前从整图开始'
-      : '当前部位 · ' + modules.map(name => state.options?.modules.find(item => item.id === name)?.label || name).join('、');
   if (mag) updateMagneticCloseButton(mag, canDraw);
   else byId('close-lasso').disabled = !canDraw || state.polygon.length < 3;
   byId('magnetic-options').hidden = byId('magnetic-undo').hidden = !mag;
@@ -566,10 +589,13 @@ function updateControls() {
     updateMagneticStatus(mag);
     byId('magnetic-radius-value').textContent = byId('magnetic-radius').value + ' 屏幕 px';
   }
+  byId('tool-hint').hidden = state.mode === 'range' && !isLasso();
   byId('tool-hint').textContent = mag ? (mag.segments.length ? mag.segments.length + ' 个锚点 · Enter 闭合' : '自动贴边')
     : state.tool === 'lasso'
     ? (state.polygon.length ? state.polygon.length + ' 个顶点，Enter 闭合' : '单击添加顶点') : '空格临时移动';
   updateToolGuidance(renderIsCurrent());
+  byId('brush-panel').hidden = Boolean(state.sam)
+    || (state.mode === 'range' && state.tool === 'pan' && byId('stroke-feedback').hidden);
   updateSamControls();
   updateEditHistory(canEdit);
   stage.dataset.tool = state.space || blocked ? 'pan' : state.tool;
@@ -746,16 +772,16 @@ function draw() {
   const firstResultFrame = showsResult && state.displayedResult !== b.revision;
   if (firstResultFrame) state.displayedResult = b.revision;
   if (showDivider) {
-    const a = usesPinnedComparison() ? visibleImage('a') : null;
-    paintImage(a || original, box);
+    const a = pinnedComparisonAsset();
+    paintImage(a?.image || original, box);
     ctx.save();
     ctx.beginPath(); ctx.rect(cut, 0, box.width - cut, box.height); ctx.clip();
     // Clear the right half so transparent pixels do not composite over the left reference.
     ctx.clearRect(cut, 0, box.width - cut, box.height);
     paintImage(visibleImage('b'), box);
     ctx.restore();
-    const aMeta = state.images.get('a')?.meta, bMeta = state.images.get('b')?.meta;
-    byId('left-badge').textContent = a && aMeta ? 'A  ' + methodLabel(aMeta.method) + ' / 选区 ' + (aMeta.selection_revision ?? aMeta.revision) : '原图';
+    const aMeta = a?.meta, bMeta = state.images.get('b')?.meta;
+    byId('left-badge').textContent = aMeta ? 'A  ' + methodLabel(aMeta.method) + ' / 选区 ' + (aMeta.selection_revision ?? aMeta.revision) : '原图';
     byId('right-badge').textContent = 'B  ' + methodLabel(bMeta?.method)
       + (bMeta ? ' / 选区 ' + (bMeta.selection_revision ?? bMeta.revision) : '')
       + (resultIsCurrent() && bMeta?.revision === state.doc.revision ? '' : ' · 待更新');
@@ -927,7 +953,7 @@ function ensureAssets() {
   if (state.doc.b && (state.mode === 'review' || ['compare', 'result'].includes(state.view))) {
     loadAsset('b', state.doc.b.revision, state.doc.b);
   }
-  if (usesPinnedComparison() && state.view === 'compare') loadAsset('a', state.doc.a.revision, state.doc.a);
+  if (usesPinnedComparison()) loadAsset('a', state.doc.a.revision, state.doc.a);
   else if (!state.doc.a) state.images.delete('a');
   const preview = selectionPreview();
   if (preview && MASK_VIEWS.includes(state.view) && viewAvailable(state.view)) loadAsset(state.view, preview.revision);
@@ -1069,7 +1095,7 @@ function selectMode(mode) {
   refresh();
   if (nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
   if (mode === 'flow') {
-    if (nodeNames[previousMode]) byId('node-' + previousMode).focus();
+    byId('node-' + (nodeNames[previousMode] ? previousMode : 'parts')).focus();
     requestAnimationFrame(drawFlowWires);
   }
 }
@@ -1143,6 +1169,7 @@ function applyMetadata(doc) {
 function startDocument(doc) {
   state.dirty = state.saveFailed = false;
   state.conflict = null;
+  state.leftReference = storage('getItem', comparisonKey(doc.id)) === 'original' ? 'original' : 'a';
   state.protectedParts = loadPartSwitches(protectionKey(doc.id), partCategories().filter(part => part !== 'unknown'));
   state.rangeProtectedParts = loadPartSwitches(rangeProtectionKey(doc.id));
   state.hiddenParts = loadPartSwitches(visibilityKey(doc.id));
@@ -1449,13 +1476,20 @@ function updateReadouts() {
   byId('retention-percent').value = Math.round(Number(byId('protection').value) * 1000) / 10;
   updateBrushReadout();
 }
+function updatePartStrength(input) {
+  const percent = Math.round(Number(input.value) * 100) + '%';
+  input.nextElementSibling.textContent = percent;
+  input.setAttribute('aria-valuetext', percent);
+  input.style.setProperty('--strength-level', percent);
+}
 function syncSettings() {
   const settings = state.draft.settings;
   for (const key of ['method', ...numberFields]) byId(key).value = settings[key];
-  for (const node of document.querySelectorAll('#modules input')) node.checked = settings.modules.includes(node.value);
-  for (const node of document.querySelectorAll('#part-strengths input')) {
-    node.value = settings.part_strengths?.[node.dataset.module] ?? 1;
-    node.nextElementSibling.textContent = Math.round(Number(node.value) * 100) + '%';
+  for (const { id, check, strength } of rangeRows) {
+    if (!check) continue;
+    check.checked = settings.modules.includes(id);
+    strength.value = settings.part_strengths?.[id] ?? 1;
+    updatePartStrength(strength);
   }
   updateReadouts();
 }
@@ -1531,15 +1565,12 @@ function updateProtectionButton(button, id, locked) {
   button.children[0].children[0].setAttribute('href', locked ? '#icon-lock' : '#icon-unlock');
 }
 function updateRangeProtection() {
-  const rows = byId('range-part-locks').children, count = state.rangeProtectedParts.size;
-  const all = byId('range-protection-all'), allLocked = count === rows.length;
-  byId('range-lock-count').textContent = count ? '已锁 ' + count + ' 个' : '';
-  all.textContent = allLocked ? '解锁全部' : '锁定全部';
+  const count = state.rangeProtectedParts.size, all = byId('range-protection-all');
+  const allLocked = count === rangeRows.length;
+  all.title = allLocked ? '解锁全部分区' : '锁定全部分区';
   all.setAttribute('aria-pressed', allLocked ? 'true' : count ? 'mixed' : 'false');
-  for (const lock of rows) {
-    const id = lock.dataset.rangeProtectPart;
-    updateProtectionButton(lock, id, state.rangeProtectedParts.has(id));
-  }
+  byId('range-protection-icon').setAttribute('href', count ? '#icon-lock' : '#icon-unlock');
+  for (const { id, lock } of rangeRows) updateProtectionButton(lock, id, state.rangeProtectedParts.has(id));
 }
 function protectionButton(id, mode) {
   const button = document.createElement('button');
@@ -1552,7 +1583,6 @@ function protectionButton(id, mode) {
     button.className = 'range-part-lock';
     button.dataset.rangeProtectPart = id;
     button.setAttribute('aria-label', partLabel(id) + '范围保护');
-    button.append(partSwatch(id), partLabel(id));
   } else {
     button.className = 'part-lock';
     button.dataset.protectPart = id;
@@ -1603,45 +1633,56 @@ function setPart(id, isolate = false) {
   ensureAssets();
   refresh();
 }
+function installRangeRow(id, automatic, defaults) {
+  const row = document.createElement('div'), member = document.createElement(automatic ? 'label' : 'span');
+  const cell = document.createElement('div'), lock = protectionButton(id, 'range');
+  row.className = automatic ? 'range-part-row' : 'range-part-row range-part-special';
+  row.dataset.rangePart = id;
+  member.className = 'range-member'; cell.className = 'range-strength';
+  let check = null, strength = null;
+  if (automatic) {
+    check = document.createElement('input');
+    check.type = 'checkbox'; check.value = id;
+    check.checked = defaults.includes(id); check.disabled = true;
+    check.addEventListener('change', () => {
+      if (!state.draft || maskEditsBlocked()) return;
+      state.draft.settings.modules = rangeRows.filter(row => row.check?.checked).map(row => row.id);
+      edited();
+    });
+    member.append(check);
+    const output = document.createElement('output');
+    strength = document.createElement('input');
+    strength.id = 'range-strength-' + id;
+    strength.type = 'range'; strength.min = '0'; strength.max = '1'; strength.step = '.01'; strength.value = '1';
+    strength.disabled = true;
+    strength.setAttribute('aria-label', partLabel(id) + '强度');
+    output.setAttribute('for', strength.id);
+    cell.append(strength, output);
+    updatePartStrength(strength);
+    strength.addEventListener('input', () => {
+      if (!state.draft || maskEditsBlocked()) return;
+      state.draft.settings.part_strengths ||= {};
+      state.draft.settings.part_strengths[id] = Number(strength.value);
+      updatePartStrength(strength);
+      edited();
+    });
+    if (id !== 'background') {
+      const assignment = document.createElement('option');
+      assignment.value = id; assignment.textContent = partLabel(id);
+      byId('unknown-stroke-module').append(assignment);
+    }
+  }
+  const label = document.createElement('span');
+  label.textContent = partLabel(id); label.title = label.textContent;
+  member.append(partSwatch(id), label);
+  row.append(member, cell, lock);
+  byId('range-part-list').append(row);
+  rangeRows.push({ id, check, strength, lock });
+}
 function installOptions(options) {
   state.options = options;
   const order = ['skin', 'face', 'hair', 'eyes', 'mouth', 'outfit', 'background'];
   const modules = [...options.modules].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
-  for (const item of modules) {
-    const label = document.createElement('label'), check = document.createElement('input');
-    const swatch = document.createElement('i');
-    swatch.className = 'dot';
-    if (/^#[0-9a-f]{6}$/i.test(item.color || '')) swatch.style.backgroundColor = item.color;
-    label.className = 'module-chip'; check.type = 'checkbox'; check.value = item.id;
-    check.checked = options.default_modules.includes(item.id); check.disabled = true;
-    check.addEventListener('change', () => {
-      if (!state.draft || maskEditsBlocked()) return;
-      state.draft.settings.modules = [...document.querySelectorAll('#modules input:checked')].map(input => input.value);
-      edited();
-    });
-    label.append(check, swatch, item.label);
-    byId('modules').append(label);
-
-    const row = document.createElement('label'), output = document.createElement('output'), range = document.createElement('input');
-    row.className = 'range-row';
-    range.type = 'range'; range.min = '0'; range.max = '1'; range.step = '.01'; range.value = '1';
-    range.dataset.module = item.id; range.disabled = true;
-    output.textContent = '100%'; output.style.gridColumn = '2'; output.style.gridRow = '1';
-    range.addEventListener('input', () => {
-      if (!state.draft || maskEditsBlocked()) return;
-      state.draft.settings.part_strengths ||= {};
-      state.draft.settings.part_strengths[item.id] = Number(range.value);
-      output.textContent = Math.round(Number(range.value) * 100) + '%';
-      edited();
-    });
-    row.append(item.label, range, output);
-    byId('part-strengths').append(row);
-    if (item.id !== 'background') {
-      const assignment = document.createElement('option');
-      assignment.value = item.id; assignment.textContent = item.label;
-      byId('unknown-stroke-module').append(assignment);
-    }
-  }
   for (const id of [...modules.map(module => module.id), 'object', 'unknown']) {
     const row = document.createElement('div'), button = document.createElement('button');
     const eye = document.createElement('button');
@@ -1659,7 +1700,7 @@ function installOptions(options) {
     eye.addEventListener('click', () => togglePartVisibility(id));
     row.append(button, eye, protectionButton(id, 'parts'));
     byId('part-targets').append(row);
-    byId('range-part-locks').append(protectionButton(id, 'range'));
+    installRangeRow(id, id !== 'object' && id !== 'unknown', options.default_modules);
   }
   updatePartTargets();
   updateRangeProtection();
@@ -2216,6 +2257,7 @@ async function applySamObject() {
 }
 function startGesture(event) {
   if (!state.file || state.gesture || ![0, 1].includes(event.button)) return;
+  if (event.button === 0) stage.focus({ preventScroll: true, focusVisible: false });
   if (state.keyboardPeek && !editingMask()) {
     setKeyboardPeek(false);
     draw();
@@ -2239,7 +2281,6 @@ function startGesture(event) {
     }
     if (state.magnetic) {
       const mag = state.magnetic, start = mag.segments[0]?.[0];
-      stage.focus({ preventScroll: true });
       mag.straight = Boolean(event.altKey);
       if (canCloseMagnetic(mag) && magneticDistance(point, start) * layout().scale <= 9)
         closeLasso(false);
@@ -2249,7 +2290,6 @@ function startGesture(event) {
     }
     if (state.tool === 'lasso') {
       const first = state.polygon[0], last = state.polygon.at(-1);
-      stage.focus({ preventScroll: true });
       if (state.polygon.length >= 3 && Math.hypot(point[0] - first[0], point[1] - first[1]) * layout().scale <= 9) closeLasso();
       else if ((!last || point[0] !== last[0] || point[1] !== last[1]) && state.polygon.length < 5000) state.polygon.push(point);
       event.preventDefault();
@@ -2393,12 +2433,24 @@ async function download(view = 'b') {
     status('PNG 已发送到浏览器下载。', 'ready');
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
+function setComparisonReference(reference) {
+  state.leftReference = reference;
+  storage('setItem', comparisonKey(state.doc.id), reference);
+}
+function chooseComparisonReference(reference) {
+  if (!canChooseComparisonReference()) return;
+  setComparisonReference(reference);
+  setKeyboardPeek(false);
+  ensureAssets();
+  refresh();
+}
 async function pin() {
   if (!resultIsCurrent()) return;
   const epoch = state.epoch, revision = state.doc.revision;
   try {
     const doc = await post(route('/pin'), { revision });
     if (state.epoch === epoch && doc.revision >= state.doc.revision) {
+      setComparisonReference('a');
       applyMetadata(doc);
       selectView('compare');
     }
@@ -2476,6 +2528,9 @@ byId('redo').addEventListener('click', redo);
 byId('download').addEventListener('click', () => download());
 byId('download-a').addEventListener('click', () => download('a'));
 byId('pin').addEventListener('click', pin);
+for (const [reference, button] of comparisonButtons) {
+  button.addEventListener('click', () => chooseComparisonReference(reference));
+}
 byId('notice-close').addEventListener('click', () => { byId('notice').hidden = true; });
 byId('retry').addEventListener('click', () => { if (state.doc) { state.dirty = true; saveDraft(); } });
 byId('conflict-local').addEventListener('click', () => {
@@ -2516,7 +2571,21 @@ for (const button of toolButtons) button.addEventListener('click', () => {
   selectTool(button.dataset.tool);
   stage.focus({ preventScroll: true });
 });
-for (const button of presetButtons) button.addEventListener('click', () => choosePreset(button.dataset.preset));
+for (const [name, button] of effectActions) button.addEventListener('click', () => choosePreset(name));
+const effectHelp = ['restoration_gain', 'structure_protection', 'sigma']
+  .map(name => ({ button: byId(name + '-help-toggle'), description: byId(name + '-help') }));
+for (const { button, description } of effectHelp) {
+  button.title = description.textContent;
+  description.hidden = true;
+  button.addEventListener('click', () => {
+    const opening = description.hidden;
+    for (const item of effectHelp) {
+      const open = opening && item.description === description;
+      item.description.hidden = !open;
+      item.button.setAttribute('aria-expanded', String(open));
+    }
+  });
+}
 for (const key of ['method', ...numberFields]) {
   const field = byId(key);
   field.addEventListener(field.type === 'range' ? 'input' : 'change', () => {
@@ -2675,12 +2744,70 @@ viewer.addEventListener('drop', event => {
   }
   openFile(transfer.files[0]);
 });
+const shortcutsDialog = byId('shortcuts-dialog');
+function showShortcuts() {
+  if (shortcutsDialog.open || byId('settings-dialog').open) return;
+  const list = byId('shortcuts-list');
+  if (!list.children.length) {
+    const groups = [
+      ['文件与对比', [
+        ['打开图片', 'Ctrl+O'], ['粘贴图片', 'Ctrl+V'], ['导出已显示的成品 B', 'Ctrl+S'],
+        ['切换左侧原图 / 固定 A', 'A'], ['按住暂看整张原图', 'X'],
+        ['移动对比分割线（聚焦手柄）', '←', '→'],
+      ]],
+      ['画布与流程', [
+        ['适合窗口', '0'], ['按原像素显示', '1'], ['放大', '+', '='], ['缩小', '-'],
+        ['暂时移动画布', '空格 + 拖动'], ['打开编辑流程', 'F'], ['回到成品检查', 'R'],
+      ]],
+      ['绘制工具', [
+        ...Object.entries(toolShortcuts).map(([key, [, label]]) => [label, key.toUpperCase()]),
+        ['调画笔直径', '[', ']', 'Shift + 滚轮'],
+      ]],
+      ...Object.entries(actionShortcuts).map(([mode, bindings]) => [
+        nodeNames[mode], [
+          ...Object.entries(bindings).map(([key, action]) => [actions[mode][action], key.toUpperCase()]),
+          ...(mode === 'parts' ? [['独显部位 / 恢复显隐', 'Ctrl + 点击']] : []),
+        ],
+      ]),
+      ['选区与历史', [
+        ['在画布上闭合套索，或预览 / 应用 SAM2', 'Enter'],
+        ['放弃当前绘制或选区', 'Esc'], ['磁性套索临时拉直线', 'Alt'], ['撤回磁性锚点', 'Backspace'],
+        ['撤销操作', 'Ctrl+Z'], ['重做操作', 'Ctrl+Shift+Z', 'Ctrl+Y'],
+      ]],
+    ];
+    for (const [title, rows] of groups) {
+      const section = document.createElement('section'), heading = document.createElement('h2');
+      const definitions = document.createElement('dl');
+      heading.textContent = title;
+      for (const [action, ...keys] of rows) {
+        const row = document.createElement('div'), term = document.createElement('dt'), values = document.createElement('dd');
+        term.textContent = action;
+        for (const key of keys) {
+          const cap = document.createElement('kbd');
+          cap.textContent = key;
+          values.append(cap);
+        }
+        row.append(term, values);
+        definitions.append(row);
+      }
+      section.append(heading, definitions);
+      list.append(section);
+    }
+  }
+  shortcutsDialog.showModal();
+}
+byId('open-shortcuts').addEventListener('click', showShortcuts);
+byId('shortcuts-close').addEventListener('click', () => shortcutsDialog.close());
+
 window.addEventListener('paste', event => {
   const file = event.clipboardData?.files[0];
-  if (!byId('settings-dialog').open && file?.type.startsWith('image/')) { event.preventDefault(); openFile(file); }
+  if (!byId('settings-dialog').open && !shortcutsDialog.open && file?.type.startsWith('image/')) {
+    event.preventDefault();
+    openFile(file);
+  }
 });
 window.addEventListener('keydown', event => {
-  if (byId('settings-dialog').open) return;
+  if (event.defaultPrevented || event.isComposing || byId('settings-dialog').open || shortcutsDialog.open) return;
   if (event.key === 'Escape' && document.body.dataset.drawer === 'open') {
     event.preventDefault(); setDrawer(false, true); return;
   }
@@ -2699,49 +2826,93 @@ window.addEventListener('keydown', event => {
       return;
     }
   }
-  if (open?.contains(event.target) || event.target.tagName === 'SUMMARY') return;
+  if (open?.contains(event.target)) return;
   const key = event.key.toLowerCase();
   const radiusDirection = brushRadiusKeys.get(key);
   const brushSlider = radiusDirection && (event.target === byId('radius') || event.target === byId('feather'));
   if ((/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName) && !brushSlider) || event.target.isContentEditable) return;
-  if (editingMask() && !maskEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'z') {
-    event.preventDefault();
-    if (state.sam) { if (!event.shiftKey) undoSamPoint(); }
-    else if (state.magnetic?.segments.length || state.magnetic?.intent) { if (!event.shiftKey) resetMagnetic(true); }
-    else (event.shiftKey ? redo : undo)();
+  if (event.ctrlKey || event.metaKey) {
+    if (event.altKey) return;
+    if (!event.shiftKey && (key === 'o' || key === 's')) {
+      event.preventDefault();
+      if (!event.repeat) {
+        if (key === 'o') byId('file').click();
+        else download();
+      }
+    } else if (editingMask() && !maskEditsBlocked() && (key === 'z' || (key === 'y' && !event.shiftKey))) {
+      event.preventDefault();
+      const redoing = key === 'y' || event.shiftKey;
+      if (state.sam) { if (!redoing) undoSamPoint(); }
+      else if (state.magnetic?.segments.length || state.magnetic?.intent) { if (!redoing) resetMagnetic(true); }
+      else (redoing ? redo : undo)();
+    }
     return;
   }
-  if (editingMask() && !maskEditsBlocked() && (event.ctrlKey || event.metaKey) && key === 'y') {
-    event.preventDefault();
-    if (!state.sam && !state.magnetic?.segments.length && !state.magnetic?.intent) redo();
-    return;
-  }
-  if ((event.ctrlKey || event.metaKey) && key === 'o') { event.preventDefault(); byId('file').click(); return; }
   if (key === 'alt' && state.magnetic && !maskEditsBlocked()) {
     event.preventDefault(); hoverMagnetic(state.cursor, true); return;
   }
-  if (event.ctrlKey || event.metaKey || event.altKey || !state.file) return;
-  if (radiusDirection && !event.isComposing && !event.defaultPrevented && isBrush() && !maskEditsBlocked()) {
+  if (event.altKey) return;
+  if (key === '?') {
+    event.preventDefault();
+    if (!event.repeat) showShortcuts();
+    return;
+  }
+  if (!state.file) return;
+  if (Object.hasOwn(zoomShortcuts, key) && state.mode !== 'flow' && (key === '+' || !event.shiftKey)) {
+    event.preventDefault();
+    byId(zoomShortcuts[key]).click();
+    return;
+  }
+  if (event.shiftKey) return;
+  if (radiusDirection && isBrush() && !maskEditsBlocked()) {
     event.preventDefault();
     resizeBrush(radiusDirection);
     return;
   }
-  if (key === ' ' && event.target.tagName !== 'BUTTON') { event.preventDefault(); state.space = true; refresh(); }
+  const focusedControl = /^(BUTTON|SUMMARY|A)$/.test(event.target.tagName);
+  if (key === ' ' && !focusedControl) { event.preventDefault(); state.space = true; refresh(); }
   if (key === 'x' && state.mode !== 'flow' && !state.peek) { state.peek = true; redrawOriginalPreview(); }
+  if (key === 'a' && canChooseComparisonReference() && !event.repeat) {
+    event.preventDefault();
+    const next = state.leftReference === 'a' ? 'original' : 'a';
+    chooseComparisonReference(next);
+    if (comparisonButtons.some(([, button]) => button === event.target)) {
+      const [, selected] = comparisonButtons.find(([reference]) => reference === next);
+      selected.focus({ preventScroll: true });
+    }
+    return;
+  }
+  if ((key === 'f' || key === 'r') && state.doc && !event.repeat) {
+    event.preventDefault();
+    selectMode(key === 'f' ? 'flow' : 'review');
+    if (key === 'r' && state.mode === 'review') stage.focus({ preventScroll: true });
+    return;
+  }
   if (key === 'escape') {
-    if (state.sam) selectTool('pan');
-    else if (state.magnetic) { event.preventDefault(); resetMagnetic(); }
+    if (state.gesture?.edit) { state.gesture = null; refresh(); }
+    else if (state.sam) selectTool('pan');
+    else if (state.magnetic) resetMagnetic();
     else { state.polygon = []; refresh(); }
+    return;
   }
   if (key === 'backspace' && state.magnetic && !maskEditsBlocked()) { event.preventDefault(); resetMagnetic(true); }
-  if (key === 'enter' && event.target.tagName !== 'BUTTON' && !maskEditsBlocked() &&
-      (state.polygon.length >= 3 || canCloseMagnetic(state.magnetic, magneticClosingTail(state.magnetic)))) {
-    event.preventDefault(); closeLasso();
+  if (key === 'enter' && !focusedControl && !maskEditsBlocked()) {
+    if (state.sam || state.polygon.length >= 3 || canCloseMagnetic(state.magnetic, magneticClosingTail(state.magnetic))) {
+      event.preventDefault();
+      if (event.repeat) return;
+      if (state.sam?.preview) applySamObject();
+      else if (state.sam) previewSamObject();
+      else closeLasso();
+    }
+    return;
   }
-  const tool = { b: 'include', d: 'exclude', p: 'protect', m: 'mix', e: 'erase', l: 'lasso', g: 'magnetic' }[key];
-  if (tool && editingMask()) {
-    if (key === 'b' && state.mode === 'parts') selectTool('classify');
-    else if (['lasso', 'magnetic'].includes(tool) || Object.hasOwn(actions[state.mode], tool)) selectTool(tool);
+  if (editingMask() && !maskEditsBlocked() && !event.repeat) {
+    const tool = toolShortcuts[key]?.[0] || actionShortcuts[state.mode][key];
+    if (tool) {
+      event.preventDefault();
+      selectTool(tool);
+      stage.focus({ preventScroll: true });
+    }
   }
 });
 window.addEventListener('keyup', event => {
