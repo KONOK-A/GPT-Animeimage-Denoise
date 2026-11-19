@@ -36,6 +36,21 @@ py -3.12 -m venv .venv
 
 [命令行手册](docs/cli.md) · [开发说明](docs/development.md)
 
+### 用 AI Agent 去噪
+
+按上文安装 GAID 并准备分区模型后，在本机从仓库根目录打开 Agent。
+
+- **Codex** 会发现仓库内的 skill。输入 `$gpt-animeimage-denoise` 选中它。[Codex skill](.agents/skills/gpt-animeimage-denoise/SKILL.md)
+- **Claude Code** 会从项目的 `.claude/skills/` 加载同一份 skill。运行 `claude`，在会话里输入 `/gpt-animeimage-denoise`。[Claude Code skill](.claude/skills/gpt-animeimage-denoise/SKILL.md)
+
+调用时一起给出原图和处理要求，例如「给 `D:\images\插画.png` 去鱼鳞纹，尽量保留发丝和背景，交付原尺寸 PNG」。也可以使用同一会话中生图工具返回的原图。
+
+维护时以 `.agents/skills/` 下的 `SKILL.md` 为源文件。更新后在项目根目录执行以下 PowerShell 命令，同步 Claude Code 入口。
+
+```powershell
+Copy-Item -LiteralPath '.agents/skills/gpt-animeimage-denoise/SKILL.md' -Destination '.claude/skills/gpt-animeimage-denoise/SKILL.md'
+```
+
 ## 使用的模型
 
 | 模型 | 用途 | 许可 |
