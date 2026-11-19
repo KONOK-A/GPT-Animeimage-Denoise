@@ -142,24 +142,29 @@ def create_server(workspace, *, port=0):
 
     class Handler(BaseHTTPRequestHandler):
         def log_request(self, code='-', size='-'):
-            if code == 200 and self.command == 'GET' and _DOCUMENT.fullmatch(self.path):
+            if code in (200, 304) and self.command == 'GET' and _DOCUMENT.fullmatch(self.path):
                 return
             super().log_request(code, size)
 
-        def _send(self, status, data, mime, *, download=None):
+        def _send(self, status, data, mime, *, download=None, etag=None):
             self.send_response(status)
-            self.send_header('Content-Type', mime)
-            self.send_header('Content-Length', str(len(data)))
+            if data is not None:
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(data)))
+            if etag is not None:
+                self.send_header('ETag', etag)
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Cross-Origin-Resource-Policy', 'same-origin')
             if download is not None:
                 self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + quote(download, safe=''))
             self.end_headers()
-            self.wfile.write(data)
+            if data is not None:
+                self.wfile.write(data)
 
-        def _json(self, data, status=200):
-            self._send(status, json.dumps(data, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
+        def _json(self, data, status=200, *, etag=None):
+            self._send(status, json.dumps(data, ensure_ascii=False).encode('utf-8'),
+                       'application/json; charset=utf-8', etag=etag)
 
         def _body(self, limit):
             length = self.headers.get('Content-Length', '')
@@ -196,9 +201,10 @@ def create_server(workspace, *, port=0):
             if not post and path.path == '/api/cache':
                 return self._json(documents.cache_info())
             if post and path.path == '/api/cache/clear':
-                if self._read_json():
+                value = self._read_json()
+                if set(value) - {'mode'}:
                     raise ValueError('清理缓存不能指定路径。')
-                return self._json(documents.clear_cache())
+                return self._json(documents.clear_cache(mode=value.get('mode', 'all')))
             if post and path.path == '/api/folder':
                 value = self._read_json()
                 if set(value) - {'initial'}:
@@ -217,7 +223,10 @@ def create_server(workspace, *, port=0):
                 raise _RequestError(404, '找不到此页面。')
             identifier, action = match.groups()
             if not post and action is None:
-                return self._json(documents.get(identifier))
+                tag, snapshot = documents.document_snapshot(identifier, self.server.instance, self.headers.get('If-None-Match'))
+                if snapshot is None:
+                    return self._send(304, None, None, etag=tag)
+                return self._json(snapshot, etag=tag)
             if post and action == 'prepare-edit':
                 documents.prepare_edit(identifier, _revision(self._read_json()))
                 return self._json({})

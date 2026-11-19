@@ -147,8 +147,9 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
     setTimeout: () => 1, clearTimeout() {},
     fetch: async (route, args) => {
       api.requests.push({ route, args });
-      const response = (data, status = 200) => ({
-        ok: status === 200, status, json: async () => JSON.parse(JSON.stringify(data)), blob: async () => route,
+      const response = (data, status = 200, etag = null) => ({
+        ok: status === 200, status, headers: new Map([['ETag', etag]]),
+        json: async () => JSON.parse(JSON.stringify(data)), blob: async () => route,
       });
       if (route === '/api/options') return response(options);
       if (route === '/api/exit') return response({ closing: true });
@@ -199,6 +200,9 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
         return response(doc);
       }
       if (route.endsWith('/pin')) { doc = { ...doc, a: doc.b }; return response(doc); }
+      if (route === '/api/documents/source' && api.documentEtag) {
+        return response(doc, args.headers?.['If-None-Match'] === api.documentEtag ? 304 : 200, api.documentEtag);
+      }
       return response(doc);
     },
   });
@@ -206,6 +210,26 @@ function harness({ theme, prefersDark = false, draftLink } = {}) {
   run(script);
   return { elements, nodes, run, api, window: win, storage, root, scheme, preferences };
 }
+
+test('polling an unchanged draft does not repaint the canvas', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  h.api.documentEtag = '"finished"';
+  await h.run('pollDocument()');
+  await tick();
+  const canvas = h.elements.get('canvas');
+  const paints = canvas.imagePaints;
+  assert.ok(paints > 0);
+  await h.run('pollDocument()');
+  assert.equal(h.api.requests.at(-1).args.headers['If-None-Match'], '"finished"');
+  assert.equal(canvas.imagePaints, paints);
+  h.api.documentEtag = '"pinned"';
+  h.api.mutate({ a: { revision: 0, method: 'l0' } });
+  await h.run('pollDocument()');
+  assert.equal(h.run('state.doc.a.revision'), 0);
+});
 
 test('appearance follows the system, supports manual overrides and can return to following the system', () => {
   const h = harness({ prefersDark: true });

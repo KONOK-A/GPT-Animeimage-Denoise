@@ -24,7 +24,7 @@ from PIL import Image, UnidentifiedImageError
 from ..corrections import MASK_KEYS, load_edits
 from ..denoisers import resolve_denoiser
 from ..editor import DEFAULT_MODULES, MODULES
-from ..pipeline import _json, _read_source, _sha
+from ..pipeline import _digest, _json, _read_source, _sha
 from .storage import CaseCache, Preferences, StorageBusy, export_png, write_atomic as _write_atomic
 
 
@@ -563,6 +563,16 @@ class Documents:
         with self._condition:
             return self._public(self._lookup(doc))
 
+    def document_snapshot(self, doc, instance, known_etag):
+        with self._condition:
+            state = self._lookup(doc)
+            # The revision already identifies the full settings and edit history.
+            # Progress and pinned A can also change within a revision.
+            metadata = {key: value for key, value in state.items()
+                        if not key.startswith('_') and key not in ('settings', 'edits')}
+            etag = '"' + _digest([instance, metadata]) + '"'
+            return etag, None if etag == known_etag else self._public(state)
+
     def prepare_edit(self, doc, revision):
         with self._condition:
             state = self._lookup(doc)
@@ -589,9 +599,9 @@ class Documents:
     def change_preferences(self, patch):
         return self.preferences.change(patch, self.cache, self.maintenance)
 
-    def clear_cache(self):
+    def clear_cache(self, *, mode='all'):
         with self.maintenance():
-            return self.cache.clear()
+            return self.cache.clear(mode=mode)
 
     def cache_info(self):
         try:
@@ -889,9 +899,10 @@ class Documents:
 
         from .session import _cached_editor
 
+        source = self._source_path(doc, state['_suffix'])
         try:
             with self.cache.using() as workspace:
-                editor = _cached_editor(workspace, doc, [state['width'], state['height']])
+                editor = _cached_editor(source, workspace, doc, [state['width'], state['height']])
         except (OSError, ValueError, KeyError, TypeError, EOFError):
             # Custom openers and missing caches still use the verified session
             # path. Only the analysis, if needed, holds the inference lock.
@@ -900,7 +911,6 @@ class Documents:
             try:
                 with self._condition:
                     self._changes_state(doc, revision)
-                source = self._source_path(doc, state['_suffix'])
                 if _sha(source) != doc:
                     raise ValueError('本地原图副本已更改，请重新打开源图。')
                 editor = self._open_session(source, state).editor
@@ -1107,7 +1117,7 @@ class Documents:
             try:
                 with self.cache.using() as cases:
                     rgb, alpha, icc, candidate = _cached_l0_baseline(
-                        cases, doc, [state['width'], state['height']], settings['l0'])
+                        source, cases, doc, [state['width'], state['height']], settings['l0'])
             except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
                 pass  # Missing or invalid analysis caches use the normal verified session path.
             else:

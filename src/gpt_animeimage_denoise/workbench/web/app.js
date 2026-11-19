@@ -76,7 +76,7 @@ const actionShortcuts = {
 const zoomShortcuts = { '0': 'fit', '1': 'actual', '+': 'zoom-in', '=': 'zoom-in', '-': 'zoom-out' };
 const state = {
   options: null, doc: null, file: null, draft: null, dirty: false, save: null, saveFailed: false, conflict: null,
-  epoch: 0, opening: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0,
+  epoch: 0, opening: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0, pollEtag: null,
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
   leftReference: 'a',
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
@@ -142,9 +142,9 @@ function showError(error) {
   byId('notice').hidden = false;
 }
 
-async function request(url, options = {}) {
+async function request(url, options = {}, acceptNotModified = false) {
   const reply = await fetch(url, { cache: 'no-store', ...options });
-  if (!reply.ok) {
+  if (!reply.ok && !(acceptNotModified && reply.status === 304)) {
     const body = await reply.json().catch(() => ({}));
     const error = new Error(body.error || '本机服务请求失败（' + reply.status + '）。');
     error.status = reply.status;
@@ -1149,6 +1149,7 @@ function installDraft(doc) {
 function applyMetadata(doc) {
   if (state.sam && state.doc?.revision !== doc.revision) state.sam.preview = null;
   state.doc = doc;
+  state.pollEtag = null;
   if (doc.status === 'ready' && doc.b?.revision === doc.revision && state.appliedHistory?.revision !== doc.revision) {
     state.appliedHistory = { revision: doc.revision, cursor: doc.cursor, edits: doc.edits };
   }
@@ -1361,8 +1362,15 @@ async function pollDocument() {
   const epoch = state.epoch, observed = state.doc;
   if (!state.doc) return;
   try {
-    const doc = await (await request(route())).json();
-    if (epoch !== state.epoch || state.save || state.doc !== observed || doc.revision < state.doc.revision) return;
+    const headers = state.pollEtag ? { 'If-None-Match': state.pollEtag } : {};
+    const reply = await request(route(), { headers }, true);
+    const doc = reply.status === 304 ? null : await reply.json();
+    if (epoch !== state.epoch || state.save || state.doc !== observed) return;
+    if (doc === null) {
+      ensureAssets();
+      return;
+    }
+    if (doc.revision < observed.revision) return;
     if (doc.revision > state.doc.revision) {
       if (state.dirty || state.conflict) {
         discardPendingUnknownResolution();
@@ -1374,6 +1382,7 @@ async function pollDocument() {
       installDraft(doc);
     }
     applyMetadata(doc);
+    state.pollEtag = reply.headers.get('ETag');
   } catch (error) {
     if (epoch === state.epoch) showError(error);
   } finally {

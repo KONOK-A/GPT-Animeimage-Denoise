@@ -165,6 +165,38 @@ class WorkbenchHTTPTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), [])
 
+    def test_document_poll_reuses_snapshot_until_metadata_changes(self):
+        from gpt_animeimage_denoise.editor import SelectionEditor
+
+        docs = self.server.documents
+        rgb = np.full((16, 24, 3), 167, np.uint8)
+        labels = np.ones(rgb.shape[:2], np.uint8)
+        empty = np.zeros(labels.shape, bool)
+        editor = SelectionEditor(rgb, None, labels, empty, empty)
+        session = SimpleNamespace(editor=editor, icc=None, candidate=Mock(return_value=rgb.astype(np.float32) / 255))
+        content = BytesIO()
+        Image.fromarray(rgb).save(content, 'PNG')
+
+        def fetch(etag=None):
+            with closing(HTTPConnection('127.0.0.1', self.port, timeout=5)) as conn:
+                conn.request('GET', route, headers={} if etag is None else {'If-None-Match': etag})
+                response = conn.getresponse()
+                return response.status, response.getheader('ETag'), response.read()
+
+        with patch.object(docs, 'opener', return_value=session):
+            opened = docs.open(content.getvalue(), 'image.png')
+            route = '/api/documents/' + opened['id']
+            state = self.ready(route)
+            status, etag, _ = fetch()
+            self.assertEqual(status, 200)
+            self.assertIsNotNone(etag)
+            self.assertEqual(fetch(etag), (304, etag, b''))
+            docs.pin(opened['id'], state['revision'])
+            status, next_tag, body = fetch(etag)
+            self.assertEqual(status, 200)
+            self.assertNotEqual(etag, next_tag)
+            self.assertEqual(json.loads(body)['a']['revision'], state['revision'])
+
     def test_running_workbench_is_reused_for_the_same_workspace(self):
         from gpt_animeimage_denoise.workbench import launch_workbench
         from gpt_animeimage_denoise.workbench.storage import _file_lock
@@ -245,6 +277,9 @@ class WorkbenchHTTPTest(unittest.TestCase):
         self.assertEqual(settings['defaults']['sigma'], 12)
         self.assertEqual(self.post('/api/settings', {'brush_radius': 3})[0], 400)
         self.assertEqual(self.post('/api/cache/clear', {'path': str(docs.root)})[0], 400)
+        self.assertEqual(self.post('/api/cache/clear', {'mode': 'unknown'})[0], 400)
+        status, empty_cache = self.post('/api/cache/clear', {'mode': 'compact'})
+        self.assertEqual((status, empty_cache['released_bytes']), (200, 0))
         self.assertEqual(self.post('/api/settings', {'export_dir': 'not-absolute'})[0], 400)
         with patch('gpt_animeimage_denoise.workbench.server._choose_folder', return_value=None):
             self.assertEqual(self.post('/api/folder', {'initial': ''}), (200, {'path': None}))

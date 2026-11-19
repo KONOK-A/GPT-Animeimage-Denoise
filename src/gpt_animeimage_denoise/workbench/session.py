@@ -1,7 +1,10 @@
 """Keep one analysed image and its denoising candidates available to the workbench."""
 from collections import OrderedDict
+import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 from PIL import Image
@@ -14,18 +17,25 @@ from ..pipeline import _assert_inputs_safe, _case_folder, _digest, _read_source,
 from ..preview import _verified_output
 
 
-def _completed_case_source(case, report, digest):
+def _completed_case_source(source, case, report, digest):
     if report['status'] != 'complete' or report['profile'] != 'fusion' or report['edits']:
         raise ValueError('Workbench requires a completed fusion case without manual corrections')
     if report['source_sha256'] != digest:
         raise ValueError('Source changed while preparing the workbench')
-    rgb, alpha, icc = _read_source(_verified_output(case, report, 'original.png'))
+    if 'original.png' in report['output_hashes']:
+        original = _verified_output(case, report, 'original.png')
+    else:
+        content = source.read_bytes()
+        if hashlib.sha256(content).hexdigest() != digest:
+            raise ValueError('本地原图副本已更改，请重新打开源图。')
+        original = BytesIO(content)
+    rgb, alpha, icc = _read_source(original)
     if report['size'] != [rgb.shape[1], rgb.shape[0]]:
         raise ValueError('Workbench image dimensions differ from the completed report')
     return rgb, alpha, icc
 
 
-def _cached_l0_baseline(workspace, digest, size, lam):
+def _cached_l0_baseline(source, workspace, digest, size, lam):
     """Read an existing matching float candidate without opening the models."""
     output = _case_folder(Path(workspace).resolve(), digest)
     case = _case_folder(output, 'analysis')
@@ -36,12 +46,12 @@ def _cached_l0_baseline(workspace, digest, size, lam):
             or parameters.get('denoiser', 'l0') != 'l0' or parameters['lambda'] != lam
             or not isinstance(device, str) or (device != 'cpu' and not device.startswith('cuda'))):
         raise ValueError('Workbench L0 cache does not match the requested source and settings')
-    rgb, alpha, icc = _completed_case_source(case, report, digest)
+    rgb, alpha, icc = _completed_case_source(source, case, report, digest)
     return rgb, alpha, icc, _review_candidate(output / '.cache', report, rgb.shape)
 
 
-def _case_editor(case, report, digest):
-    rgb, alpha, icc = _completed_case_source(case, report, digest)
+def _case_editor(source, case, report, digest):
+    rgb, alpha, icc = _completed_case_source(source, case, report, digest)
     with Image.open(_verified_output(case, report, 'person_labels.png')) as image:
         labels = np.array(image)
     with Image.open(_verified_output(case, report, 'objects.png')) as image:
@@ -51,13 +61,13 @@ def _case_editor(case, report, digest):
     return SelectionEditor(rgb, alpha, labels, objects, unknown), icc
 
 
-def _cached_editor(workspace, digest, size):
+def _cached_editor(source, workspace, digest, size):
     """Read a verified analysis grid without loading a denoising candidate."""
     case = _case_folder(_case_folder(Path(workspace).resolve(), digest), 'analysis')
     report = json.loads((case / 'report.json').read_text(encoding='utf-8'))
     if report['folder'] != 'analysis' or report['size'] != size:
         raise ValueError('Workbench analysis does not match the requested source grid')
-    return _case_editor(case, report, digest)[0]
+    return _case_editor(source, case, report, digest)[0]
 
 
 class WorkbenchSession:
@@ -75,7 +85,8 @@ class WorkbenchSession:
         self._models = models
         self.icc = icc
         self.height, self.width = editor.labels.shape
-        baseline.setflags(write=False)
+        if baseline is not None:
+            baseline.setflags(write=False)
         self._baseline = baseline
         self._baseline_key = self._candidate_key(baseline_method, baseline_lam, baseline_downscale)
         # Keep the original candidate, two recent alternatives, and one SR input.
@@ -103,7 +114,7 @@ class WorkbenchSession:
         models = FusionModels(device=device)
         try:
             report = process_image(source, output, models, case_id='analysis', profile='fusion',
-                                   denoiser=method, lam=lam, downscale=downscale, on_stage=on_stage)
+                                   denoiser=method, lam=lam, downscale=downscale, on_stage=on_stage, _workbench=True)
         finally:
             models.release()
         if _sha(source) != digest:
@@ -112,7 +123,7 @@ class WorkbenchSession:
 
     @classmethod
     def from_cache(cls, source, workspace, digest, size, *, method='l0', lam=None, downscale=DOWNSCALE):
-        """Restore the verified analysis and exact float candidate for an already opened source."""
+        """Restore the analysis grid, and reuse the float candidate when settings match."""
         output = _case_folder(Path(workspace).resolve(), digest)
         case = _case_folder(output, 'analysis')
         report = json.loads((case / 'report.json').read_text(encoding='utf-8'))
@@ -120,17 +131,18 @@ class WorkbenchSession:
         device = parameters['device']
         method, lam = resolve_denoiser(method, lam)
         if (report['folder'] != 'analysis' or report['size'] != size
-                or not isinstance(device, str) or not (device == 'cpu' or device.startswith('cuda'))
-                or parameters.get('denoiser', 'l0') != method
-                or (uses_l0(method) and parameters['lambda'] != lam)
-                or parameters.get('denoiser_config') != describe_denoiser(method, device, downscale=downscale)):
-            raise ValueError('Workbench cache does not match the requested source and denoiser')
-        return cls._load_completed_case(Path(source), output, report, digest, downscale, models=None)
+                or not isinstance(device, str) or not (device == 'cpu' or device.startswith('cuda'))):
+            raise ValueError('Workbench cache does not match the requested source grid')
+        matching = (parameters.get('denoiser', 'l0') == method
+                    and (not uses_l0(method) or parameters['lambda'] == lam)
+                    and parameters.get('denoiser_config') == describe_denoiser(method, device, downscale=downscale))
+        return cls._load_completed_case(Path(source), output, report, digest, downscale, models=None,
+                                        load_candidate=matching)
 
     @classmethod
-    def _load_completed_case(cls, source, output, report, digest, downscale, *, models):
+    def _load_completed_case(cls, source, output, report, digest, downscale, *, models, load_candidate=True):
         case = _case_folder(output, report['folder'])
-        editor, icc = _case_editor(case, report, digest)
+        editor, icc = _case_editor(source, case, report, digest)
         suspected = None
         if 'suspected_objects.png' in report['output_hashes']:
             with Image.open(_verified_output(case, report, 'suspected_objects.png')) as image:
@@ -138,7 +150,14 @@ class WorkbenchSession:
             if suspected.shape != editor.labels.shape or (suspected & editor.objects).any():
                 raise ValueError('Suspected object mask must align with the image and exclude confirmed objects')
             suspected.setflags(write=False)
-        baseline = _review_candidate(output / '.cache', report, editor.rgb.shape)
+        baseline = None
+        if load_candidate:
+            try:
+                baseline = _review_candidate(output / '.cache', report, editor.rgb.shape)
+            except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
+                if models is not None:
+                    raise
+                # A damaged float cache does not invalidate the verified masks.
         return cls(source, case, digest, report['parameters']['device'], editor, icc, baseline,
                    report['parameters']['lambda'], models=models, suspected_objects=suspected,
                    baseline_method=report['parameters'].get('denoiser', 'l0'), baseline_downscale=downscale)
@@ -181,7 +200,7 @@ class WorkbenchSession:
     def candidate(self, method='l0', *, lam=None, downscale=DOWNSCALE):
         """Return the original-grid float32 candidate for the selected method."""
         method, lam = resolve_denoiser(method, lam)
-        if self._candidate_key(method, lam, downscale) == self._baseline_key:
+        if self._baseline is not None and self._candidate_key(method, lam, downscale) == self._baseline_key:
             return self._baseline
 
         device = self._inference_device()

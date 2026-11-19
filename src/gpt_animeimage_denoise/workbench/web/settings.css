@@ -41,11 +41,11 @@
 .path-field { display: flex; gap: 8px; }
 .path-field input { flex: 1 1 auto; }
 .path-field button { flex: none; }
-.cache-usage { border-top: 1px solid var(--edge); padding-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.cache-usage > div { display: grid; gap: 3px; min-width: 0; }
+.cache-usage { border-top: 1px solid var(--edge); padding-top: 14px; display: grid; gap: 10px; }
+.cache-usage > div:first-child { display: grid; gap: 3px; min-width: 0; }
 .cache-usage strong { font-size: 13px; font-weight: 600; }
 .cache-usage small { color: var(--quiet); overflow-wrap: anywhere; }
-.cache-usage button { flex: none; }
+.cache-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
 .cache-confirm { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .cache-confirm span { flex-basis: 100%; color: var(--quiet); font-size: 12px; }
 .appearance-choices { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }

@@ -141,6 +141,8 @@ class WorkbenchSessionTest(unittest.TestCase):
             self.assertEqual(report['parameters']['denoiser'], 'esrgan')
             self.assertFalse(report['parameters']['l0_enabled'])
             np.testing.assert_array_equal(session.candidate('esrgan', downscale=.75), sr.astype(np.float32) / 255)
+            self.assertEqual([path.name.split('-')[0] for path in (session.case_dir.parent / '.cache').iterdir()],
+                             ['candidate'])
             generate.assert_called_once()
 
     def test_magnetic_source_uses_verified_l0_cache_after_reopen(self):
@@ -213,6 +215,31 @@ class WorkbenchSessionTest(unittest.TestCase):
         self.assertEqual(len(self.models.calls), 1)
         self.models.release.assert_called()
         self.assertEqual(_sha(self.source), source_hash)
+
+    def test_first_open_only_writes_the_editor_grid_and_the_exact_candidate(self):
+        session = self.open_session()
+        self.assertEqual({path.name for path in session.case_dir.iterdir()},
+                         {'report.json', 'person_labels.png', 'unknown.png', 'objects.png', 'suspected_objects.png'})
+        self.assertEqual([path.name.split('-')[0] for path in (session.case_dir.parent / '.cache').iterdir()], ['l0'])
+        np.testing.assert_array_equal(session.candidate(), self.baseline)
+
+    def test_reopened_draft_with_new_l0_parameter_reuses_the_grid(self):
+        from gpt_animeimage_denoise.workbench import session as workbench_session
+
+        original = self.open_session(self.root / 'cases')
+        wait_ready = test_workbench_documents.DocumentsTest.ready
+        with Documents(self.root, opener=lambda *_: original) as docs:
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            wait_ready(self, opened['id'], opened['revision'], docs=docs)
+
+        with (mock.patch.object(workbench_session.WorkbenchSession, 'open', side_effect=AssertionError('repeated analysis')),
+              mock.patch.object(workbench_session, 'smooth_candidate', return_value=self.baseline) as smooth,
+              Documents(self.root) as reopened):
+            ready = reopened.get(opened['id'])
+            updated = reopened.update(ready['id'], {'revision': ready['revision'],
+                'settings': {**ready['settings'], 'l0': .001}, 'edits': [], 'cursor': 0})
+            wait_ready(self, ready['id'], updated['revision'], docs=reopened)
+            self.assertEqual(smooth.call_args.args[1], .001)
 
     def test_manual_object_candidate_obeys_points_and_keeps_analysis_immutable(self):
         session = self.open_session()

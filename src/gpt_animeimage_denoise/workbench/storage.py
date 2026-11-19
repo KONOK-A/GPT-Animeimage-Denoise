@@ -249,11 +249,15 @@ class CaseCache:
             return False
 
     def _files(self, root):
+        for _, files in self._cases(root):
+            yield from files
+
+    def _cases(self, root):
         if not root.is_dir():
             return
         for case in root.iterdir():
             if self._owned(case):
-                yield from self._case_files(case, root)
+                yield case, set(self._case_files(case, root))
 
     @staticmethod
     def _case_files(case, root):
@@ -273,34 +277,86 @@ class CaseCache:
                     if path.is_file():
                         yield path
 
+    @staticmethod
+    def _intermediates(case, files, *, verify=False):
+        from ..fusion_pipeline import WORKBENCH_FILES
+        from ..pipeline import _digest, _sha
+
+        analysis = case / 'analysis'
+        report_path = analysis / 'report.json'
+        if report_path not in files:
+            return set()
+        try:
+            report = json.loads(report_path.read_text(encoding='utf-8'))
+            hashes = report['output_hashes']
+            identity = report['candidate_cache_identity']
+            stage = report['candidate_cache_stage']
+            if (report['status'] != 'complete' or report['profile'] != 'fusion'
+                    or report['folder'] != 'analysis' or report['source_sha256'] != case.name or report['edits']
+                    or stage not in ('l0', 'candidate') or identity['source_sha256'] != case.name):
+                return set()
+            required = {'person_labels.png', 'unknown.png', 'objects.png'}
+            grid = {analysis / name: hashes[name] for name in (*WORKBENCH_FILES, 'original.png')
+                    if name in required or name in hashes}
+            candidate = case / '.cache' / (stage + '-' + _digest(identity) + '.npz')
+            keep = {report_path, candidate, *grid}
+            if not keep <= files:
+                return set()
+            obsolete = files - keep
+            if obsolete and verify and any(_sha(path) != digest for path, digest in grid.items()):
+                return set()
+            return obsolete
+        except (OSError, KeyError, ValueError, TypeError):
+            return set()
+
     def info(self):
         root = self._path(self._location()['base'])
-        size = 0
-        for path in self._files(root):
-            try:
-                size += path.stat().st_size
-            except FileNotFoundError:
-                pass
-        return {'path': str(root), 'bytes': size}
+        size = reclaimable = 0
+        for case, files in self._cases(root):
+            obsolete = self._intermediates(case, files)
+            for path in files:
+                try:
+                    length = path.stat().st_size
+                except FileNotFoundError:
+                    continue
+                size += length
+                if path in obsolete:
+                    reclaimable += length
+        return {'path': str(root), 'bytes': size, 'reclaimable_bytes': reclaimable}
 
-    def _remove(self, root):
+    def _remove_files(self, root, files):
         # Never recurse into a chosen directory. Only remove known generated files.
-        files = list(self._files(root))
         parents = set()
+        released = 0
         for digest in {path.relative_to(root).parts[0] for path in files}:
             self.claim(root, digest)
         for path in files:
-            path.unlink(missing_ok=True)
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            released += size
             parents.add(path.parent)
         for folder in sorted(parents, key=lambda path: len(path.parts), reverse=True):
             if folder.is_dir() and not any(folder.iterdir()):
                 folder.rmdir()
+        return released
 
-    def clear(self):
+    def _remove(self, root):
+        return self._remove_files(root, list(self._files(root)))
+
+    def clear(self, *, mode='all'):
+        if mode not in ('compact', 'all'):
+            raise ValueError('缓存清理模式无效。')
         with self.lock(wait=False):
-            self.switch(self.preferences.read()['cache_dir'])
-            self._remove(self._path(self._location()['base']))
-            return self.info()
+            root = self.switch(self.preferences.read()['cache_dir'])
+            if mode == 'compact':
+                files = [path for case, files in self._cases(root) for path in self._intermediates(case, files, verify=True)]
+                released = self._remove_files(root, files)
+            else:
+                released = self._remove(root)
+            return {**self.info(), 'released_bytes': released}
 
     def switch(self, base, commit=None):
         current = self._location()

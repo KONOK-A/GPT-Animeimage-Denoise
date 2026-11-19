@@ -494,8 +494,14 @@
           <h2><label for="pref-cache-dir">分析缓存目录</label></h2>
           <div class="path-field"><input type="text" id="pref-cache-dir" placeholder="使用工作台默认缓存"><button type="button" id="choose-cache-dir" class="button">选择目录</button></div>
           <p class="settings-hint">空闲时可迁移或清理分析缓存。原图、草稿和固定的 A 单独保存。</p>
-          <div class="cache-usage"><div><strong id="cache-size">正在读取占用…</strong><small id="cache-location"></small></div><button id="clear-cache" class="button" type="button">清理缓存</button></div>
-          <div id="cache-confirm" class="cache-confirm" hidden><span>下次编辑时将重新计算这些分析数据。</span><button id="confirm-cache" type="button" class="button">确认清理</button><button id="cancel-cache" type="button" class="text-button">取消</button></div>
+          <div class="cache-usage">
+            <div><strong id="cache-size">正在读取占用…</strong><small id="cache-reclaimable" hidden></small><small id="cache-location"></small></div>
+            <div class="cache-actions">
+              <button id="compact-cache" class="button" type="button" disabled>释放中间缓存</button>
+              <button id="clear-cache" class="text-button" type="button" disabled>清空分析缓存</button>
+            </div>
+          </div>
+          <div id="cache-confirm" class="cache-confirm" hidden><span>重新打开草稿并编辑时，需要重算分区和降噪候选。</span><button id="confirm-cache" type="button" class="button">确认清空</button><button id="cancel-cache" type="button" class="text-button">取消</button></div>
         </section>
         <section id="prefs-appearance" role="tabpanel" aria-labelledby="tab-appearance" hidden>
           <h2>外观</h2>

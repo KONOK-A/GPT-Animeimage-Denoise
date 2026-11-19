@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from gpt_animeimage_denoise.pipeline import _digest, _sha
 from gpt_animeimage_denoise.workbench.documents import Documents
 from gpt_animeimage_denoise.workbench.storage import StorageBusy
 
@@ -66,7 +67,8 @@ class WorkbenchStorageTest(unittest.TestCase):
         for name, data in self.generated.items():
             self.assertFalse((self.root_case / name).exists())
             self.assertEqual((target / name).read_bytes(), data)
-        self.assertEqual(self.docs.clear_cache(), {'path': str(target.parent), 'bytes': 0})
+        self.assertEqual(self.docs.clear_cache(), {'path': str(target.parent), 'bytes': 0,
+                                                  'reclaimable_bytes': 0, 'released_bytes': info['bytes']})
         self.assertTrue(all(path.read_bytes() == b'user-content' for path in private))
         self.docs.change_preferences({'cache_dir': ''})
         self.assertEqual(self.docs.cache_info()['path'], str(self.root_case.parent))
@@ -105,3 +107,38 @@ class WorkbenchStorageTest(unittest.TestCase):
         self.assertEqual(self.docs.clear_cache()['bytes'], 0)
         self.assertTrue(draft.is_file())
         self.assertEqual(unrelated.read_text(encoding='utf-8'), 'keep')
+
+    def test_compact_keeps_the_verified_grid_and_candidate_for_reopening(self):
+        analysis = self.root_case / 'analysis'
+        hashes = {}
+        for name in ('original.png', 'person_labels.png', 'objects.png', 'unknown.png'):
+            path = analysis / name
+            path.write_bytes(name.encode('utf-8'))
+            hashes[name] = _sha(path)
+        candidate = {'source_sha256': self.digest, 'lambda': .0005}
+        selected = self.root_case / '.cache' / ('l0-' + _digest(candidate) + '.npz')
+        selected.write_bytes(b'exact candidate')
+        report = analysis / 'report.json'
+        report.write_text(json.dumps({'source_sha256': self.digest, 'profile': 'fusion', 'folder': 'analysis',
+                                      'status': 'complete', 'edits': {}, 'output_hashes': hashes,
+                                      'candidate_cache_identity': candidate, 'candidate_cache_stage': 'l0'}), encoding='utf-8')
+        private = self.root_case / '.cache' / 'personal.npz'
+        private.write_bytes(b'keep')
+        redundant = self.root_case / '.cache' / ('l0-' + 'c' * 64 + '.npz')
+        redundant.write_bytes(b'outdated candidate')
+        expected = sum(map(len, self.generated.values())) + redundant.stat().st_size
+        self.assertEqual(self.docs.cache_info()['reclaimable_bytes'], expected)
+
+        # An incomplete grid should be left alone so it can still use its
+        # intermediate data when recovering the analysis.
+        (analysis / 'objects.png').write_bytes(b'corrupt')
+        self.assertEqual(self.docs.clear_cache(mode='compact')['released_bytes'], 0)
+        (analysis / 'objects.png').write_bytes(b'objects.png')
+        result = self.docs.clear_cache(mode='compact')
+        self.assertEqual(result['released_bytes'], expected)
+        self.assertEqual(result['reclaimable_bytes'], 0)
+        self.assertTrue(all(_sha(analysis / name) == digest for name, digest in hashes.items()))
+        self.assertTrue(report.is_file())
+        self.assertEqual(selected.read_bytes(), b'exact candidate')
+        self.assertEqual(private.read_bytes(), b'keep')
+        self.assertFalse(redundant.exists())

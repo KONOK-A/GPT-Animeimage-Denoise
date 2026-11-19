@@ -6,6 +6,7 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
   const themeNames = ['system', 'light', 'dark'];
   const fields = new Map();
   let value, read, queue = Promise.resolve(), defaults, saved, busy = false, visit = 0;
+  let cacheInfo, cacheRead = 0;
 
   function install(next, changed, syncControls = true) {
     value = next;
@@ -32,9 +33,10 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
     busy = next;
     form.setAttribute('aria-busy', String(next));
     for (const id of ['prefs-save', 'settings-close', 'prefs-cancel', 'exit-workbench',
-      'clear-cache', 'confirm-cache', 'choose-export-dir', 'choose-cache-dir']) {
+      'confirm-cache', 'cancel-cache', 'choose-export-dir', 'choose-cache-dir']) {
       byId(id).disabled = next;
     }
+    updateCacheActions();
   }
   function selectTab(name) {
     for (const key of tabs) {
@@ -45,14 +47,31 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
     }
     if (name === 'storage') cacheUsage(visit);
   }
+  function formatBytes(bytes) {
+    const units = [[1024 ** 3, 'GiB'], [1024 ** 2, 'MiB'], [1024, 'KiB'], [1, 'B']];
+    const [scale, name] = units.find(([scale]) => bytes >= scale) || units.at(-1);
+    return (bytes / scale).toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + ' ' + name;
+  }
+  function updateCacheActions() {
+    byId('compact-cache').disabled = busy || !cacheInfo?.reclaimable_bytes;
+    byId('clear-cache').disabled = busy || !cacheInfo?.bytes;
+  }
+  function showCacheUsage(info) {
+    cacheInfo = info;
+    byId('cache-size').textContent = '缓存占用 ' + formatBytes(info.bytes);
+    byId('cache-location').textContent = info.path;
+    const reclaimable = byId('cache-reclaimable');
+    reclaimable.hidden = !info.reclaimable_bytes;
+    reclaimable.textContent = info.reclaimable_bytes
+      ? '可释放 ' + formatBytes(info.reclaimable_bytes) + '，保留编辑所需的分区与降噪缓存。' : '';
+    updateCacheActions();
+  }
   async function cacheUsage(generation) {
+    const reading = ++cacheRead;
     try {
       const info = await (await request('/api/cache')).json();
-      if (!dialog.open || generation !== visit) return;
-      const unit = info.bytes >= 1024 ** 3 ? 'GiB' : 'MiB', size = info.bytes / (unit === 'GiB' ? 1024 ** 3 : 1024 ** 2);
-      byId('cache-size').textContent = '缓存占用 ' + size.toLocaleString('zh-CN', { maximumFractionDigits: 1 }) + ' ' + unit;
-      byId('cache-location').textContent = info.path;
-    } catch (error) { if (generation === visit) message(error.message, true); }
+      if (dialog.open && generation === visit && reading === cacheRead) showCacheUsage(info);
+    } catch (error) { if (generation === visit && reading === cacheRead) message(error.message, true); }
   }
   function displayDefaults(source) {
     defaults = JSON.parse(JSON.stringify(source));
@@ -98,6 +117,10 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
     const generation = ++visit;
     dialog.dataset.openPointer = String(event.detail > 0);
     dialog.showModal();
+    cacheInfo = null;
+    byId('cache-size').textContent = '正在读取占用…';
+    byId('cache-location').textContent = '';
+    byId('cache-reclaimable').hidden = true;
     setBusy(true);
     message('正在读取设置…');
     try {
@@ -195,11 +218,19 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
   });
   byId('clear-cache').addEventListener('click', () => { byId('cache-confirm').hidden = false; });
   byId('cancel-cache').addEventListener('click', () => { byId('cache-confirm').hidden = true; });
-  byId('confirm-cache').addEventListener('click', async () => {
+  async function cleanCache(mode) {
+    if (busy) return;
     setBusy(true); message('正在清理缓存…');
-    try { await post('/api/cache/clear', {}); await cacheUsage(visit); message('分析缓存已清理。'); }
+    try {
+      const info = await post('/api/cache/clear', { mode });
+      cacheRead++;
+      showCacheUsage(info);
+      message(info.released_bytes ? '已释放 ' + formatBytes(info.released_bytes) + '。' : '当前没有可清理的缓存。');
+    }
     catch (error) { message(error.message, true); }
     finally { setBusy(false); byId('cache-confirm').hidden = true; }
-  });
+  }
+  byId('compact-cache').addEventListener('click', () => cleanCache('compact'));
+  byId('confirm-cache').addEventListener('click', () => cleanCache('all'));
   return { get value() { return value; }, update, load };
 }
