@@ -1,6 +1,9 @@
+from contextlib import redirect_stderr
+from io import StringIO
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -21,6 +24,19 @@ class TrackingUpscale(torch.nn.Module):
 
 
 class StandaloneDenoiseTest(unittest.TestCase):
+    def test_invalid_cli_l0_is_rejected_before_loading_models(self):
+        for value in ('0', '-0.001', 'nan', 'inf', '-inf'):
+            args = ['gaid-whole', 'sample.png', '--method', 'esrgan60_l0', f'--l0={value}']
+            with (self.subTest(value=value),
+                  mock.patch.object(sys, 'argv', args),
+                  mock.patch.object(denoise, 'load_model', side_effect=AssertionError('model loading reached')) as load,
+                  redirect_stderr(StringIO()) as errors):
+                with self.assertRaises(SystemExit) as result:
+                    denoise.main()
+                self.assertEqual(result.exception.code, 2)
+                self.assertIn('--l0 must be a finite positive value', errors.getvalue())
+                load.assert_not_called()
+
     def test_removed_cugan_is_rejected_even_with_an_injected_model(self):
         source = Image.new('RGB', (8, 8))
         for method in ('cugan60', 'cugan60_l0'):

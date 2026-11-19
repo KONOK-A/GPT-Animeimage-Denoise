@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -39,6 +40,20 @@ class PhaseLocked(torch.nn.Module):
 
 
 class TilingTest(unittest.TestCase):
+    def test_stitching_buffers_are_bounded_by_one_tile_row(self):
+        width, height, tile, scale = 77, 105, 32, 2
+        pixels = np.random.default_rng(12).integers(0, 256, (height, width, 3), dtype=np.uint8)
+        with (mock.patch.object(module.np, 'zeros', wraps=np.zeros) as zeros,
+              mock.patch.object(module.np, 'empty', wraps=np.empty) as empty):
+            actual = module.tiled_upscale(Nearest(scale), Image.fromarray(pixels), 'cpu', tile=tile, padding=4)
+        output_width = width * scale
+        for call in zeros.call_args_list + empty.call_args_list:
+            shape = call.args[0]
+            if isinstance(shape, tuple) and len(shape) >= 2 and shape[1] == output_width:
+                self.assertLessEqual(shape[0], tile * scale, shape)
+        expected = np.repeat(np.repeat(pixels, scale, axis=0), scale, axis=1)
+        np.testing.assert_array_equal(np.asarray(actual), expected)
+
     def test_tile_boundaries_and_non_multiple_dimensions(self):
         pixels = np.arange(13 * 17 * 3, dtype=np.uint8).reshape(13, 17, 3)
         image = Image.fromarray(pixels)

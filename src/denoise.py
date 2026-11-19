@@ -60,14 +60,18 @@ def load_model(key, folder, device):
     return spandrel.ModelLoader().load_from_file(str(fetch(key, folder))).model.to(device).eval()
 
 
+def _validate_l0_strength(lam):
+    if not np.isfinite(lam) or lam <= 0:
+        raise ValueError("L0 strength must be a finite positive value")
+
+
 def l0_smooth(img, lam, kappa=2.0, beta_max=1e5, *, device="cpu"):
     """L0 gradient minimization (Xu et al. 2011) on an HxWx3 float image in [0, 1].
 
     Flattens small ripples inside flat colour areas while keeping lines and colour edges; invents no new detail.
     device="cpu" preserves the NumPy path; CUDA uses a float64 whole-image real FFT.
     """
-    if not np.isfinite(lam) or lam <= 0:
-        raise ValueError("L0 strength must be a finite positive value")
+    _validate_l0_strength(lam)
     if not np.isfinite(kappa) or kappa <= 1:
         raise ValueError("L0 kappa must be finite and greater than 1")
     if not np.isfinite(beta_max) or beta_max <= 0:
@@ -158,11 +162,15 @@ def main():
     ap.add_argument("--all", action="store_true", help="write all 5 candidates and a comparison sheet")
     ap.add_argument("--method", default="esrgan60_l0", choices=METHODS)
     ap.add_argument("--l0", type=float, default=L0,
-                    help="L0 strength for the *_l0 methods (default 0.001; try 0.0005-0.002)")
+                    help="Finite positive L0 strength for *_l0 methods (default 0.001, try 0.0005-0.002)")
     ap.add_argument("--models", default=str(model_root()))
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                     help="device for model inference and L0 (default: CUDA when available)")
     a = ap.parse_args()
+    try:
+        _validate_l0_strength(a.l0)
+    except ValueError:
+        ap.error("--l0 must be a finite positive value")
 
     files = []
     for p in map(Path, a.inputs):
