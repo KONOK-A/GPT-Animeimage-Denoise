@@ -5,4 +5,4 @@ import os
 # Set before importing PyTorch so MIOpen can skip convolution autotuning.
 os.environ.setdefault('MIOPEN_FIND_MODE', 'FAST')
 
-__version__ = '2.1.0'
+__version__ = '1.0.0'

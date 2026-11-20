@@ -58,7 +58,7 @@ class WorkbenchDesktopTest(unittest.TestCase):
         self.assert_install_failure(self.run_desktop(), 'gpt-animeimage-denoise')
 
     def test_missing_lazy_dependencies_are_reported_before_loading_server(self):
-        self.install_metadata('gpt-animeimage-denoise', '2.1.0', ['torch==2.11.0', 'torchvision==0.26.0'])
+        self.install_metadata('gpt-animeimage-denoise', '1.0.0', ['torch==2.11.0', 'torchvision==0.26.0'])
         self.install_server("raise AssertionError('server loaded too early')")
 
         result = self.run_desktop()
@@ -68,13 +68,13 @@ class WorkbenchDesktopTest(unittest.TestCase):
         self.assertNotIn('server loaded too early', self.log.read_text(encoding='utf-8'))
 
     def test_server_import_error_includes_install_instructions(self):
-        self.install_metadata('gpt-animeimage-denoise', '2.1.0')
+        self.install_metadata('gpt-animeimage-denoise', '1.0.0')
         self.install_server('import missing_image_backend')
 
         self.assert_install_failure(self.run_desktop(), 'missing_image_backend')
 
     def test_healthy_launch_stays_silent_without_importing_torch(self):
-        self.install_metadata('gpt-animeimage-denoise', '2.1.0', ['torch<=2.11.0,>=2.9.1'])
+        self.install_metadata('gpt-animeimage-denoise', '1.0.0', ['torch<=2.11.0,>=2.9.1'])
         self.install_metadata('torch', '2.9.1+rocm7.2.1')
         (self.site / 'torch.py').write_text("raise AssertionError('torch imported at startup')\n", encoding='utf-8')
         self.install_server('''
