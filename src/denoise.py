@@ -8,20 +8,23 @@ Default method (recommended): downscale to 60% -> Real-ESRGAN x4plus anime 6B ->
   python denoise.py ./folder --out ./cleaned             # every image in a folder
   python denoise.py image.png --l0 0.002                 # stronger L0 (0.001 is only the recommended value)
 
-Super-resolution uses overlapping tiled inference; L0 uses CUDA float64 when available. Outputs keep the input size. Models are downloaded on first use into --models (default: GPT_ANIMEIMAGE_DENOISE_MODEL_DIR or ./models).
+Super-resolution uses overlapping tiled inference. L0 uses float64 on CUDA/ROCm and float32 on Apple MPS.
+Outputs keep the input size. Models are downloaded on first use into --models
+(default: GPT_ANIMEIMAGE_DENOISE_MODEL_DIR or ./models).
 """
 import argparse
 import hashlib
 import urllib.request
 from pathlib import Path
+from warnings import warn
 
 import numpy as np
-import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from tiled_inference import tiled_upscale
-from l0_cuda import l0_smooth_cuda
+from gpt_animeimage_denoise.devices import DEVICE_HELP, clear_accelerator_cache, resolve_device
 from gpt_animeimage_denoise.model_paths import model_root
+from l0_cuda import l0_smooth_cuda
+from tiled_inference import tiled_upscale
 
 MODELS = {
     "esrgan": ("RealESRGAN_x4plus_anime_6B.pth",
@@ -94,15 +97,29 @@ def l0_smooth(img, lam, kappa=2.0, beta_max=1e5, *, device="cpu"):
     """L0 gradient minimization (Xu et al. 2011) on an HxWx3 float image in [0, 1].
 
     Flattens small ripples inside flat colour areas while keeping lines and colour edges; invents no new detail.
-    Both devices use a float64 whole-image real FFT.
+    The whole-image real FFT runs in float32 on MPS and float64 elsewhere.
     """
+    import torch
+
     _validate_l0_strength(lam)
     if not np.isfinite(kappa) or kappa <= 1:
         raise ValueError("L0 kappa must be finite and greater than 1")
     if not np.isfinite(beta_max) or beta_max <= 0:
         raise ValueError("L0 beta_max must be a finite positive value")
-    if torch.device(device).type == "cuda":
+    kind = torch.device(device).type
+    if kind == "cuda":
         return l0_smooth_cuda(img, lam, kappa, beta_max, device)
+    if kind == "mps":
+        try:
+            result = l0_smooth_cuda(img, lam, kappa, beta_max, device)
+        except RuntimeError as error:
+            if not isinstance(error, torch.OutOfMemoryError) and "out of memory" not in str(error).lower():
+                raise
+            result = None
+            warn("MPS memory exhausted. Running L0 on CPU.", RuntimeWarning, stacklevel=2)
+        clear_accelerator_cache(device)
+        if result is not None:
+            return result
     value = img.astype(np.float64, order="C")
     height, width, channels = value.shape
     fx = np.zeros(width)
@@ -197,26 +214,29 @@ def main():
     ap.add_argument("--l0", type=float, default=L0,
                     help="Finite positive L0 strength for *_l0 methods (default 0.001, try 0.0005-0.002)")
     ap.add_argument("--models", default=str(model_root()))
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
-                    help="device for model inference and L0 (default: CUDA when available)")
+    ap.add_argument("--device", default="auto", help=DEVICE_HELP)
     a = ap.parse_args()
     try:
         _validate_l0_strength(a.l0)
     except ValueError:
         ap.error("--l0 must be a finite positive value")
+    try:
+        device = resolve_device(a.device)
+    except (ValueError, RuntimeError) as error:
+        ap.error(str(error))
 
     files = []
     for p in map(Path, a.inputs):
         files += sorted(q for q in p.iterdir() if q.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")) if p.is_dir() else [p]
     methods = METHODS if a.all else [a.method]
     need = {m.split("60")[0] if "60" in m else m for m in methods if not m.startswith("l0_")}
-    models = {k: load_model(k, Path(a.models), a.device) for k in need}
+    models = {k: load_model(k, Path(a.models), device) for k in need}
 
     for p in files:
         src = Image.open(p).convert("RGB")
         out = Path(a.out) if a.out else p.parent / f"{p.stem}_denoise"
         out.mkdir(parents=True, exist_ok=True)
-        res = run(src, methods, models, a.device, a.l0)
+        res = run(src, methods, models, device, a.l0)
         for k, im in res.items():
             im.save(out / f"{p.stem}_{k}.png")
         if a.all:

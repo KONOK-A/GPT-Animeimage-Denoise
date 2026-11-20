@@ -12,6 +12,7 @@ from PIL import Image
 
 from ..denoisers import (DOWNSCALE, describe_denoiser, resolve_denoiser,
                          smooth_candidate, super_resolve, uses_l0, uses_sr)
+from ..devices import is_device_name, resolve_device
 from ..editor import SelectionEditor
 from ..fusion_evaluation import _review_candidate
 from ..pipeline import _assert_inputs_safe, _case_folder, _digest, _read_source, _sha
@@ -45,7 +46,7 @@ def _cached_l0_baseline(source, workspace, digest, size, lam):
     device = parameters['device']
     if (report['folder'] != 'analysis' or report['size'] != size
             or parameters.get('denoiser', 'l0') != 'l0' or parameters['lambda'] != lam
-            or not isinstance(device, str) or (device != 'cpu' and not device.startswith('cuda'))):
+            or not is_device_name(device)):
         raise ValueError('Workbench L0 cache does not match the requested source and settings')
     rgb, alpha, icc = _completed_case_source(source, case, report, digest)
     return rgb, alpha, icc, _review_candidate(output / '.cache', report, rgb.shape)
@@ -99,19 +100,13 @@ class WorkbenchSession:
     def open(cls, source, workspace, *, device='auto', method='l0', lam=None, downscale=DOWNSCALE,
              on_stage=None, preloaded_sky=None):
         """Run or resume a fusion case using the document's actual denoiser."""
-        import torch
-
         from ..fusion_models import FusionModels
         from ..fusion_pipeline import process_image
 
         source = Path(source).resolve(strict=True)
         digest = _sha(source)
         output = _case_folder(Path(workspace).resolve(), digest)
-        device = ('cuda' if torch.cuda.is_available() else 'cpu') if device == 'auto' else device
-        if device != 'cpu' and not device.startswith('cuda'):
-            raise ValueError('device must be auto/cpu/cuda/cuda:N')
-        if device.startswith('cuda') and not torch.cuda.is_available():
-            raise RuntimeError('CUDA is unavailable; select --device cpu')
+        device = resolve_device(device)
 
         models = FusionModels(device=device, defer_checkpoint_checks=True, preloaded_sky=preloaded_sky)
         del preloaded_sky  # Let the adapter release the moved model after the Sky pass.
@@ -151,8 +146,7 @@ class WorkbenchSession:
         parameters = report['parameters']
         device = parameters['device']
         method, lam = resolve_denoiser(method, lam)
-        if (report['folder'] != 'analysis' or report['size'] != size
-                or not isinstance(device, str) or not (device == 'cpu' or device.startswith('cuda'))):
+        if report['folder'] != 'analysis' or report['size'] != size or not is_device_name(device):
             raise ValueError('Workbench cache does not match the requested source grid')
         matching = (parameters.get('denoiser', 'l0') == method
                     and (not uses_l0(method) or parameters['lambda'] == lam)
@@ -185,9 +179,7 @@ class WorkbenchSession:
 
     def _inference_device(self):
         if self._models is None:
-            import torch
-
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.device = resolve_device()
         return self.device
 
     def predict_object(self, positive, negative):

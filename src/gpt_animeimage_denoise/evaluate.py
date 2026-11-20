@@ -3,6 +3,8 @@ import argparse
 import json
 from pathlib import Path
 
+from .devices import DEVICE_HELP, resolve_device
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -18,7 +20,7 @@ def main(argv=None):
     calibration = commands.add_parser('calibrate')
     calibration.add_argument('--review', type=Path, required=True)
     calibration.add_argument('--out', type=Path, required=True)
-    calibration.add_argument('--device', default='cuda')
+    calibration.add_argument('--device', default='auto', help=DEVICE_HELP)
     evaluate = commands.add_parser('evaluate')
     evaluate.add_argument('--review', type=Path, required=True)
     evaluate.add_argument('--reference', type=Path, required=True)
@@ -59,7 +61,7 @@ def main(argv=None):
     from .fusion_models import FusionModels
     from .fusion_pipeline import process_image
 
-    models = FusionModels(device=args.device)
+    models = FusionModels(device=resolve_device(args.device))
 
     def run(case, policy, profile):
         folder = args.out / 'runs' / profile

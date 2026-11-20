@@ -103,6 +103,28 @@ class StrictLoadingContracts(unittest.TestCase):
         with patch.object(module.FusionModels, '_verify_assets', return_value={'weights': 'a', 'source': 'changed'}):
             self.assertNotEqual(a, module.FusionModels(device='cpu').signature)
 
+    def test_mps_denoising_keeps_the_segmentation_model_on_cpu(self):
+        module = adapter()
+        model = torch.nn.Conv2d(3, 1, 1)
+        with (patch.object(module.FusionModels, '_verify_assets', return_value={}),
+              patch.object(module.FusionModels, '_load_sky_cpu', return_value=model)):
+            models = module.FusionModels(device='mps')
+            self.assertEqual(models.device, 'mps')
+            self.assertEqual(next(models._build_sky().parameters()).device.type, 'cpu')
+
+    def test_rocm_signature_differs_from_nvidia_on_the_same_torch_device(self):
+        module = adapter()
+        from gpt_animeimage_denoise.denoisers import describe_denoiser
+
+        with patch.object(module.FusionModels, '_verify_assets', return_value={}):
+            with patch.object(torch.version, 'hip', None):
+                nvidia = module.FusionModels(device='cuda').signature
+                self.assertNotIn('backend', describe_denoiser('l0', 'cuda'))
+            with patch.object(torch.version, 'hip', '7.2.1'):
+                rocm = module.FusionModels(device='cuda').signature
+                self.assertEqual(describe_denoiser('l0', 'cuda')['backend'], 'rocm')
+        self.assertNotEqual(nvidia, rocm)
+
     def test_windows_asset_manifest_and_pinned_config_reject_corruption(self):
         module = adapter()
         with tempfile.TemporaryDirectory() as folder:

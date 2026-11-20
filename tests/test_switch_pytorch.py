@@ -10,11 +10,12 @@ import tomllib
 import unittest
 from unittest import mock
 
+from packaging.requirements import Requirement
+
 
 PROJECT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT / 'tools/switch_pytorch.py'
-PINS = dict(requirement.split('==', 1) for requirement in
-            tomllib.loads((PROJECT / 'pyproject.toml').read_text(encoding='utf-8'))['project']['dependencies'])
+PINS = {'torch': '2.11.0', 'torchvision': '0.26.0'}
 
 
 class SwitchPyTorchTest(unittest.TestCase):
@@ -72,3 +73,9 @@ class SwitchPyTorchTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertIn(f'{PINS["torch"]}+cpu', output)
         self.assertTrue(errors)
+
+    def test_project_allows_the_official_windows_rocm_wheels(self):
+        dependencies = tomllib.loads((PROJECT / 'pyproject.toml').read_text(encoding='utf-8'))['project']['dependencies']
+        requirements = {req.name: req for req in map(Requirement, dependencies)}
+        self.assertIn('2.9.1+rocm7.2.1', requirements['torch'].specifier)
+        self.assertIn('0.24.1+rocm7.2.1', requirements['torchvision'].specifier)

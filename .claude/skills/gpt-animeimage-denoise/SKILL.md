@@ -19,6 +19,8 @@ description: Use the local GPT AnimeImage Denoise tool to reduce fish-scale arti
 
 GAID CLI 从 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR` 读取模型根目录。变量未设置时，默认用调用目录下的 `./models`。按部位处理时，`process` 和 `batch` 的分区模型目录默认为 `<模型根目录>/v2` 与 `<模型根目录>/AnimeSeg`，可分别用 `--assets` 和 `--anime-assets` 指定。
 
+设备默认由 GAID 选择。需要指定时，NVIDIA CUDA 和 AMD ROCm 使用 `--device cuda`，Apple Silicon 使用 `--device mps`，CPU 使用 `--device cpu`。在 Linux 和 macOS 上可用仓库的 `.venv/bin/python` 运行相同的模块命令。平台安装步骤见 GAID 仓库的 `docs/accelerators.md`。
+
 ## 查询 CLI 和创建清单
 
 `--help` 列出子命令，在子命令后加 `--help` 可查看它的参数。`--version` 显示 GAID 版本。以下 PowerShell 7 示例使用上面定位的解释器。

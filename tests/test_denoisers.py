@@ -124,7 +124,7 @@ class DenoiserTest(unittest.TestCase):
         self.assertEqual(identity['precision'], {'dtype': 'float32', 'autocast': False,
             'matmul_allow_tf32': False, 'cudnn_allow_tf32': False})
         self.assertEqual(set(identity['implementation']),
-                         {'denoisers.py', 'denoise.py', 'tiled_inference.py'})
+                         {'denoisers.py', 'devices.py', 'denoise.py', 'tiled_inference.py'})
         json.dumps(identity, sort_keys=True, allow_nan=False)
 
     def test_injected_sr_identity_is_stable_and_tracks_explicit_state(self):
@@ -384,6 +384,28 @@ class NativeSRTest(unittest.TestCase):
         self.assertTrue(torch.backends.cuda.matmul.allow_tf32)
         self.assertFalse(torch.backends.cudnn.allow_tf32)
         self.assertEqual(cache.call_count, 1)
+
+    def test_native_mps_sr_moves_tiles_and_releases_metal_cache(self):
+        import denoise
+
+        model = torch.nn.Identity()
+        move = torch.Tensor.to
+        devices = []
+
+        def simulate_mps(tensor, device):
+            devices.append(device)
+            self.assertEqual(tensor.dtype, torch.float32)
+            return move(tensor, 'cpu')
+
+        with (mock.patch.object(denoise, 'load_model', return_value=model) as load,
+              mock.patch.object(torch.Tensor, 'to', new=simulate_mps),
+              mock.patch.object(torch.mps, 'empty_cache') as clear):
+            result = self.module.super_resolve(self.rgb, device='mps', downscale=1)
+
+        self.assertEqual(devices, ['mps'])
+        load.assert_called_once_with('esrgan', self.folder, 'mps')
+        clear.assert_called_once()
+        np.testing.assert_array_equal(result, self.rgb)
 
 
 if __name__ == '__main__':unittest.main()

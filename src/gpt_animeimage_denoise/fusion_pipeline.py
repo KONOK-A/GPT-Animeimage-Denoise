@@ -324,7 +324,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         input_snapshots[str(policy_path)] = policy_hash
     code = _code_hash(['fusion_pipeline.py', 'corrections.py', 'fusion.py', 'auto_sam.py',
                        'fusion_models.py', 'grouping.py', 'filters.py', 'pipeline.py', 'denoisers.py', 'semantic_repair.py',
-                       '../denoise.py', '../l0_cuda.py', '../tiled_inference.py'])
+                       'devices.py', '../denoise.py', '../l0_cuda.py', '../tiled_inference.py'])
     device = str(device if device is not None else getattr(models, 'device', 'cpu'))
     stage('candidate')
     denoiser_config = describe_denoiser(denoiser, device, sr_fn=sr_fn, downscale=downscale)
@@ -370,7 +370,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         evidence_identity = {'source_sha256': input_hash, 'models': str(models.signature), 'device': device,
             'preprocessing': 'exif-original-grid-white-alpha-v1', 'dual_view': profile == 'fusion',
             'see_views': ['white', 'original'] if profile == 'fusion' else ['white'],
-            'code': _code_hash(['fusion_models.py', 'fusion_pipeline.py', 'pipeline.py'])}
+            'code': _code_hash(['fusion_models.py', 'fusion_pipeline.py', 'pipeline.py', 'devices.py'])}
         evidence = None; evidence_hit = False
         if _workbench:
             # The editor uses the final grid, so bulk inference arrays and automatic
@@ -448,7 +448,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     candidate_identity = {'source_sha256': input_hash,
         'lambda': float(lam) if uses_l0(denoiser) else None, 'device': device,
         'denoiser': denoiser, 'denoiser_config': denoiser_config,
-        'code': _code_hash(['../denoise.py', '../l0_cuda.py', 'fusion_pipeline.py', 'denoisers.py']),
+        'code': _code_hash(['../denoise.py', '../l0_cuda.py', 'fusion_pipeline.py', 'denoisers.py', 'devices.py']),
         'callable': l0_implementation, 'precision': 'float32-cache'}
     candidate_stage = 'l0' if denoiser == 'l0' else 'candidate'
 

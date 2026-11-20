@@ -16,6 +16,8 @@ py -3.12 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
+AMD 显卡和 Apple Silicon 的安装步骤、驱动要求及验证命令见 [AMD ROCm 和 Apple MPS](docs/accelerators.md)。
+
 ### 切换 CPU 或 CUDA 版 PyTorch
 
 已有安装时，先退出工作台和使用同一 `.venv` 的 GAID 进程。在项目根目录运行下面的命令切到 NVIDIA CUDA 12.8 版。要切到 CPU 版，将最后的 `cuda` 改为 `cpu`。
@@ -24,7 +26,7 @@ py -3.12 -m venv .venv
 & .\.venv\Scripts\python.exe -X utf8 .\tools\switch_pytorch.py cuda
 ```
 
-脚本会先下载项目锁定版本的 `torch` 和 `torchvision` wheel。两个都下载成功后才从本地替换，下载失败时保留现有安装。完成后会实际导入这两个包，显示构建版本和 GAID 在 `auto` 模式下可用的设备。
+脚本会先下载适用于 CPU 或 CUDA 的 `torch` 和 `torchvision` wheel。两个都下载成功后才从本地替换，下载失败时保留现有安装。完成后会实际导入这两个包，显示构建版本和 GAID 在 `auto` 模式下可用的设备。
 
 ### 首次出图
 

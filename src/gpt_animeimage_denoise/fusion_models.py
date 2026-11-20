@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 import torch
 
+from .devices import clear_accelerator_cache, fp32_context as _fp32_context, uses_rocm
 from .model_paths import model_root
 
 PINNED_ANIME = {
@@ -68,19 +69,6 @@ def _preprocess_m2f(rgb):
     pixels = np.asarray(Image.fromarray(rgb).resize((768, 768), Image.Resampling.BILINEAR), dtype=np.float32)/255
     pixels = (pixels - np.array([.485, .456, .406], np.float32))/np.array([.229, .224, .225], np.float32)
     return torch.from_numpy(pixels).permute(2, 0, 1).unsqueeze(0).float()
-
-
-@contextmanager
-def _fp32_context(device):
-    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        with torch.autocast(torch.device(device).type, enabled=False):
-            yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = matmul
-        torch.backends.cudnn.allow_tf32 = cudnn
 
 
 def _reject_training_loss(module, args):
@@ -170,14 +158,21 @@ class FusionModels:
         self.assets = Path(assets or root/'v2').resolve()
         self.anime_assets = Path(anime_assets or root/'AnimeSeg').resolve()
         self.device = str(torch.device(device))
-        if torch.device(self.device).type not in ['cpu', 'cuda']:
-            raise ValueError('FusionModels supports explicit cpu or cuda devices')
+        kind = torch.device(self.device).type
+        if kind not in ('cpu', 'cuda', 'mps'):
+            raise ValueError('FusionModels supports explicit cpu, cuda or mps devices')
+        # Keep the pinned segmentation and SAM2 models on the CPU on Apple
+        # Silicon. The denoising stages use the requested MPS device.
+        self.model_device = 'cpu' if kind == 'mps' else self.device
+        self._rocm = uses_rocm(self.device)
         self.sky = self.parts = self.m2f = self.sam = None
         self._preloaded_sky = preloaded_sky
         self._sam_image_key = None
+        self._see_checkpoint_dtype = None
         self._m2f_info = {}
         self.identities = self._verify_assets(defer_checkpoint_checks=defer_checkpoint_checks)
         self._signature_base = {'assets': self.identities, 'precision': PRECISION, 'device': self.device,
+                                'model_device': self.model_device, 'backend': 'rocm' if self._rocm else kind,
                                 'adapter_sha256': _digest(__file__)}
 
     @property
@@ -187,8 +182,9 @@ class FusionModels:
         identity = {**self._signature_base, 'sky_tf32': self._tf32_flags()}
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
-    @staticmethod
-    def _tf32_flags():
+    def _tf32_flags(self):
+        if self._rocm or self.model_device != self.device:
+            return {'matmul': False, 'cudnn': False}
         return {'matmul': bool(torch.backends.cuda.matmul.allow_tf32), 'cudnn': bool(torch.backends.cudnn.allow_tf32)}
 
     def _verify_assets(self, *, defer_checkpoint_checks=False):
@@ -241,7 +237,7 @@ class FusionModels:
     def _build_sky(self):
         prepared, self._preloaded_sky = self._preloaded_sky, None
         model = prepared[1] if prepared is not None and prepared[0] == self._sky_identity() else self._load_sky_cpu()
-        return model.to(device=self.device, dtype=torch.float32)
+        return model.to(device=self.model_device, dtype=torch.float32)
 
     def _build_see(self):
         from accelerate import init_empty_weights
@@ -257,8 +253,11 @@ class FusionModels:
         with init_empty_weights(include_buffers=False):
             model = SemanticSam(class_num=19)
         model.load_state_dict(state, strict=True, assign=True)
-        # Keep the existing checkpoint precision, including BF16, on all devices.
-        return model.eval().to(self.device)
+        self._see_checkpoint_dtype = next(model.parameters()).dtype
+        # Use FP32 kernels on ROCm and for the CPU models paired with MPS.
+        if self._rocm or self.model_device != self.device:
+            model.float()
+        return model.eval().to(self.model_device)
 
     def _verify_see_imports(self):
         """Reject Python's cached packages when they do not match signed See sources."""
@@ -293,7 +292,7 @@ class FusionModels:
             model = cls(str(self.anime_assets/'base-configs/large'), num_classes=12, load_base_pretrained=False)
         state = load_file(str(self.anime_assets/'models/anime_seg_mask2former_v4.safetensors'), device='cpu')
         self._m2f_info = _strict_load_m2f(model.model, state)
-        return model.eval().to(device=self.device, dtype=torch.float32)
+        return model.eval().to(device=self.model_device, dtype=torch.float32)
 
     def _build_sam(self):
         path = self.assets/'sam2/sam2.1_hiera_large.pt'
@@ -304,7 +303,8 @@ class FusionModels:
                 raise RuntimeError('SAM2 source shadowed by another installed package')
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', str(path), device=self.device, apply_postprocessing=False)
+            model = build_sam2('configs/sam2.1/sam2.1_hiera_l.yaml', str(path),
+                               device=self.model_device, apply_postprocessing=False)
             return SAM2ImagePredictor(model, max_hole_area=0, max_sprinkle_area=0)
 
     def _build_generator(self):
@@ -314,8 +314,12 @@ class FusionModels:
                                          crop_n_layers=0, min_mask_region_area=0,
                                          max_hole_area=0, max_sprinkle_area=0)
 
-    def _autocast(self, dtype=torch.bfloat16):
-        return torch.autocast(torch.device(self.device).type, dtype=dtype) if dtype in [torch.float16, torch.bfloat16] else nullcontext()
+    def _sam_autocast(self):
+        if self._rocm:
+            return torch.autocast('cuda', enabled=False)
+        if self.model_device.startswith('cuda'):
+            return torch.autocast('cuda', dtype=torch.bfloat16)
+        return nullcontext()
 
     def _clear(self, name):
         value = getattr(self, name)
@@ -328,8 +332,7 @@ class FusionModels:
         setattr(self, name, None)
         del value
         gc.collect()
-        if self.device.startswith('cuda'):
-            torch.cuda.empty_cache()
+        clear_accelerator_cache(self.model_device)
 
     def release(self, *, keep_preloaded_sky=False):
         if not keep_preloaded_sky:
@@ -337,9 +340,8 @@ class FusionModels:
         had_model = any(value is not None for value in (self.sky, self.parts, self.m2f, self.sam))
         for name in ['sky', 'parts', 'm2f', 'sam']:
             self._clear(name)
-        if not had_model and self.device.startswith('cuda'):
-            # The denoiser can also leave free blocks in the CUDA allocator.
-            torch.cuda.empty_cache()
+        if not had_model:
+            clear_accelerator_cache(self.device)
 
     def segment_evidence(self, rgb_uint8, *, dual_view=True):
         h0, w0 = _validate_rgb(rgb_uint8)
@@ -347,12 +349,13 @@ class FusionModels:
             raise ValueError('dual_view must be a bool')
         self.release(keep_preloaded_sky=True)
         provenance = {'input_shape': list(rgb_uint8.shape), 'grid': 'EXIF-oriented-original',
-                      'model_hashes': self.identities, 'device': self.device, 'signature': self.signature}
+                      'model_hashes': self.identities, 'device': self.model_device, 'signature': self.signature}
+        kind = torch.device(self.model_device).type
         tensor, (h, w, top, left) = _prepare_sky(rgb_uint8)
         try:
             self.sky = self._build_sky()
-            with torch.inference_mode(), torch.autocast(torch.device(self.device).type, enabled=False):
-                prediction = self.sky(tensor.to(self.device))[0][0].sigmoid()
+            with torch.inference_mode(), torch.autocast(kind, enabled=False):
+                prediction = self.sky(tensor.to(self.model_device))[0][0].sigmoid()
                 values = prediction.float().cpu().numpy()[0, 0]
             alpha = cv2.resize(values[top:top+h, left:left+w], (w0, h0)).clip(0, 1).astype(np.float32)
             if not np.isfinite(alpha).all():
@@ -373,7 +376,7 @@ class FusionModels:
         try:
             self.parts = self._build_see()
             dtype = next(self.parts.parameters()).dtype
-            with torch.inference_mode(), torch.autocast(torch.device(self.device).type, enabled=False):
+            with torch.inference_mode(), torch.autocast(kind, enabled=False):
                 for name in see_preprocessing:
                     # Keep the caller's original pixels independent of model
                     # preprocessing while retaining both unmerged score views.
@@ -383,7 +386,9 @@ class FusionModels:
                         raise RuntimeError('See ' + name + ' must return finite raw19 logits on the original grid')
                     see_results[name] = values
                     del pixels, values
-            provenance['see'] = {'checkpoint_dtype': str(dtype).removeprefix('torch.'), 'output_dtype': 'float32',
+            checkpoint_dtype = self._see_checkpoint_dtype or dtype
+            provenance['see'] = {'checkpoint_dtype': str(checkpoint_dtype).removeprefix('torch.'),
+                                 'inference_dtype': str(dtype).removeprefix('torch.'), 'output_dtype': 'float32',
                                  'input_shape': list(white.shape), 'encoder_size': int(self.parts.img_size),
                                  'preprocessing': see_preprocessing['white'],
                                  'views': list(see_preprocessing), 'view_preprocessing': see_preprocessing,
@@ -394,8 +399,8 @@ class FusionModels:
         try:
             self.m2f = self._build_m2f()
             for name, pixels in [('m2f_white', white)] + ([('m2f_original', rgb_uint8)] if dual_view else []):
-                tensor = _preprocess_m2f(pixels).to(self.device)
-                with torch.inference_mode(), _fp32_context(self.device):
+                tensor = _preprocess_m2f(pixels).to(self.model_device)
+                with torch.inference_mode(), _fp32_context(self.model_device):
                     output = self.m2f(tensor)
                     values = output['semantic_logits']
                     if values.shape != (1, 12, 768, 768) or not torch.isfinite(values).all():
@@ -428,8 +433,7 @@ class FusionModels:
             raise ValueError('mask_input must be finite float32[1,256,256] logits')
         self._ensure_sam()
         key = (rgb_uint8.shape, hashlib.sha256(rgb_uint8.tobytes()).hexdigest())
-        context = self._autocast() if self.device.startswith('cuda') else nullcontext()
-        with torch.inference_mode(), context:
+        with torch.inference_mode(), self._sam_autocast():
             if key != self._sam_image_key:
                 self.sam.set_image(rgb_uint8.copy())
                 self._sam_image_key = key
@@ -450,9 +454,8 @@ class FusionModels:
         x0, y0, x1, y1 = int(np.floor(x0)), int(np.floor(y0)), int(np.ceil(x1)), int(np.ceil(y1))
         self._ensure_sam()
         generator = self._build_generator()
-        context = self._autocast() if self.device.startswith('cuda') else nullcontext()
         try:
-            with torch.inference_mode(), context:
+            with torch.inference_mode(), self._sam_autocast():
                 proposals = generator.generate(rgb_uint8[y0:y1, x0:x1].copy())
         finally:
             # AMG owns a separate image predictor; never retain its embedding.

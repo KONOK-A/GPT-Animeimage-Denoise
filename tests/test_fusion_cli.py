@@ -98,6 +98,29 @@ class FusionCLITest(unittest.TestCase):
                     self.assertEqual(code, 1)
             batch.assert_not_called()
 
+    def test_whole_selects_mps_and_keeps_explicit_cpu(self):
+        import torch
+
+        with (mock.patch.object(torch.cuda, 'is_available', return_value=False),
+              mock.patch.object(torch.backends.mps, 'is_available', return_value=True),
+              mock.patch('gpt_animeimage_denoise.fusion_pipeline.process_batch', return_value=[]) as batch):
+            arguments = ['batch', '--directory', 'images', '--out', 'out', '--whole']
+            for requested, expected in (('auto', 'mps'), ('mps', 'mps'), ('cpu', 'cpu')):
+                with self.subTest(device=requested):
+                    self.assertEqual(cli.main([*arguments, '--device', requested]), 0)
+                    self.assertEqual(batch.call_args.kwargs['device'], expected)
+
+    def test_explicit_unavailable_mps_fails_before_processing(self):
+        import torch
+
+        with (mock.patch.object(torch.backends.mps, 'is_available', return_value=False),
+              mock.patch('gpt_animeimage_denoise.fusion_pipeline.process_batch') as batch,
+              redirect_stderr(StringIO()) as errors):
+            self.assertEqual(cli.main(['batch', '--directory', 'images', '--out', 'out',
+                                       '--whole', '--device', 'mps']), 1)
+        self.assertIn('MPS is unavailable', errors.getvalue())
+        batch.assert_not_called()
+
     def test_retired_legacy_profile_is_rejected_by_the_parser(self):
         with self.assertRaises(SystemExit) as context:
             cli.main(['process', 'a.png', '--out', 'out', '--profile', 'legacy'])

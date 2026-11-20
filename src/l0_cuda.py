@@ -1,15 +1,19 @@
-"""Double-precision CUDA implementation of the existing whole-image L0 solve."""
+"""Torch implementation of the whole-image L0 solve on CUDA, ROCm and MPS."""
 
+import numpy as np
 import torch
 
 
 @torch.inference_mode()
 def l0_smooth_cuda(img, lam, kappa, beta_max, device):
-    # Channels form the FFT batch. No resizing, independent tiles, or reduced
-    # precision: the periodic gradient objective matches the NumPy CPU path.
-    value = torch.as_tensor(img, dtype=torch.float64, device=device).permute(2, 0, 1).contiguous()
+    dtype = torch.float64
+    if torch.device(device).type == 'mps':
+        # Convert on the host before transferring to Metal.
+        img = np.ascontiguousarray(img, dtype=np.float32)
+        dtype = torch.float32
+    value = torch.as_tensor(img, dtype=dtype, device=device).permute(2, 0, 1).contiguous()
     height, width = value.shape[-2:]
-    fx = torch.zeros((height, width), dtype=value.dtype, device=device)
+    fx = value.new_zeros((height, width))
     fy = torch.zeros_like(fx)
     fx[0, 0], fx[0, -1] = -1, 1
     fy[0, 0], fy[-1, 0] = -1, 1

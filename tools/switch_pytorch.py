@@ -18,11 +18,12 @@ def _target_versions(tag):
     dependencies = tomllib.loads(path.read_text(encoding='utf-8'))['project']['dependencies']
     pins = {}
     for requirement in dependencies:
-        name, operator, version = requirement.partition('==')
+        name, operator, bounds = requirement.partition('<=')
         if name in PACKAGES and operator:
-            pins[name] = version
+            # The upper bounds are the CPU and CUDA versions in the README.
+            pins[name] = bounds.partition(',')[0]
     if len(pins) != len(PACKAGES):
-        raise ValueError('pyproject.toml must pin torch and torchvision before switching builds.')
+        raise ValueError('pyproject.toml must set upper bounds for torch and torchvision.')
     return {name: f'{pins[name]}+{tag}' for name in PACKAGES}
 
 

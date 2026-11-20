@@ -73,6 +73,39 @@ class L0CpuTest(unittest.TestCase):
                 np.testing.assert_array_equal(image, before)
 
 
+class L0MpsTest(unittest.TestCase):
+    def test_mps_runs_the_float32_solver_with_the_original_image_grid(self):
+        allocate = torch.as_tensor
+
+        def simulate_mps(pixels, *, device, dtype):
+            self.assertEqual(str(device), 'mps')
+            self.assertEqual(pixels.dtype, np.float32)
+            self.assertEqual(dtype, torch.float32)
+            return allocate(pixels, device='cpu', dtype=dtype)
+
+        rng = np.random.default_rng(32)
+        for width in (19, 20):
+            with self.subTest(width=width):
+                image = 0.45 + rng.normal(0, 0.01, (17, width, 3))
+                image[:, 8:] += 0.18
+                with (patch.object(torch, 'as_tensor', side_effect=simulate_mps) as transfer,
+                      patch.object(torch.mps, 'empty_cache') as clear):
+                    result = denoise.l0_smooth(image, 0.0005, device='mps')
+                transfer.assert_called_once()
+                clear.assert_called_once()
+                self.assertEqual(result.dtype, np.float32)
+                np.testing.assert_allclose(result, denoise.l0_smooth(image, 0.0005), rtol=0, atol=5e-6)
+
+    def test_mps_out_of_memory_clears_cache_and_retries_on_cpu(self):
+        image = np.full((9, 11, 3), .43)
+        with (patch.object(torch, 'as_tensor', side_effect=RuntimeError('MPS backend out of memory')),
+              patch.object(torch.mps, 'empty_cache') as clear,
+              self.assertWarnsRegex(RuntimeWarning, 'Running L0 on CPU')):
+            result = denoise.l0_smooth(image, 0.0005, device='mps')
+        clear.assert_called_once()
+        np.testing.assert_array_equal(result, denoise.l0_smooth(image, 0.0005))
+
+
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware required')
 class L0GpuTest(unittest.TestCase):
     def test_gpu_matches_cpu_for_odd_even_and_flat_images(self):

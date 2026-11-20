@@ -3,6 +3,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import ctypes
 from importlib import metadata
 from pathlib import Path
+import re
 import traceback
 
 
@@ -21,8 +22,7 @@ def _check_dependencies():
 
     missing = []
     for requirement in requirements:
-        # The project's runtime requirements are unconditional exact pins.
-        package = requirement.partition('==')[0]
+        package = re.split(r'[<>=!~]', requirement, maxsplit=1)[0].strip()
         try:
             metadata.distribution(package)
         except metadata.PackageNotFoundError:

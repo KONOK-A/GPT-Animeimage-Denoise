@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .devices import clear_accelerator_cache, fp32_context, uses_rocm
 from .model_paths import model_root
 from .pipeline import _l0_callable_signature, _sha
 
@@ -64,6 +65,8 @@ def describe_denoiser(method, device, *, sr_fn=None, downscale=DOWNSCALE):
     """Return a JSON identity without loading models or downloading weights."""
     canonical = resolve_denoiser(method)[0]
     identity = {'method': canonical, 'device': str(device)}
+    if uses_rocm(device):
+        identity['backend'] = 'rocm'
     if canonical == 'l0':
         return identity
     network, effective_scale = _sr_settings(canonical, downscale)
@@ -72,6 +75,7 @@ def describe_denoiser(method, device, *, sr_fn=None, downscale=DOWNSCALE):
                       'matmul_allow_tf32': False, 'cudnn_allow_tf32': False},
         'implementation': {name: _sha(path) for name, path in [
             ('denoisers.py', Path(__file__).resolve()),
+            ('devices.py', Path(__file__).with_name('devices.py')),
             ('denoise.py', PROJECT_ROOT / 'denoise.py'),
             ('tiled_inference.py', PROJECT_ROOT / 'tiled_inference.py')]}})
     if sr_fn is None:
@@ -115,14 +119,9 @@ def _native_super_resolve(rgb, device, network, downscale):
     small = image if network == 'apisr' else image.resize(
         (max(1, round(width * downscale)), max(1, round(height * downscale))),
         Image.Resampling.BOX)
-    device_type = torch.device(device).type
-    old_matmul = torch.backends.cuda.matmul.allow_tf32
-    old_cudnn = torch.backends.cudnn.allow_tf32
     model = None
     try:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        with torch.autocast(device_type=device_type, enabled=False), torch.inference_mode():
+        with fp32_context(device), torch.inference_mode():
             model = denoise.load_model(network, assets, device).float().eval()
             # Keep the established shared 256-core/64-context/64-overlap tiler.
             enlarged = denoise.upscale(model, small, device)
@@ -130,10 +129,7 @@ def _native_super_resolve(rgb, device, network, downscale):
                             dtype=np.uint8, copy=True)
     finally:
         model = None
-        torch.backends.cuda.matmul.allow_tf32 = old_matmul
-        torch.backends.cudnn.allow_tf32 = old_cudnn
-        if device_type == 'cuda':
-            torch.cuda.empty_cache()
+        clear_accelerator_cache(device)
 
 
 def super_resolve(rgb_uint8, *, device, sr_fn=None, method='esrgan-l0', downscale=DOWNSCALE):

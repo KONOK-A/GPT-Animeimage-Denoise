@@ -6,6 +6,7 @@ import sys
 
 from . import __version__
 from .denoisers import METHOD_CHOICES
+from .devices import DEVICE_HELP, resolve_device
 from .model_paths import model_root
 
 
@@ -19,7 +20,7 @@ def _fraction(value):
 def _model_args(parser):
     parser.epilog = ('Set GPT_ANIMEIMAGE_DENOISE_MODEL_DIR to choose the model root. '
                      'It defaults to ./models relative to the current directory.')
-    parser.add_argument('--device', default='auto', help='auto, cpu, cuda or cuda:N')
+    parser.add_argument('--device', default='auto', help=DEVICE_HELP)
     parser.add_argument('--assets', type=Path,
                         help='Region model directory (defaults to <model root>/v2)')
     parser.add_argument('--anime-assets', type=Path,
@@ -118,19 +119,7 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False))
             return 0
 
-        import torch
-
-        device = ('cuda' if torch.cuda.is_available() else 'cpu') if args.device == 'auto' else args.device
-        if device != 'cpu' and not device.startswith('cuda'):
-            raise ValueError('device must be auto/cpu/cuda/cuda:N')
-        if device.startswith('cuda'):
-            parsed_device = torch.device(device)
-            if not torch.cuda.is_available():
-                raise RuntimeError('CUDA is unavailable. Select --device cpu.')
-            if ':' in device:
-                index = int(device.split(':', 1)[1])
-                if index != parsed_device.index or index >= torch.cuda.device_count():
-                    raise ValueError(f'CUDA device {index} is unavailable')
+        device = resolve_device(args.device)
 
         from .fusion_pipeline import process_batch, process_image, write_records
 

@@ -3,6 +3,8 @@
 
 在 Windows 安装并准备模型后，双击 [start-workbench.vbs](../start-workbench.vbs) 后台启动，浏览器会自动打开。再次打开同一工作区时会复用正在运行的服务。使用 [start-workbench.cmd](../start-workbench.cmd) 或在项目根目录运行 `.\.venv\Scripts\gaid.exe ui` 可查看终端日志。 [安装方法](../README.md#安装)
 
+在 Linux 或 macOS 上，从项目根目录运行 `./.venv/bin/gaid ui`。工作台会使用 PyTorch 检测到的设备。 [ROCm 和 MPS 安装](accelerators.md)
+
 ## 打开、对比和导出
 
 1. 点「打开」、把图片拖入画布或粘贴图片。原图会先显示，后台用默认设置生成成品 B。从「近期」选择或再次打开同一张图会恢复草稿。

@@ -2,6 +2,8 @@
 
 先按 [README](../README.md#安装) 安装项目。以下命令在项目根目录的 PowerShell 中运行。
 
+在 Linux 或 macOS 上，将命令前缀 `.\.venv\Scripts\gaid.exe` 换成 `./.venv/bin/gaid`，路径使用正斜杠。 [ROCm 和 MPS 安装](accelerators.md)
+
 ```powershell
 .\.venv\Scripts\gaid.exe --version
 .\.venv\Scripts\gaid.exe --help
@@ -26,7 +28,7 @@
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
 | `--method` | `l0` | 还可选 `esrgan`、`esrgan-l0` 或 `apisr` |
-| `--device` | `auto` | 有 CUDA 时用 GPU，也可指定 `cpu`、`cuda` 或 `cuda:N` |
+| `--device` | `auto` | 依次选择可用的 CUDA 或 ROCm、MPS、CPU。可指定 `cpu`、`cuda`、`cuda:N` 或 `mps`，其中 ROCm 使用 `cuda` |
 | `--strength` | `1` | 整体混合强度，范围 0–1 |
 | `--l0` | `0.0005` | L0 平滑强度，调大会压掉更多纹理 |
 | `--downscale` | `0.6` | ESRGAN 推理前的缩放比例，仅用于含 ESRGAN 的方案 |

@@ -3,6 +3,7 @@ from io import StringIO
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 import numpy as np
@@ -42,6 +43,17 @@ class StandaloneDenoiseTest(unittest.TestCase):
         for method in ('cugan60', 'cugan60_l0'):
             with self.subTest(method=method), self.assertRaisesRegex(ValueError, 'Unknown denoiser'):
                 denoise.run(source, [method], {'cugan': TrackingUpscale()}, 'cpu')
+
+    def test_auto_device_reaches_the_standalone_processor_on_mps(self):
+        with TemporaryDirectory() as folder:
+            args = ['gaid-whole', 'sample.png', '--method', 'l0_0.0005', '--out', folder]
+            with (mock.patch.object(sys, 'argv', args),
+                  mock.patch.object(torch.cuda, 'is_available', return_value=False),
+                  mock.patch.object(torch.backends.mps, 'is_available', return_value=True),
+                  mock.patch.object(Image, 'open', return_value=Image.new('RGB', (8, 8))),
+                  mock.patch.object(denoise, 'run', return_value={}) as run):
+                denoise.main()
+        self.assertEqual(run.call_args.args[3], 'mps')
 
     def test_direct_project_entry_uses_bounded_tiles(self):
         model = TrackingUpscale()

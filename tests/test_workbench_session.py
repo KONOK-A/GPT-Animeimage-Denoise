@@ -79,6 +79,28 @@ class WorkbenchSessionTest(unittest.TestCase):
             np.testing.assert_array_equal(reopened._resident.candidate(), self.baseline)
             self.assertEqual(result['b']['revision'], queued['revision'])
 
+    def test_mps_workbench_restores_its_saved_candidate_on_a_cpu_machine(self):
+        import torch
+
+        from gpt_animeimage_denoise.workbench.session import WorkbenchSession
+
+        workspace = self.root / 'work'
+        self.models.device = 'mps'
+        with (mock.patch.object(torch.cuda, 'is_available', return_value=False),
+              mock.patch.object(torch.backends.mps, 'is_available', return_value=True),
+              mock.patch('gpt_animeimage_denoise.fusion_models.FusionModels', return_value=self.models) as model,
+              mock.patch.object(fusion_pipeline, 'fuse_evidence', side_effect=regions),
+              mock.patch.object(fusion_pipeline, 'refine_regions', side_effect=lambda rgb, ev, reg, models, **_: reg),
+              mock.patch.object(fusion_pipeline, 'smooth_candidate', return_value=self.baseline)):
+            initial = WorkbenchSession.open(self.source, workspace)
+        self.assertEqual(model.call_args.kwargs['device'], 'mps')
+        with (mock.patch.object(torch.cuda, 'is_available', return_value=False),
+              mock.patch.object(torch.backends.mps, 'is_available', return_value=False)):
+            restored = WorkbenchSession.from_cache(self.source, workspace, initial.source_sha256,
+                                                  [initial.width, initial.height])
+            np.testing.assert_array_equal(restored.candidate(), self.baseline)
+            self.assertEqual(restored._inference_device(), 'cpu')
+
     def test_preparing_a_saved_draft_reuses_its_selection_without_publishing_a_revision(self):
         from gpt_animeimage_denoise.workbench.session import WorkbenchSession
 
