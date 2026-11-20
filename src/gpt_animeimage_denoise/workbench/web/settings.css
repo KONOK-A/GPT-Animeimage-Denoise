@@ -7,6 +7,7 @@
   overflow: hidden;
 }
 .settings-dialog[open] { display: flex; flex-direction: column; }
+#settings-dialog { height: 680px; }
 .settings-dialog::backdrop { background: rgb(26 37 54 / 38%); }
 .settings-header { display: flex; gap: 12px; align-items: center; padding: 20px 23px 15px; }
 .settings-header h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.025em; }
@@ -16,7 +17,13 @@
 .settings-tabs { display: flex; gap: 14px; padding: 0 23px; border-bottom: 1px solid var(--edge); }
 .settings-tabs button { border-radius: 0; padding: 6px 1px 10px; border-bottom: 2px solid transparent; color: var(--quiet); white-space: nowrap; }
 .settings-tabs [aria-selected="true"] { color: var(--accent); font-weight: 650; border-bottom-color: var(--accent); }
-#settings-form { display: flex; flex-direction: column; min-height: 0; }
+.settings-tabs button:not(:disabled):active { box-shadow: none; }
+@media (hover: hover) and (pointer: fine) {
+  .settings-tabs button:hover { background: transparent; }
+  .settings-tabs [aria-selected="false"]:hover { color: var(--ink); }
+}
+#settings-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#settings-content { flex: 1; min-height: 0; scrollbar-gutter: stable; }
 .settings-scroll { padding: 20px 23px 22px; overflow: auto; overscroll-behavior: contain; }
 .settings-scroll h2 { margin: 0 0 9px; font-size: 14px; font-weight: 650; }
 .settings-scroll h2:not(:first-child) { margin-top: 22px; }

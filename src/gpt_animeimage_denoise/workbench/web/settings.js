@@ -52,12 +52,14 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
     runDoctor.disabled = busy || diagnosing;
   }
   function selectTab(name) {
+    const changing = byId('prefs-' + name).hidden;
     for (const key of tabs) {
       const active = key === name, tab = byId('tab-' + key);
       tab.setAttribute('aria-selected', String(active));
       tab.tabIndex = active ? 0 : -1;
       byId('prefs-' + key).hidden = !active;
     }
+    if (changing) byId('settings-content').scrollTop = 0;
     if (name === 'storage') cacheUsage(visit);
   }
   function formatBytes(bytes) {
