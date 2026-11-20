@@ -8,7 +8,33 @@ from unittest.mock import patch
 
 from gpt_animeimage_denoise.pipeline import _digest, _sha
 from gpt_animeimage_denoise.workbench.documents import Documents
-from gpt_animeimage_denoise.workbench.storage import StorageBusy
+from gpt_animeimage_denoise.workbench.storage import StorageBusy, write_atomic
+
+
+class AtomicWriteTest(unittest.TestCase):
+    def test_stages_and_replaces_in_the_resolved_directory(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            logical = root / 'profile' / 'GAID'
+            physical = root / 'redirected'
+            physical.mkdir()
+            resolve_path = Path.resolve
+
+            def resolve(path, *, strict=False):
+                if path == logical:
+                    self.assertTrue(logical.is_dir())
+                    return physical
+                return resolve_path(path, strict=strict)
+
+            with patch.object(Path, 'resolve', new=resolve):
+                settings = logical / 'settings.json'
+                write_atomic(settings, b'first')
+                self.assertEqual((physical / settings.name).read_bytes(), b'first')
+                write_atomic(settings, b'updated')
+                self.assertEqual((physical / settings.name).read_bytes(), b'updated')
+
+            self.assertFalse(settings.exists())
+            self.assertEqual(list(physical.iterdir()), [physical / settings.name])
 
 
 class WorkbenchStorageTest(unittest.TestCase):

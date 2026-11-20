@@ -33,8 +33,11 @@ def _staged_file(directory, prefix, write):
 
 def write_atomic(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _staged_file(path.parent, '.gaid-write-', lambda stream: stream.write(content)) as temporary:
-        temporary.replace(path)
+    # Windows can redirect a newly created AppData directory to a package volume.
+    # Use the resulting directory for both names in the atomic rename.
+    directory = path.parent.resolve(strict=True)
+    with _staged_file(directory, '.gaid-write-', lambda stream: stream.write(content)) as temporary:
+        temporary.replace(directory / path.name)
 
 
 def _replace_json(path, value):
