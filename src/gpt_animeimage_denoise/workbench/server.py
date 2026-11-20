@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import re
+from subprocess import SubprocessError
 from threading import Lock, Thread, Timer, current_thread
 from time import monotonic, sleep
 import traceback
@@ -15,6 +16,7 @@ from uuid import uuid4
 from ..denoisers import uses_l0
 from ..editor import DEFAULT_MODULES, MODULES
 from .documents import PART_PALETTE, WORKBENCH_METHODS
+from .file_manager import reveal_file
 from .storage import StorageBusy, _file_lock, _replace_json
 
 
@@ -29,6 +31,8 @@ _PART_LABELS = {'skin': '皮肤', 'face': '面部', 'hair': '头发', 'eyes': '�
 _DEFAULTS = {'method': 'l0', 'l0': .0005, 'downscale': .6, 'strength': 1,
              'restoration_gain': .25, 'sigma': 12, 'structure_protection': .2}
 _DOCUMENT = re.compile(r'/api/documents/([0-9a-f]{64})(?:/(.*))?')
+_EXPORT_ID = re.compile(r'[0-9a-f]{32}')
+_EXPORT_HISTORY_LIMIT = 128
 _PAGE_ID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
 _PAGE_CLOSE_GRACE = 4
 _FOLDER_DIALOG = Lock()
@@ -139,6 +143,8 @@ def create_server(workspace, *, port=0):
 
     # Keep the frontend paired with the Python code loaded by this process.
     assets = {route: ((_WEB / name).read_bytes(), mime) for route, (name, mime) in _STATIC.items()}
+    exports = {}
+    export_lock = Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_request(self, code='-', size='-'):
@@ -271,7 +277,27 @@ def create_server(workspace, *, port=0):
                 value = self._read_json()
                 if set(value) != {'revision', 'view'}:
                     raise ValueError('本机导出只接受版本和视图。')
-                return self._json({'path': str(documents.export(identifier, value['view'], _revision(value)))})
+                target = documents.export(identifier, value['view'], _revision(value))
+                export_id = uuid4().hex
+                with export_lock:
+                    exports[identifier, export_id] = target
+                    if len(exports) > _EXPORT_HISTORY_LIMIT:
+                        exports.pop(next(iter(exports)))
+                return self._json({'path': str(target), 'export_id': export_id})
+            if post and action == 'export/reveal':
+                value = self._read_json(512)
+                export_id = value.get('export_id')
+                if set(value) != {'export_id'} or not isinstance(export_id, str) or not _EXPORT_ID.fullmatch(export_id):
+                    raise ValueError('请选择本工作台导出的 PNG。')
+                with export_lock:
+                    target = exports.get((identifier, export_id))
+                if target is None or not target.is_file() or target.resolve() != target:
+                    raise _RequestError(404, '找不到此导出的 PNG。')
+                try:
+                    reveal_file(target)
+                except (OSError, SubprocessError) as error:
+                    raise _RequestError(500, '无法打开文件管理器。') from error
+                return self._json({})
             if post and action in ('sam-object', 'sam-selection'):
                 value = self._read_json()
                 return self._json(documents.preview_object(identifier, _revision(value),

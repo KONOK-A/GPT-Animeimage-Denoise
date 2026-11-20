@@ -273,8 +273,11 @@
           <button id="actual" type="button" title="按原像素显示（1）" aria-keyshortcuts="1" disabled>1:1</button>
         </div>
       </div>
-      <div id="notice" class="notice" role="alert" hidden>
-        <span id="notice-text"></span>
+      <div id="notice" class="notice" hidden>
+        <div class="notice-content">
+          <span id="notice-text" role="alert"></span>
+          <button id="notice-reveal" type="button" aria-describedby="notice-text" hidden>在文件夹中显示</button>
+        </div>
         <button id="notice-close" type="button" aria-label="关闭提示">×</button>
       </div>
     </section>

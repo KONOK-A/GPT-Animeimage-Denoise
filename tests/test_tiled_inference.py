@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -40,6 +41,42 @@ class PhaseLocked(torch.nn.Module):
 
 
 class TilingTest(unittest.TestCase):
+    def test_cpu_rrdb_uses_smaller_bands_when_memory_is_tight(self):
+        from spandrel.architectures.ESRGAN.__arch.RRDB import RRDBNet
+
+        pixels = np.random.default_rng(19).integers(0, 256, (75, 27, 3), dtype=np.uint8)
+        image = Image.fromarray(pixels)
+        for shuffle in (None, 2):
+            with self.subTest(shuffle=shuffle), torch.random.fork_rng(devices=[]):
+                torch.manual_seed(19)
+                model = RRDBNet(in_nc=3 * (shuffle or 1) ** 2, num_filters=4, num_blocks=0,
+                                shuffle_factor=shuffle).eval()
+                upsample_heights = []
+                handle = model.model[2].register_forward_pre_hook(
+                    lambda _, args: upsample_heights.append(args[0].shape[-2]))
+                try:
+                    with mock.patch.object(module.psutil, 'virtual_memory',
+                                           return_value=SimpleNamespace(available=16 * 2**30)):
+                        expected = module.tiled_upscale(model, image, 'cpu')
+                    self.assertEqual(len(upsample_heights), 1)
+                    full_height = upsample_heights.pop()
+                    with mock.patch.object(module.psutil, 'virtual_memory',
+                                           return_value=SimpleNamespace(available=512 * 2**20)):
+                        actual = module.tiled_upscale(model, image, 'cpu')
+                finally:
+                    handle.remove()
+
+                self.assertGreater(len(upsample_heights), 1)
+                self.assertLess(max(upsample_heights), full_height)
+                np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    def test_memory_budget_keeps_full_tiles_when_they_fit(self):
+        args = (384, 384, 64, 4, 4)
+        for gib, expected in ((12, 384), (3, 128), (2, 128), (1, 32)):
+            with self.subTest(available_gib=gib), mock.patch.object(
+                    module.psutil, 'virtual_memory', return_value=SimpleNamespace(available=gib * 2**30)):
+                self.assertEqual(module._rrdb_band_rows(*args), expected)
+
     def test_stitching_buffers_are_bounded_by_one_tile_row(self):
         width, height, tile, scale = 77, 105, 32, 2
         pixels = np.random.default_rng(12).integers(0, 256, (height, width, 3), dtype=np.uint8)

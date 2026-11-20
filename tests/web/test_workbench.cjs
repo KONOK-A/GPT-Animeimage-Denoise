@@ -101,7 +101,7 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
   const frames = [];
   const api = { requests: [], workers: [], timers: [], beforeOpen: null, beforeEdit: null, beforeDecode: null, beforeSam: null,
     beforeChanges: null, beforeSettings: null, changeCounts: { added: 0, removed: 0, stronger: 0, weaker: 0, reclassified: 0 },
-    changeCountsByStage: {}, changedParts: [],
+    changeCountsByStage: {}, changedParts: [], exportCount: 0, beforeReveal: null, revealError: null,
     manualFrames: false, beforeMagnetic: null, magneticStatus: 200,
     frame: () => { for (const callback of frames.splice(0)) callback(); },
     mutate: change => { doc = { ...doc, ...change }; },
@@ -168,7 +168,16 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
         return response(localSettings);
       }
       if (route === '/api/cache') return response({ bytes: 0, path: 'G:/cache' });
-      if (route.endsWith('/export')) return response({ path: 'G:/exports/export.png' });
+      if (route.endsWith('/export/reveal')) {
+        await api.beforeReveal;
+        return api.revealError ? response({ error: api.revealError }, 500) : response({});
+      }
+      if (route.endsWith('/corrections/export')) return response({ path: 'G:/exports/corrections.json' });
+      if (route.endsWith('/export')) {
+        const number = ++api.exportCount;
+        return response({ path: number === 1 ? 'G:/exports/export.png' : 'G:/exports/export-2.png',
+          export_id: String(number).padStart(32, '0') });
+      }
       if (route.includes('/changes?revision=')) {
         const query = new URLSearchParams(route.split('?')[1]);
         const revision = Number(query.get('revision')), stage = query.get('stage');
@@ -2352,9 +2361,74 @@ test('host export uses the exact displayed revision and reports its local path',
   assert.equal(written.length, 1);
   assert.deepEqual(JSON.parse(written[0].args.body), { revision: 0, view: 'b' });
   assert.match(h.elements.get('notice-text').textContent, /G:\/exports\/export.png/);
+  const reveal = h.elements.get('notice-reveal');
+  assert.equal(reveal?.hidden, false);
+  await reveal.click();
+  const opened = h.api.requests.find(item => item.route === '/api/documents/source/export/reveal');
+  assert.deepEqual(JSON.parse(opened.args.body), { export_id: '00000000000000000000000000000001' });
   h.run("selectMode('range'); addEdit({tool:'include',stage:'range',shape:'brush',points:[[20,30]],radius:5,feather:3})");
   await h.run('download()');
   assert.equal(h.api.requests.filter(item => item.route.endsWith('/export')).length, 1);
+});
+
+test('browser downloads dismiss an earlier local export action', async () => {
+  const h = harness();
+  await tick();
+  await h.run("preferences.update({ export_dir: 'G:/exports' })");
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  await h.run('download()');
+  const reveal = h.elements.get('notice-reveal');
+  assert.equal(reveal?.hidden, false);
+
+  await h.run("preferences.update({ export_dir: '' })");
+  await h.run('download()');
+  assert.equal(h.elements.get('notice').hidden, true);
+  await reveal.click();
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/export/reveal')), false);
+  assert.match(h.elements.get('status-message').textContent, /浏览器下载/);
+});
+
+test('a delayed reveal failure preserves the newer local export notice', async () => {
+  const h = harness();
+  await tick();
+  await h.run("preferences.update({ export_dir: 'G:/exports' })");
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  await h.run('pin()');
+  await h.run('download()');
+  const reveal = h.elements.get('notice-reveal');
+  assert.equal(reveal?.hidden, false);
+
+  const first = deferred();
+  h.api.beforeReveal = first.promise;
+  const opening = reveal.click();
+  await h.run("download('a')");
+  h.api.revealError = '无法打开文件管理器。';
+  first.resolve();
+  await opening;
+  assert.equal(reveal.disabled, false);
+  assert.match(h.elements.get('notice-text').textContent, /export-2\.png/);
+  assert.equal(h.elements.get('notice').dataset.tone, 'ready');
+
+  await reveal.click();
+  assert.equal(h.elements.get('notice').dataset.tone, 'error');
+  assert.match(h.elements.get('notice-text').textContent, /export-2\.png/);
+  assert.match(h.elements.get('notice-text').textContent, /无法打开文件管理器/);
+  assert.equal(reveal.disabled, false);
+
+  h.api.revealError = null;
+  await reveal.click();
+  assert.equal(h.elements.get('notice').dataset.tone, 'ready');
+  assert.equal(h.elements.get('notice-text').textContent, '已导出到 G:/exports/export-2.png');
+  assert.deepEqual(h.api.requests.filter(item => item.route.endsWith('/export/reveal'))
+    .map(item => JSON.parse(item.args.body).export_id), [
+      '00000000000000000000000000000001', '00000000000000000000000000000002', '00000000000000000000000000000002',
+    ]);
 });
 
 test('classification feedback names the applied part even after selecting another target', async () => {

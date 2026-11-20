@@ -105,7 +105,7 @@ const state = {
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
   sam: null, magnetic: null, showUnknown: true, pendingUnknownResolution: null,
   changesErrors: new Map(), appliedHistory: null, historyLocation: null, historyDisplayKey: '', partFrame: null,
-  displayedResult: null, awaitingFirstResult: false, pinFeedback: null,
+  displayedResult: null, awaitingFirstResult: false, pinFeedback: null, exportNotice: null,
   part: 'hair', protectedParts: new Set(), rangeProtectedParts: new Set(),
   hiddenParts: new Set(), partIsolation: null,
   actions: { parts: 'classify', range: 'include' },
@@ -163,10 +163,22 @@ function status(message, tone = 'neutral') {
     if (tone !== 'ready') stopMotion(statusDot);
   }
 }
+function showNotice(message, { tone = 'ready', pointer = false, exported = null } = {}) {
+  const notice = byId('notice'), reveal = byId('notice-reveal');
+  state.exportNotice = exported;
+  notice.dataset.tone = tone;
+  notice.dataset.pointerEntry = String(pointer);
+  byId('notice-text').textContent = message;
+  reveal.hidden = !exported;
+  reveal.disabled = false;
+  notice.hidden = false;
+}
+function hideNotice() {
+  state.exportNotice = null;
+  byId('notice').hidden = true;
+}
 function showError(error) {
-  byId('notice').dataset.tone = 'error';
-  byId('notice-text').textContent = error.message || String(error);
-  byId('notice').hidden = false;
+  showNotice(error.message || String(error), { tone: 'error' });
 }
 
 async function request(url, options = {}, acceptNotModified = false) {
@@ -1274,7 +1286,7 @@ function beginDocumentChange() {
   state.view = 'compare'; state.mode = 'review'; state.tool = 'pan'; state.brushSized = false; state.peek = false;
   setKeyboardPeek(false);
   byId('allow-protected').checked = false;
-  byId('notice').hidden = true;
+  hideNotice();
   byId('empty').hidden = false;
   byId('image-name').textContent = '';
   byId('image-name').title = '';
@@ -1438,7 +1450,7 @@ function edited(delay = 180) {
   state.saveFailed = false;
   state.historyLocation = null;
   state.saveDelay = delay;
-  byId('notice').hidden = true;
+  hideNotice();
   persistPending();
   scheduleSave();
   refresh();
@@ -2466,10 +2478,7 @@ async function download(view = 'b', pointer = false) {
     if (preferences.value?.export_dir) {
       const result = await post(route('/export'), { revision: target.revision, view });
       if (epoch === state.epoch) {
-        byId('notice').dataset.tone = 'ready';
-        byId('notice').dataset.pointerEntry = String(pointer);
-        byId('notice-text').textContent = '已导出到 ' + result.path;
-        byId('notice').hidden = false;
+        showNotice('已导出到 ' + result.path, { pointer, exported: result });
       }
       return;
     }
@@ -2480,8 +2489,27 @@ async function download(view = 'b', pointer = false) {
       throw new Error('方案 B 已更新，请重新导出。');
     }
     downloadBlob(blob, name + (view === 'a' ? '-gaid-A.png' : '-gaid.png'));
+    if (state.exportNotice) hideNotice();
     status('PNG 已发送到浏览器下载。', 'ready');
   } catch (error) { if (epoch === state.epoch) showError(error); }
+}
+async function revealExport() {
+  const exported = state.exportNotice, notice = byId('notice'), button = byId('notice-reveal');
+  if (!exported || button.disabled) return;
+  button.disabled = true;
+  try {
+    await post(route('/export/reveal'), { export_id: exported.export_id });
+    if (state.exportNotice === exported && notice.dataset.tone === 'error') {
+      showNotice('已导出到 ' + exported.path, { exported });
+    }
+  } catch (error) {
+    if (state.exportNotice === exported) {
+      notice.dataset.tone = 'error';
+      byId('notice-text').textContent = (error.message || String(error)) + '\n' + exported.path;
+    }
+  } finally {
+    if (state.exportNotice === exported) button.disabled = false;
+  }
 }
 function setComparisonReference(reference) {
   state.leftReference = reference;
@@ -2524,10 +2552,7 @@ async function exportCorrection(pointer = false) {
   try {
     const info = await post(route('/corrections/export'), { revision: state.doc.revision });
     if (epoch !== state.epoch) return;
-    byId('notice').dataset.tone = 'ready';
-    byId('notice').dataset.pointerEntry = String(pointer);
-    byId('notice-text').textContent = '命令行校正已保存到 ' + info.path;
-    byId('notice').hidden = false;
+    showNotice('命令行校正已保存到 ' + info.path, { pointer });
   } catch (error) { if (epoch === state.epoch) showError(error); }
 }
 async function importCorrection(files) {
@@ -2612,7 +2637,8 @@ byId('pin').addEventListener('click', event => pin(event.detail > 0));
 for (const [reference, button] of comparisonButtons) {
   button.addEventListener('click', () => chooseComparisonReference(reference));
 }
-byId('notice-close').addEventListener('click', () => { byId('notice').hidden = true; });
+byId('notice-reveal').addEventListener('click', revealExport);
+byId('notice-close').addEventListener('click', hideNotice);
 byId('retry').addEventListener('click', () => { if (state.doc) { state.dirty = true; saveDraft(); } });
 byId('conflict-local').addEventListener('click', () => {
   if (!state.conflict) return;
@@ -2626,7 +2652,7 @@ byId('conflict-remote').addEventListener('click', () => {
   applyMetadata(state.conflict);
   state.conflict = null;
   state.dirty = state.saveFailed = false;
-  byId('notice').hidden = true;
+  hideNotice();
   persistPending(); refresh();
 });
 for (const button of viewButtons) button.addEventListener('click', () => selectView(button.dataset.view));

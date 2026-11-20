@@ -36,6 +36,8 @@
 | `--restoration-gain` | `0.25` | 渐变恢复比例，范围 0–1 |
 | `--sigma` | `12` | 渐变恢复的滤波尺度，以短边 2048 像素为基准 |
 
+CPU 运行 ESRGAN 或 APISR 时，GAID 根据系统的可用内存决定超分末段每批处理的行数。可用内存较少时，会分多批处理放大后的特征图。每批沿用当前分块的图像上下文和重叠权重。
+
 ### 应用校正
 
 将工作台导出的 `corrections.json` 与蒙版一起保留。给 `process` 加 `--edits .\corrections\corrections.json`，即可对同一源图应用校正。源图文件的 SHA-256 和定向后的 `[宽, 高]` 须与 JSON 匹配，蒙版须与定向后的源图同尺寸。也可参照 [校正模板](../examples/correction.template.json) 自行填写。

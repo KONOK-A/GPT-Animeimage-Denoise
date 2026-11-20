@@ -14,6 +14,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import quote
 
 import numpy as np
 from PIL import Image
@@ -464,6 +465,58 @@ class WorkbenchHTTPTest(unittest.TestCase):
             paths = [Path(result['path']) for _, result in outputs]
             self.assertEqual({p.name for p in paths}, {'sample-gaid.png', 'sample-gaid-2.png'})
             self.assertTrue(all(path.parent == export and path.read_bytes() == saved for path in paths))
+
+    def test_reveal_uses_the_exact_file_saved_by_each_local_export(self):
+        from gpt_animeimage_denoise.editor import SelectionEditor
+
+        docs = self.server.documents
+        rgb = np.full((22, 32, 3), 167, np.uint8)
+        labels = np.ones(rgb.shape[:2], np.uint8)
+        empty = np.zeros(labels.shape, bool)
+        editor = SelectionEditor(rgb, None, labels, empty, empty)
+        session = SimpleNamespace(editor=editor, icc=None, candidate=Mock(return_value=rgb.astype(np.float32) / 255))
+        content = BytesIO()
+        Image.fromarray(rgb).save(content, 'PNG')
+        folder = docs.workspace / '导出, PNG'
+        folder.mkdir()
+
+        with patch.object(docs, 'opener', return_value=session), \
+             patch('gpt_animeimage_denoise.workbench.server.reveal_file') as reveal:
+            status, body = self.request('POST', '/api/documents', content.getvalue(), **{
+                'X-GAID-Request': '1', 'Content-Type': 'application/octet-stream',
+                'X-GAID-Filename': quote('样张, 01.png')})
+            self.assertEqual(status, 200)
+            route = '/api/documents/' + json.loads(body)['id']
+            self.ready(route)
+            self.assertEqual(self.post(route + '/pin', {'revision': 0})[0], 200)
+            self.assertEqual(self.post('/api/settings', {'export_dir': str(folder)})[0], 200)
+            self.assertEqual(self.post(route + '/export', {'revision': 1, 'view': 'b'})[0], 409)
+
+            exports = {}
+            for view, name in (('a', '样张, 01-gaid.png'), ('b', '样张, 01-gaid-2.png')):
+                status, result = self.post(route + '/export', {'revision': 0, 'view': view})
+                self.assertEqual(status, 200)
+                self.assertIn('export_id', result)
+                self.assertEqual(Path(result['path']), folder / name)
+                self.assertTrue((folder / name).is_file())
+                exports[view] = {'export_id': result['export_id']}
+
+            endpoint = route + '/export/reveal'
+            self.assertEqual(self.post('/api/settings', {'export_dir': ''})[0], 200)
+            self.assertEqual(self.request('GET', endpoint + '?export_id=' + exports['a']['export_id'])[0], 404)
+            self.assertEqual(self.post(endpoint, {'path': str(folder)})[0], 400)
+            self.assertEqual(self.post(endpoint, {**exports['a'], 'path': str(folder)})[0], 400)
+            self.assertEqual(self.post(endpoint, {'export_id': '0' * 32})[0], 404)
+            self.assertEqual(self.post('/api/documents/' + '0' * 64 + '/export/reveal', exports['b'])[0], 404)
+            reveal.assert_not_called()
+
+            for view, name in (('b', '样张, 01-gaid-2.png'), ('a', '样张, 01-gaid.png')):
+                self.assertEqual(self.post(endpoint, exports[view]), (200, {}))
+                reveal.assert_called_once_with(folder / name)
+                reveal.reset_mock()
+            (folder / '样张, 01-gaid-2.png').unlink()
+            self.assertEqual(self.post(endpoint, exports['b'])[0], 404)
+            reveal.assert_not_called()
 
     def test_recent_thumbnail_uses_normalized_original_during_analysis(self):
         from gpt_animeimage_denoise.editor import SelectionEditor
