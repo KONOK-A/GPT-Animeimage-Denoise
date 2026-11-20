@@ -84,6 +84,10 @@ const MODE_VIEWS = { review: ['compare', 'original', 'result'], flow: [],
   parts: ['compare', 'parts', 'changes', 'suspected_objects'],
   range: ['compare', 'weight', 'changes'], effect: ['result', 'candidate', 'compare', 'original'] };
 const nodeNames = { parts: '部位分区', range: '处理范围', effect: '降噪效果' };
+const profilePanel = byId('profile-panel');
+const profileToggle = byId('profile-toggle');
+const profileChoices = { whole: byId('profile-whole'), fusion: byId('profile-parts') };
+const profileError = byId('profile-error');
 const actions = {
   parts: { classify: '归入目标部位', remove_part: '移出当前部位', erase: '擦除本步修改' },
   range: { include: '加入处理范围', exclude: '移出处理范围', protect: '局部减弱', mix: '指定原图比例', erase: '擦除本步修改' },
@@ -99,7 +103,7 @@ const actionShortcuts = {
 const zoomShortcuts = { '0': 'fit', '1': 'actual', '+': 'zoom-in', '=': 'zoom-in', '-': 'zoom-out' };
 const state = {
   options: null, doc: null, file: null, draft: null, dirty: false, save: null, saveFailed: false, conflict: null,
-  epoch: 0, opening: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0, pollEtag: null,
+  epoch: 0, opening: false, switchingProfile: false, exited: false, images: new Map(), loading: new Map(), saveTimer: 0, saveDelay: 180, pollTimer: 0, pollEtag: null,
   zoom: 1, fit: true, panX: 0, panY: 0, split: .5, view: 'compare',
   leftReference: 'a',
   mode: 'review', tool: 'pan', brushSized: false, peek: false, keyboardPeek: false, space: false, gesture: null, cursor: null, polygon: [],
@@ -111,13 +115,16 @@ const state = {
   actions: { parts: 'classify', range: 'include' },
 };
 const isLasso = () => ['lasso', 'magnetic'].includes(state.tool);
-const editingMask = () => state.mode === 'parts' || state.mode === 'range';
+const awaitingProfile = () => state.doc?.status === 'awaiting_profile';
+const wholeImage = () => state.doc?.profile === 'whole';
+const candidateViewName = () => wholeImage() ? '算法预览' : '全图降噪预览';
+const editingMask = () => !wholeImage() && (state.mode === 'parts' || state.mode === 'range');
 const isBrush = () => editingMask() && !['pan', 'sam_object', 'lasso', 'magnetic'].includes(state.tool);
 const activeAction = () => isBrush() ? state.tool : byId('lasso-action').value;
 const originalPreviewActive = () => state.peek || state.keyboardPeek;
 const editableMaskView = () => state.mode === 'parts' ? 'parts' : 'weight';
 const maskInspectionView = () => editingMask() && state.view !== editableMaskView();
-const maskEditsBlocked = () => maskInspectionView() || (editingMask() && originalPreviewActive());
+const maskEditsBlocked = () => state.switchingProfile || maskInspectionView() || (editingMask() && originalPreviewActive());
 const clone = value => JSON.parse(JSON.stringify(value));
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const route = (suffix = '') => '/api/documents/' + encodeURIComponent(state.doc.id) + suffix;
@@ -140,7 +147,10 @@ function pinnedComparisonAsset() {
   const a = state.images.get('a');
   return usesPinnedComparison() && a?.revision === state.doc.a.revision ? a : null;
 }
-const selectionPreview = () => state.doc?.selection_preview ?? state.doc?.b;
+function selectionPreview() {
+  const preview = state.doc?.selection_preview ?? state.doc?.b;
+  return preview?.profile === 'whole' ? null : preview;
+}
 function assetSnapshot(view) {
   if (SELECTION_ASSETS.includes(view)) return selectionPreview();
   return view === 'a' ? state.doc?.a : state.doc?.b;
@@ -236,7 +246,7 @@ function scopeModules(scope) {
 }
 function renderIsCurrent() {
   return Boolean(state.doc?.b && state.doc.b.revision === state.doc.revision
-    && !state.dirty && !state.save && !state.conflict && state.doc.status === 'ready');
+    && !state.dirty && !state.save && !state.conflict && !state.switchingProfile && state.doc.status === 'ready');
 }
 function resultIsCurrent() {
   return renderIsCurrent() && state.displayedResult === state.doc.b.revision;
@@ -433,16 +443,20 @@ function updateStatus(current) {
     candidate: '正在生成降噪候选', rendering: '正在合成预览', compose: '正在合成预览',
     encoding: '正在保存结果', saving: '正在保存结果' };
   if (state.conflict) status('另一页面已更新，请选择保留哪份修改。', 'error');
+  else if (state.switchingProfile) status('正在切换处理模式', 'pending');
   else if (state.save) status('正在提交修改' + editing, 'pending');
   else if (state.saveFailed) status('修改保存失败，可重试。', 'error');
   else if (state.dirty) status('修改待更新' + editing, 'pending');
+  else if (awaitingProfile()) status('选择处理模式后开始降噪。', 'neutral');
   else if (state.doc.status === 'error') status(nodeNames[failedNode()] + '失败。' + (state.doc.error || '可重试此步。'), 'error');
   else if (state.doc.status !== 'ready' && updatedSelection) {
     status((state.view === 'parts' ? '分区已更新' : '范围已更新') + ' · 正在生成成品 B' + editing, 'pending');
   } else if (state.doc.status !== 'ready') status((state.doc.b ? '正在更新 · ' : '') + (phases[state.doc.phase] || phases[state.doc.status] || '正在处理') + editing, 'pending');
   else if (state.mode === 'flow') status('当前流程已完成', 'ready');
-  else if (state.view === 'candidate') status(state.images.get('candidate')?.revision === state.doc.revision ? '全图降噪预览已就绪' : '正在载入全图降噪预览', state.images.get('candidate')?.revision === state.doc.revision ? 'ready' : 'pending');
-  else if (rangeMode && RANGE_VIEWS.includes(state.view)) {
+  else if (state.view === 'candidate') {
+    const ready = state.images.get('candidate')?.revision === state.doc.revision;
+    status(ready ? candidateViewName() + '已就绪' : '正在载入' + candidateViewName(), ready ? 'ready' : 'pending');
+  } else if (rangeMode && RANGE_VIEWS.includes(state.view)) {
     const revision = state.doc.revision;
     if (state.view === 'changes' && state.changesErrors.get(state.mode) === revision) status('改动图读取失败，可在「核对改动」重试。', 'error');
     else if (state.view === 'parts' && viewAsset('parts')?.hiddenParts !== hiddenPartsQuery()) {
@@ -485,12 +499,12 @@ function updateSamControls() {
   if (byId('sam-status').textContent !== text) byId('sam-status').textContent = text;
 }
 function updateControls() {
-  const canEdit = Boolean(state.doc && state.draft && !state.opening && state.sam?.busy !== 'apply');
+  const canEdit = Boolean(state.doc && state.draft && !state.opening && !state.switchingProfile && state.sam?.busy !== 'apply');
   const inspecting = maskInspectionView(), blocked = maskEditsBlocked();
   const canDraw = canEdit && !blocked;
   const hasImage = Boolean(state.file), current = resultIsCurrent();
   const method = state.options?.methods.find(item => item.id === state.draft?.settings.method);
-  byId('open').disabled = byId('empty-open').disabled = byId('open-settings').disabled = !state.options;
+  byId('open').disabled = byId('empty-open').disabled = byId('open-settings').disabled = !state.options || state.switchingProfile;
   const rangeMode = editingMask();
   const graph = state.mode === 'flow';
   const reviewMode = state.mode === 'review';
@@ -498,14 +512,38 @@ function updateControls() {
   document.body.dataset.mode = state.mode;
   byId('viewbar').hidden = byId('viewer-footer').hidden = byId('zoom-tools').hidden = !hasImage || graph;
   byId('file-meta').hidden = byId('export-actions').hidden = !hasImage;
-  byId('workspace-modes').hidden = !state.doc;
-  byId('review-actions').hidden = !hasImage || !reviewMode;
+  const awaiting = awaitingProfile();
+  byId('workspace-modes').hidden = !state.doc || awaiting;
+  const whole = wholeImage();
+  profilePanel.hidden = !state.doc;
+  profilePanel.dataset.awaiting = String(awaiting);
+  const profileLabel = byId('profile-label');
+  const currentProfileName = awaiting ? '选择处理模式' : whole ? '整图降噪' : '按部位精修';
+  if (profileLabel.textContent !== currentProfileName) {
+    profileLabel.textContent = currentProfileName;
+    profileToggle.setAttribute('aria-label', awaiting ? currentProfileName : '处理模式，当前' + currentProfileName);
+    byId('profile-icon').setAttribute('href', awaiting ? '#icon-effect' : whole ? '#icon-whole' : '#icon-parts');
+  }
+  for (const [profile, button] of Object.entries(profileChoices)) {
+    button.setAttribute('aria-pressed', String(!awaiting && whole === (profile === 'whole')));
+    button.disabled = !canEdit || Boolean(state.conflict);
+  }
+  const flowLabel = whole ? '降噪效果' : '编辑流程';
+  const entry = byId('flow-entry-label');
+  if (entry.textContent !== flowLabel) {
+    entry.textContent = flowLabel;
+    byId('flow-entry-icon').setAttribute('href', whole ? '#icon-effect' : '#icon-flow');
+  }
+  const strengthHint = whole ? '作用于整图的可见像素。' : '作用于已选部位。';
+  if (byId('effect-strength-hint').textContent !== strengthHint) byId('effect-strength-hint').textContent = strengthHint;
+  byId('review-actions').hidden = !hasImage || !reviewMode || awaiting;
   byId('flow-board').hidden = !graph;
   stage.hidden = graph;
   byId('tools').hidden = !rangeMode;
   byId('edit-bar').hidden = !rangeMode;
   const nodeTitle = byId('node-title');
-  byId('back-to-flow').hidden = byId('node-switcher').hidden = nodeTitle.hidden = !nodeName;
+  nodeTitle.hidden = !nodeName;
+  byId('back-to-flow').hidden = byId('node-switcher').hidden = !nodeName || whole;
   byId('back-to-flow').disabled = !canEdit;
   if (nodeTitle.textContent !== nodeName) nodeTitle.textContent = nodeName;
   if (nodeName && byId('drawer-title').textContent !== nodeName) byId('drawer-title').textContent = nodeName;
@@ -547,20 +585,27 @@ function updateControls() {
     [modeButtons, 'mode', state.mode, !canEdit],
   ]) for (const button of buttons) {
     if (key === 'view') {
-      button.hidden = !MODE_VIEWS[state.mode].includes(button.dataset.view) || !viewAvailable(button.dataset.view);
+      button.hidden = !MODE_VIEWS[state.mode].includes(button.dataset.view) || !viewAvailable(button.dataset.view)
+        || (awaiting && button.dataset.view !== 'original');
       if (button.dataset.view === 'compare') {
         const label = rangeMode ? '原图 / 成品' : '对比';
         if (button.textContent !== label) button.textContent = label;
       } else if (button.dataset.view === 'changes') {
         const label = state.mode === 'parts' ? '分区改动' : '范围改动';
         if (button.textContent !== label) button.textContent = label;
+      } else if (button.dataset.view === 'candidate') {
+        const label = candidateViewName();
+        if (button.textContent !== label) button.textContent = label;
+        button.title = '查看线条保护、渐变恢复和强度混合前的降噪结果';
       }
     } else if (key === 'mode' && button.dataset.mode === 'flow') {
-      button.hidden = Boolean(nodeName);
+      button.hidden = !whole && Boolean(nodeName);
+      button.title = flowLabel + '（F）';
     }
     button.disabled = key === 'tool' ? !rangeMode || (button.dataset.tool === 'pan' ? !hasImage : disabled)
       : disabled || (button.dataset.view === 'result' && !state.doc?.b);
-    button.setAttribute('aria-pressed', String(button.dataset[key] === value));
+    const selected = key === 'mode' && whole && button.dataset.mode === 'flow' ? value === 'effect' : button.dataset[key] === value;
+    button.setAttribute('aria-pressed', String(selected));
   }
   const unknownToggle = byId('show-unknown');
   unknownToggle.hidden = state.view !== 'weight' || !unknownOverlayAvailable();
@@ -1016,6 +1061,7 @@ const graphViews = { source: 'original', parts: 'parts', range: 'weight', effect
 const graphEdges = [['source', 'parts'], ['parts', 'range'], ['source', 'effect'], ['range', 'result'], ['effect', 'result']];
 
 function failedNode() {
+  if (wholeImage()) return 'effect';
   const phase = state.doc?.failed_phase || state.doc?.phase;
   return { analysis: 'parts', analyzing: 'parts', candidate: 'effect', compose: 'range', encoding: 'effect' }[phase] || 'effect';
 }
@@ -1036,7 +1082,8 @@ function updateFlow() {
     const image = byId('thumb-' + node), wait = byId('wait-' + node);
     const summary = byId('summary-' + node);
     if (summary.textContent !== captions[node]) summary.textContent = summary.title = captions[node];
-    const url = node === 'source' ? route('/thumbnail') : revision == null ? ''
+    const noMask = doc.b?.profile === 'whole' && (node === 'parts' || node === 'range');
+    const url = node === 'source' ? route('/thumbnail') : revision == null || noMask ? ''
       : route('/thumbnail?view=' + view + '&revision=' + revision);
     const button = byId('node-' + node);
     button.dataset.state = doc.status === 'error' && node === failedNode() ? 'error' : 'normal';
@@ -1085,7 +1132,8 @@ for (const node of Object.keys(graphViews)) byId('node-' + node).addEventListene
   } else selectMode(node);
 });
 function selectView(view) {
-  if (!state.file || !MODE_VIEWS[state.mode].includes(view) || !viewAvailable(view)) return;
+  if (!state.file || !MODE_VIEWS[state.mode].includes(view) || !viewAvailable(view)
+      || (awaitingProfile() && view !== 'original')) return;
   const leavingMaskView = editingMask() && !maskInspectionView() && view !== state.view;
   if (leavingMaskView && state.sam?.busy === 'apply') return;
   if (view !== 'compare') clearPinFeedback();
@@ -1114,8 +1162,17 @@ function setDrawer(open, restoreFocus = false, pointer = false) {
   else if (restoreFocus) byId('inspector-toggle').focus({ preventScroll: true });
 }
 function selectMode(mode, focusHeading = true) {
-  if (!state.doc || !Object.hasOwn(MODE_VIEWS, mode) || state.sam?.busy === 'apply') return;
-  if (mode === state.mode) return;
+  if (wholeImage()) {
+    if (mode === 'parts' || mode === 'range') return;
+    if (mode === 'flow') mode = 'effect';
+  }
+  if (!state.doc || !Object.hasOwn(MODE_VIEWS, mode) || state.sam?.busy === 'apply'
+      || (awaitingProfile() && mode !== 'review')) return;
+  const wholeEffect = mode === 'effect' && wholeImage();
+  if (mode === state.mode) {
+    if (wholeEffect && compactInspector.matches && document.body.dataset.drawer !== 'open') setDrawer(true);
+    return;
+  }
   const previousMode = state.mode;
   clearPinFeedback();
   state.sam = null;
@@ -1137,11 +1194,12 @@ function selectMode(mode, focusHeading = true) {
     state.tool = state.actions[mode];
     state.view = editableMaskView();
   } else {
-    state.view = { review: 'compare', effect: 'result', flow: 'flow' }[mode];
+    state.view = { review: 'compare', effect: wholeEffect ? 'compare' : 'result', flow: 'flow' }[mode];
   }
   ensureAssets();
   refresh();
-  if (focusHeading && nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
+  if (wholeEffect && compactInspector.matches) setDrawer(true);
+  else if (focusHeading && nodeNames[mode]) byId('node-title').focus({ preventScroll: true });
   if (mode === 'flow') {
     byId('node-' + (nodeNames[previousMode] ? previousMode : 'parts')).focus();
     requestAnimationFrame(drawFlowWires);
@@ -1196,8 +1254,17 @@ function installDraft(doc) {
 }
 function applyMetadata(doc) {
   if (state.sam && state.doc?.revision !== doc.revision) state.sam.preview = null;
+  const wasAwaiting = awaitingProfile();
   state.doc = doc;
   state.pollEtag = null;
+  if (awaitingProfile()) {
+    selectMode('review', false);
+    state.view = 'original';
+  } else if (wasAwaiting) {
+    state.view = 'compare';
+    closeProfilePanel();
+  }
+  if (wholeImage() && ['parts', 'range', 'flow'].includes(state.mode)) selectMode('review', false);
   if (doc.status === 'ready' && doc.b?.revision === doc.revision && state.appliedHistory?.revision !== doc.revision) {
     state.appliedHistory = { revision: doc.revision, cursor: doc.cursor, edits: doc.edits };
   }
@@ -1248,7 +1315,12 @@ function startDocument(doc) {
       }
     } catch { storage('removeItem', pendingKey(doc.id)); }
   }
-  if (doc.status === 'ready' && !state.dirty && !state.conflict) {
+  if (awaitingProfile() || doc.choose_profile) {
+    markPreviousProfile(doc.profile === undefined ? 'fusion' : doc.profile);
+    profilePanel.open = true;
+    profileToggle.focus({ preventScroll: true });
+  }
+  if (!wholeImage() && doc.status === 'ready' && !state.dirty && !state.conflict) {
     post(route('/prepare-edit'), { revision: doc.revision }).catch(() => {});
   }
   schedulePoll();
@@ -1257,6 +1329,9 @@ function beginDocumentChange() {
   clearTimeout(state.pollTimer);
   state.epoch += 1;
   state.opening = true;
+  profilePanel.open = false;
+  profileError.hidden = true;
+  markPreviousProfile(null);
   state.doc = state.file = state.draft = null;
   state.conflict = null;
   state.dirty = state.saveFailed = false;
@@ -1297,9 +1372,9 @@ function beginDocumentChange() {
 }
 
 async function openFile(file) {
-  if (!file || !state.options || state.opening) return;
+  if (!file || !state.options || state.opening || state.switchingProfile) return;
   if (file.size > 64 * 1024 * 1024) { showError(new Error('请选择不超过 64 MiB 的图片。')); return; }
-  if (!(await flushChanges()) || state.opening) return;
+  if (!(await flushChanges()) || state.opening || state.switchingProfile) return;
   const epoch = beginDocumentChange();
   status('正在打开图片…', 'pending');
   // Decode and transfer in parallel, so the view can appear before any model analysis.
@@ -1322,6 +1397,7 @@ async function openFile(file) {
       state.opening = false;
       state.awaitingFirstResult = doc.revision === 0 && !doc.b;
       startDocument(doc);
+      if (doc.profile_fallback) showNotice('缺少分区模型，本次以整图降噪打开。', { tone: 'neutral' });
       if (byId('recent-panel').open) loadRecent();
     }
   } catch (error) {
@@ -1329,7 +1405,7 @@ async function openFile(file) {
   }
 }
 async function openRecent(id) {
-  if (state.opening || !(await flushChanges()) || state.opening) return;
+  if (state.opening || state.switchingProfile || !(await flushChanges()) || state.opening || state.switchingProfile) return;
   if (byId('recent-panel').open) {
     byId('recent-panel').open = false;
     byId('recent-toggle').focus({ preventScroll: true });
@@ -1357,7 +1433,7 @@ function recentButton(entry) {
   const details = document.createElement('span'), name = document.createElement('strong');
   const metadata = document.createElement('small');
   const current = entry.id === state.doc?.id;
-  const status = { queued: '等待处理', running: '处理中', error: '处理失败' }[entry.status];
+  const status = { awaiting_profile: '待选模式', queued: '等待处理', running: '处理中', error: '处理失败' }[entry.status];
   button.type = 'button';
   button.classList.add('recent-item');
   button.title = entry.name;
@@ -1417,7 +1493,7 @@ async function pollDocument() {
     const headers = state.pollEtag ? { 'If-None-Match': state.pollEtag } : {};
     const reply = await request(route(), { headers }, true);
     const doc = reply.status === 304 ? null : await reply.json();
-    if (epoch !== state.epoch || state.save || state.doc !== observed) return;
+    if (epoch !== state.epoch || state.save || state.switchingProfile || state.doc !== observed) return;
     if (doc === null) {
       ensureAssets();
       return;
@@ -2546,6 +2622,54 @@ async function pin(pointer = false) {
     if (feedback && state.pinFeedback === feedback && !feedback.ready) clearPinFeedback();
   }
 }
+function markPreviousProfile(previous) {
+  for (const [profile, button] of Object.entries(profileChoices)) {
+    const prefix = profile === 'whole' ? 'profile-whole' : 'profile-parts';
+    const active = profile === previous;
+    byId(prefix + '-previous').hidden = !active;
+    button.setAttribute('aria-describedby', prefix + '-help' + (active ? ' ' + prefix + '-previous' : ''));
+  }
+}
+function closeProfilePanel() {
+  markPreviousProfile(null);
+  if (!profilePanel.open) return;
+  profilePanel.open = false;
+  profileToggle.focus({ preventScroll: true });
+}
+async function switchProcessingProfile(profile) {
+  if (!state.doc || state.opening || state.switchingProfile || state.conflict || state.sam?.busy === 'apply') return;
+  if (!awaitingProfile() && profile === (state.doc.profile || 'fusion')) {
+    closeProfilePanel();
+    return;
+  }
+  profileError.hidden = true;
+  state.switchingProfile = true;
+  refresh();
+  const epoch = state.epoch;
+  try {
+    if (!await flushChanges() || epoch !== state.epoch) return;
+    const doc = await post(route('/profile'), { revision: state.doc.revision, profile });
+    if (epoch !== state.epoch) return;
+    const newReference = doc.a && !state.doc.a;
+    if (newReference) setComparisonReference('a');
+    hideNotice();
+    selectMode('review', false);
+    applyMetadata(doc);
+    if (newReference && state.view !== 'compare') selectView('compare');
+    closeProfilePanel();
+  } catch (error) {
+    if (epoch !== state.epoch) return;
+    if (profilePanel.open) {
+      profileError.textContent = error.message || String(error);
+      profileError.hidden = false;
+    } else showError(error);
+  } finally {
+    state.switchingProfile = false;
+    refresh();
+    if (profilePanel.open) profileChoices[profile].focus({ preventScroll: true });
+    schedulePoll();
+  }
+}
 async function exportCorrection(pointer = false) {
   if (!renderIsCurrent()) return;
   const epoch = state.epoch;
@@ -2615,13 +2739,18 @@ const menuIds = [
   ['recent-panel', 'recent-toggle', 'recent-menu'],
   ['theme-panel', 'theme-toggle', 'theme-menu'],
   ['export-panel', 'more-actions', 'export-menu'],
+  ['profile-panel', 'profile-toggle', 'profile-menu'],
 ];
 const popovers = menuIds.map(([id]) => byId(id));
 for (const [id, triggerId, menuId] of menuIds) {
   const popover = byId(id), menu = byId(menuId);
   animateDisclosure(popover, byId(triggerId), menu, { opacity: .6, transform: 'translateY(-4px)', duration: 150 });
   popover.addEventListener('toggle', () => {
-    if (!popover.open) { stopMotion(menu); return; }
+    if (!popover.open) {
+      stopMotion(menu);
+      if (popover === profilePanel) profileError.hidden = true;
+      return;
+    }
     for (const other of popovers) if (other !== popover) other.open = false;
     if (id === 'recent-panel') loadRecent();
   });
@@ -2634,6 +2763,9 @@ byId('redo').addEventListener('click', redo);
 byId('download').addEventListener('click', event => download('b', event.detail > 0));
 byId('download-a').addEventListener('click', event => download('a', event.detail > 0));
 byId('pin').addEventListener('click', event => pin(event.detail > 0));
+for (const [profile, button] of Object.entries(profileChoices)) {
+  button.addEventListener('click', () => switchProcessingProfile(profile));
+}
 for (const [reference, button] of comparisonButtons) {
   button.addEventListener('click', () => chooseComparisonReference(reference));
 }
@@ -2642,6 +2774,11 @@ byId('notice-close').addEventListener('click', hideNotice);
 byId('retry').addEventListener('click', () => { if (state.doc) { state.dirty = true; saveDraft(); } });
 byId('conflict-local').addEventListener('click', () => {
   if (!state.conflict) return;
+  if (state.conflict.profile === 'whole' && (state.draft.cursor !== state.conflict.cursor
+      || JSON.stringify(state.draft.edits) !== JSON.stringify(state.conflict.edits))) {
+    showError(new Error('本页的选区修改仍在。请在另一页面切回按部位精修，再保留本页修改。'));
+    return;
+  }
   applyMetadata(state.conflict);
   state.conflict = null;
   edited();
@@ -2876,7 +3013,7 @@ function showShortcuts() {
       ]],
       ['画布与流程', [
         ['适合窗口', '0'], ['按原像素显示', '1'], ['放大', '+', '='], ['缩小', '-'],
-        ['暂时移动画布', '空格 + 拖动'], ['打开编辑流程', 'F'], ['回到成品检查', 'R'],
+        ['暂时移动画布', '空格 + 拖动'], ['打开编辑流程或降噪效果', 'F'], ['回到成品检查', 'R'],
       ]],
       ['绘制工具', [
         ...Object.entries(toolShortcuts).map(([key, [, label]]) => [label, key.toUpperCase()]),
@@ -3085,7 +3222,7 @@ byId('drawer-close').addEventListener('click', () => setDrawer(false, true));
 byId('drawer-scrim').addEventListener('click', () => setDrawer(false, true));
 
 async function exitWorkbench() {
-  if (state.opening || state.sam?.busy === 'apply') throw new Error('请等待当前操作完成后再退出。');
+  if (state.opening || state.switchingProfile || state.sam?.busy === 'apply') throw new Error('请等待当前操作完成后再退出。');
   if (!(await flushChanges())) throw new Error('请先处理页面上的保存提示，再退出。');
   await post('/api/exit', {});
   state.options = null;

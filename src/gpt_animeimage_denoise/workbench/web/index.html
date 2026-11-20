@@ -43,6 +43,7 @@
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></symbol>
     <symbol id="icon-split" viewBox="0 0 24 24"><path d="m9 8-4 4 4 4m6-8 4 4-4 4"/></symbol>
     <symbol id="icon-compare" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 3v18M6 15l3-3m6 1 3-3"/></symbol>
+    <symbol id="icon-whole" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m6.5 15 3.2-3.2 2.8 2.8 2.7-3.5 2.3 2.3M16 7.5h.01"/></symbol>
     <symbol id="icon-range" viewBox="0 0 24 24"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3m0 8v3a1 1 0 0 1-1 1h-3m-8 0H5a1 1 0 0 1-1-1v-3M8 14l3-4 3 2 2-3"/></symbol>
     <symbol id="icon-effect" viewBox="0 0 24 24"><path d="M5 4v6m0 4v6M12 4v10m0 4v2M19 4v2m0 4v10M3 10h4v4H3zm7 4h4v4h-4zm7-8h4v4h-4z"/></symbol>
     <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m15 3 6 6-4 2-2 5-2 2-7-7 2-2 5-2 2-4ZM10 14l-6 6"/></symbol>
@@ -109,7 +110,7 @@
         <button id="back-to-flow" class="node-back" type="button" aria-label="返回编辑流程" title="返回编辑流程（F）" hidden>流程</button>
         <h1 id="node-title" class="visually-hidden" tabindex="-1" hidden></h1>
         <button type="button" data-mode="review" aria-pressed="true" title="成品检查（R）" disabled><svg aria-hidden="true"><use href="#icon-compare"/></svg>成品检查</button>
-        <button type="button" data-mode="flow" aria-pressed="false" title="编辑流程（F）" disabled><svg aria-hidden="true"><use href="#icon-flow"/></svg>编辑流程</button>
+        <button type="button" data-mode="flow" aria-pressed="false" title="编辑流程（F）" disabled><svg aria-hidden="true"><use id="flow-entry-icon" href="#icon-flow"/></svg><span id="flow-entry-label">编辑流程</span></button>
         <div id="node-switcher" class="node-switcher" role="group" aria-label="切换编辑节点" hidden>
           <button type="button" data-mode="parts" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-parts"/></svg>部位分区</button>
           <button type="button" data-mode="range" aria-pressed="false"><svg aria-hidden="true"><use href="#icon-range"/></svg>处理范围</button>
@@ -127,6 +128,31 @@
         </div>
         <div class="status-actions">
           <span id="viewer-hint" hidden>滚轮缩放，空格拖动画布</span>
+          <details id="profile-panel" class="popover profile-panel" hidden>
+            <summary id="profile-toggle" class="button profile-toggle" aria-label="处理模式，当前按部位精修" aria-controls="profile-menu">
+              <svg aria-hidden="true"><use id="profile-icon" href="#icon-parts"/></svg>
+              <span id="profile-label">按部位精修</span>
+            </summary>
+            <div id="profile-menu" class="profile-menu" role="group" aria-label="处理模式">
+              <button id="profile-whole" type="button" aria-pressed="false" aria-labelledby="profile-whole-name" aria-describedby="profile-whole-help">
+                <span class="profile-mark"><svg aria-hidden="true"><use href="#icon-whole"/></svg></span>
+                <span class="profile-option-copy">
+                  <span class="profile-option-title"><strong id="profile-whole-name">整图降噪</strong><span id="profile-whole-previous" class="profile-previous" hidden>上次使用</span></span>
+                  <small id="profile-whole-help">处理整张图，纯 L0 无需下载模型</small>
+                </span>
+                <svg class="profile-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </button>
+              <button id="profile-parts" type="button" aria-pressed="true" aria-labelledby="profile-parts-name" aria-describedby="profile-parts-help">
+                <span class="profile-mark"><svg aria-hidden="true"><use href="#icon-parts"/></svg></span>
+                <span class="profile-option-copy">
+                  <span class="profile-option-title"><strong id="profile-parts-name">按部位精修</strong><span id="profile-parts-previous" class="profile-previous" hidden>上次使用</span></span>
+                  <small id="profile-parts-help">识别人物部位，可单独调整选区</small>
+                </span>
+                <svg class="profile-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+              </button>
+              <p id="profile-error" class="profile-error" role="alert" hidden></p>
+            </div>
+          </details>
           <button id="open-shortcuts" type="button" aria-haspopup="dialog" aria-controls="shortcuts-dialog" aria-keyshortcuts="Shift+/" title="查看快捷键（?）">
             <svg aria-hidden="true"><use href="#icon-keyboard"/></svg>
             <span>快捷键</span>
@@ -408,7 +434,7 @@
               <input id="strength" type="range" min="0" max="1" step="0.01" disabled>
             </div>
             <div class="effect-field-actions">
-              <p class="panel-hint">作用于已选部位。</p>
+              <p id="effect-strength-hint" class="panel-hint">作用于已选部位。</p>
               <button id="set-strength-65" class="text-button" type="button" aria-label="将整体强度设为 65%" disabled>设为 65%</button>
             </div>
           </div>
@@ -473,6 +499,15 @@
         <section id="prefs-defaults" role="tabpanel" aria-labelledby="tab-defaults">
           <div class="settings-section-title"><h2>新图处理参数</h2><button id="default-from-image" class="text-button" type="button">将当前图的参数设为默认</button></div>
           <p class="settings-hint">首次导入图片时使用这些参数。同一张图片再次打开时会恢复草稿。</p>
+          <div class="defaults-main defaults-profile">
+            <label>默认处理模式<select id="default-profile" aria-describedby="default-profile-note">
+              <option value="auto">自动选择</option>
+              <option value="whole">整图降噪</option>
+              <option value="fusion">按部位精修</option>
+              <option value="ask">每次选择</option>
+            </select></label>
+            <p id="default-profile-note" class="settings-hint"></p>
+          </div>
           <div class="defaults-main"><label>降噪算法<select id="default-method"></select></label>
             <label>整体强度<span class="pref-percentage"><input id="default-strength" type="number" required min="0" max="100" step="0.1">%</span></label></div>
           <h2>参与处理的部位</h2>

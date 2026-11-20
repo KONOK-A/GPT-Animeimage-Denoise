@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
@@ -42,6 +44,117 @@ class WorkbenchSessionTest(unittest.TestCase):
              mock.patch.object(fusion_pipeline, 'refine_regions', side_effect=lambda rgb, ev, reg, models, **_: reg), \
              mock.patch.object(fusion_pipeline, 'smooth_candidate', return_value=self.baseline):
             return WorkbenchSession.open(self.source, workspace or self.root / 'work', device='cpu', **options)
+
+    def test_empty_model_directory_uses_whole_image_l0_and_matches_cli_export(self):
+        from gpt_animeimage_denoise.cli import main
+
+        model_dir = self.root / 'empty-models'
+        model_dir.mkdir()
+        y, x = np.indices(self.alpha.shape)
+        rgb = (100 + x // 3 + 4 * ((x + y) % 2)).astype(np.uint8)
+        rgb = np.repeat(rgb[..., None], 3, axis=2)
+        Image.fromarray(np.dstack((rgb, self.alpha))).save(self.source, icc_profile=b'fixture-icc')
+        wait_ready = test_workbench_documents.DocumentsTest.ready
+        with mock.patch.dict(os.environ, GPT_ANIMEIMAGE_DENOISE_MODEL_DIR=str(model_dir)), \
+                mock.patch('gpt_animeimage_denoise.workbench.session.resolve_device', return_value='cpu'), \
+                Documents(self.root) as docs:
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            self.assertEqual(opened.get('profile'), 'whole')
+            identifier = opened['id']
+            ready = wait_ready(self, identifier, opened['revision'], docs=docs)
+            revised = docs.update(identifier, {'revision': ready['revision'], 'edits': [], 'cursor': 0,
+                'settings': {**ready['settings'], 'strength': .65, 'modules': []}})
+            ready = wait_ready(self, identifier, revised['revision'], docs=docs)
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main(['process', str(self.source), '--out', str(self.root / 'cli'),
+                    '--device', 'cpu', '--whole', '--strength', '.65']), 0)
+            cli = Path(json.loads(stdout.getvalue().splitlines()[-1])['output']) / 'result.png'
+            exported = docs.asset(identifier, 'b', revision=ready['revision'], download=True)
+            with Image.open(cli) as expected, Image.open(BytesIO(exported)) as actual:
+                self.assertEqual(actual.info['icc_profile'], b'fixture-icc')
+                np.testing.assert_array_equal(actual, expected)
+                np.testing.assert_array_equal(np.asarray(actual)[..., 3], self.alpha)
+                self.assertTrue(np.any(np.asarray(actual)[..., :3] != rgb))
+            with self.assertRaisesRegex(ValueError, '分区模型'):
+                docs.switch_profile(identifier, ready['revision'], 'fusion')
+            self.assertEqual(docs.get(identifier), ready)
+            with self.assertRaisesRegex(ValueError, '按部位精修'):
+                docs.asset(identifier, 'magnetic_source', revision=ready['revision'])
+            self.assertFalse(list(model_dir.iterdir()))
+
+        with Documents(self.root) as reopened:
+            self.assertEqual(reopened.get(identifier), ready)
+            self.assertEqual(reopened.asset(identifier, 'b', revision=ready['revision']), exported)
+
+    def test_picked_default_modes_apply_to_new_images_and_survive_restart(self):
+        from test_workbench_documents import DocumentsTest
+
+        data = self.source.read_bytes()
+        with Documents(self.root, opener=lambda source, workspace: self.open_session(workspace)) as docs:
+            self.assertEqual(docs.preferences.read().get('default_profile'), 'auto')
+            initial = docs.open(data, 'input.png')
+            existing = DocumentsTest.ready(self, initial['id'], initial['revision'], docs=docs)
+            self.assertEqual(existing['profile'], 'fusion')
+            self.assertEqual(docs.change_preferences({'default_profile': 'whole'})['default_profile'], 'whole')
+            self.assertEqual(docs.open(data, 'input.png')['profile'], 'fusion')
+            self.assertEqual(docs.get(existing['id'])['revision'], existing['revision'])
+            with self.assertRaises(ValueError):
+                docs.change_preferences({'default_profile': 'invalid'})
+
+        new_source = BytesIO()
+        Image.fromarray(np.full((32, 40, 3), 140, np.uint8)).save(new_source, 'PNG')
+        with mock.patch('gpt_animeimage_denoise.workbench.documents.part_models_present', return_value=True), \
+                mock.patch('gpt_animeimage_denoise.workbench.session.resolve_device', return_value='cpu'), \
+                Documents(self.root) as reopened:
+            self.assertEqual(reopened.preferences.read()['default_profile'], 'whole')
+            reopened.prepare_models()
+            opened = reopened.open(new_source.getvalue(), 'new.png')
+            self.assertEqual(opened['profile'], 'whole')
+            DocumentsTest.ready(self, opened['id'], opened['revision'], docs=reopened)
+            self.assertIsNone(reopened._warmup_thread)
+
+    def test_ask_before_processing_survives_restart_and_each_upload_offers_a_choice(self):
+        from test_workbench_documents import DocumentsTest
+
+        data = self.source.read_bytes()
+        missing_models = {'GPT_ANIMEIMAGE_DENOISE_MODEL_DIR': str(self.root / 'missing-models')}
+        with mock.patch.dict(os.environ, missing_models), Documents(self.root) as docs:
+            docs.change_preferences({'default_profile': 'ask'})
+            opened = docs.open(data, 'input.png')
+            identifier = opened['id']
+            self.assertEqual(opened['status'], 'awaiting_profile')
+            self.assertIsNone(opened['profile'])
+            self.assertIsNone(opened['b'])
+            self.assertTrue(docs.asset(identifier, 'original').startswith(b'\x89PNG'))
+            with self.assertRaisesRegex(ValueError, '选择处理模式'):
+                docs.update(identifier, {'revision': 0, 'settings': opened['settings'], 'edits': [], 'cursor': 0})
+            self.assertEqual(docs.get(identifier)['status'], 'awaiting_profile')
+
+        with mock.patch.dict(os.environ, missing_models), \
+                mock.patch('gpt_animeimage_denoise.workbench.session.resolve_device', return_value='cpu'), \
+                Documents(self.root) as reopened:
+            self.assertEqual(reopened.get(identifier)['status'], 'awaiting_profile')
+            with self.assertRaisesRegex(ValueError, '缺少分区模型'):
+                reopened.switch_profile(identifier, 0, 'fusion')
+            self.assertEqual(reopened.get(identifier)['status'], 'awaiting_profile')
+            started = reopened.switch_profile(identifier, 0, 'whole')
+            finished = DocumentsTest.ready(self, identifier, started['revision'], docs=reopened)
+            self.assertNotIn('choose_profile', reopened.get(identifier))
+            uploaded_again = reopened.open(data, 'input.png')
+            self.assertTrue(uploaded_again['choose_profile'])
+            self.assertEqual(uploaded_again['b'], finished['b'])
+            self.assertEqual(reopened.get(identifier), finished)
+
+    def test_parts_default_reports_an_explicit_fallback_when_models_are_missing(self):
+        with mock.patch.dict(os.environ, GPT_ANIMEIMAGE_DENOISE_MODEL_DIR=str(self.root / 'missing-models')), \
+                mock.patch('gpt_animeimage_denoise.workbench.session.resolve_device', return_value='cpu'), \
+                Documents(self.root) as docs:
+            docs.change_preferences({'default_profile': 'fusion'})
+            opened = docs.open(self.source.read_bytes(), 'input.png')
+            self.assertEqual(opened['profile'], 'whole')
+            self.assertTrue(opened['profile_fallback'])
+            self.assertNotIn('profile_fallback', docs.get(opened['id']))
 
     def test_workbench_resumes_a_legacy_case_with_no_completed_report(self):
         legacy = self.open_session(self.root / 'cases')

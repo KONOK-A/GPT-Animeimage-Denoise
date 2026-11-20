@@ -40,7 +40,7 @@ AMD 显卡和 Apple Silicon 的安装步骤、驱动要求及验证命令见 [AM
 
 ### 准备分区模型
 
-工作台和按人物部位去噪需要分区模型，首次下载约 3.3 GB，默认保存在项目的 `models/`。已有模型可以复用。 [模型准备](docs/models.md)
+用「按部位精修」或按人物部位运行命令行时，需要准备约 3.3 GB 的分区模型。默认保存在项目的 `models/`，已有模型可以复用。 [模型准备](docs/models.md)
 
 ```powershell
 & .\.venv\Scripts\python.exe -m tools.assets fetch
@@ -50,11 +50,11 @@ AMD 显卡和 Apple Silicon 的安装步骤、驱动要求及验证命令见 [AM
 
 ### 工作台
 
-准备好分区模型后，双击 [start-workbench.vbs](start-workbench.vbs)，浏览器会打开本地工作台。环境缺少依赖时会弹出缺失项和修复步骤。需要查看终端日志时运行 [start-workbench.cmd](start-workbench.cmd)。
+完成安装后，双击 [start-workbench.vbs](start-workbench.vbs)，浏览器会打开本地工作台。环境缺少依赖时会弹出缺失项和修复步骤。需要查看终端日志时运行 [start-workbench.cmd](start-workbench.cmd)。
 
-1. 打开、拖入或粘贴图片。工作台会在后台生成成品，默认处理皮肤、面部和头发。
+1. 打开、拖入或粘贴图片，工作台会在后台出图。缺少分区模型时，新图进入「整图降噪」，用默认纯 L0 即可出图。有分区模型时，新图进入「按部位精修」，默认处理皮肤、面部和头发。可在「设置 → 新图默认值」指定模式，或设为「每次选择」。
 2. 在「成品检查」拖动分割线查看差异，也可以把当前成品固定为对照 A。
-3. 在「编辑流程」修正部位分区、调整处理范围和降噪效果。使用画笔、套索或 SAM2 修改选区，确认后导出原尺寸 PNG。
+3. 整图模式点「降噪效果」调参。按部位模式点「编辑流程」，用画笔、套索或 SAM2 修改选区。两个模式均可导出原尺寸 PNG。
 
 [工作台手册](docs/workbench.md)
 

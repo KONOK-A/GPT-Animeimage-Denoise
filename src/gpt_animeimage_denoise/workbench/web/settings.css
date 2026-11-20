@@ -30,6 +30,8 @@
   background: var(--raised); border-radius: 6px; padding: 3px 8px; font: inherit;
 }
 .defaults-main select { width: 100%; }
+.defaults-profile { align-items: end; margin-block-end: 14px; }
+.defaults-profile .settings-hint { margin: 0; }
 .pref-percentage { display: inline-flex; align-items: center; gap: 5px; color: var(--quiet); font-variant-numeric: tabular-nums; }
 .pref-percentage input { width: 69px; }
 .defaults-parts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 20px; }
@@ -63,6 +65,7 @@
 @media (max-width: 440px) {
   .settings-header, .settings-scroll, .settings-footer { padding-inline: 14px; }
   .settings-tabs { gap: 12px; padding-inline: 14px; }
+  .defaults-profile { grid-template-columns: 1fr; gap: 5px; }
   .defaults-parts { grid-template-columns: 1fr; }
   .settings-dialog { max-height: calc(100dvh - 14px); }
   .appearance-choices { gap: 4px; }

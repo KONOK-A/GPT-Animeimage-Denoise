@@ -67,7 +67,7 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-function harness({ theme, prefersDark = false, prefersReducedMotion = false, draftLink } = {}) {
+function harness({ theme, prefersDark = false, prefersReducedMotion = false, compactViewport = false, draftLink } = {}) {
   const elements = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const nodes = {};
   for (const [key, values] of [
@@ -96,7 +96,7 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
     settings: { ...options.defaults, modules: options.default_modules, part_strengths: {} },
     edits: [], cursor: 0, status: 'queued', phase: 'analysis', error: null, b: null, a: null,
   };
-  let localSettings = { defaults: doc.settings, export_dir: '', cache_dir: '', theme: theme || 'system',
+  let localSettings = { defaults: doc.settings, default_profile: 'auto', export_dir: '', cache_dir: '', theme: theme || 'system',
     remember_brush: false, brush_radius: 24, brush_feather: 0, exit_on_close: false };
   const frames = [];
   const api = { requests: [], workers: [], timers: [], beforeOpen: null, beforeEdit: null, beforeDecode: null, beforeSam: null,
@@ -105,11 +105,11 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
     manualFrames: false, beforeMagnetic: null, magneticStatus: 200,
     frame: () => { for (const callback of frames.splice(0)) callback(); },
     mutate: change => { doc = { ...doc, ...change }; },
-    ready: () => { doc = { ...doc, status: 'ready', b: { revision: doc.revision, method: doc.settings.method } }; },
+    ready: () => { doc = { ...doc, status: 'ready', b: { revision: doc.revision, method: doc.settings.method, profile: doc.profile } }; },
   };
   const body = new Element('body'), win = new Element();
   const root = new Element('html'), scheme = new Element(), compact = new Element(), motion = new Element();
-  compact.matches = false;
+  compact.matches = compactViewport;
   motion.matches = prefersReducedMotion;
   if (theme) root.dataset.themePreference = theme;
   scheme.matches = prefersDark;
@@ -194,6 +194,14 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
         if (args.method === 'POST') { if (api.beforeOpen) await api.beforeOpen; return response(doc); }
         return response([]);
       }
+      if (route.endsWith('/profile')) {
+        const { revision, profile } = JSON.parse(args.body);
+        if (revision !== doc.revision) return response({ error: 'Conflict' }, 409);
+        if (api.profileError) return response({ error: api.profileError }, 400);
+        const a = profile === 'fusion' && doc.profile === 'whole' ? doc.a || doc.b : doc.a;
+        doc = { ...doc, profile, a, revision: revision + 1, status: 'queued' };
+        return response(doc);
+      }
       if (route.endsWith('/edit')) {
         if (api.beforeEdit) await api.beforeEdit;
         if (api.editError) return response({ error: api.editError }, 500);
@@ -226,6 +234,82 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, dra
   run(script);
   return { elements, nodes, run, api, window: win, storage, root, scheme, preferences };
 }
+
+test('whole-image mode has direct effect controls and switches to the part workflow with A', async () => {
+  const h = harness();
+  await tick();
+  h.api.mutate({ profile: 'whole' });
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  await tick();
+  const { elements, nodes } = h;
+  const flow = nodes.mode.find(button => button.dataset.mode === 'flow');
+  assert.equal(elements.get('flow-entry-label').textContent, '降噪效果');
+  flow.click();
+  assert.equal(h.run('state.mode'), 'effect');
+  assert.equal(h.run('state.view'), 'compare');
+  assert.equal(elements.get('node-switcher').hidden, true);
+  assert.equal(elements.get('back-to-flow').hidden, true);
+  assert.equal(elements.get('tools').hidden, true);
+  const panel = elements.get('profile-panel');
+  panel.open = true;
+  await elements.get('profile-parts').click();
+  assert.equal(panel.open, false);
+  assert.equal(elements.get('profile-toggle').focused, true);
+  assert.equal(elements.get('profile-label').textContent, '按部位精修');
+  assert.equal(h.run('state.doc.profile'), 'fusion');
+  assert.equal(h.run('state.doc.a.revision'), 0);
+  assert.equal(h.run('state.mode'), 'review');
+  assert.equal(h.run('state.leftReference'), 'a');
+  assert.equal(elements.get('download').disabled, true);
+  flow.click();
+  assert.equal(elements.get('thumb-parts').dataset.preview, '');
+  assert.equal(elements.get('thumb-range').dataset.preview, '');
+});
+
+test('the whole-image effect entry opens the controls on a narrow viewport', async () => {
+  const h = harness({ compactViewport: true });
+  await tick();
+  h.api.mutate({ profile: 'whole' });
+  await h.run('openFile(file)');
+  h.nodes.mode.find(button => button.dataset.mode === 'flow').click();
+  assert.equal(h.run('state.view'), 'compare');
+  assert.equal(h.run('document.body.dataset.drawer'), 'open');
+  assert.equal(h.elements.get('drawer-close').focused, true);
+});
+
+test('missing models keep the selected mode and show guidance beside the choices', async () => {
+  const h = harness();
+  await tick();
+  h.api.mutate({ profile: 'whole' });
+  await h.run('openFile(file)');
+  h.api.profileError = '缺少分区模型';
+  const panel = h.elements.get('profile-panel');
+  panel.open = true;
+  await h.elements.get('profile-parts').click();
+  assert.equal(panel.open, true);
+  assert.equal(h.elements.get('profile-label').textContent, '整图降噪');
+  assert.equal(h.elements.get('profile-whole')['aria-pressed'], 'true');
+  assert.equal(h.elements.get('profile-error').hidden, false);
+  assert.match(h.elements.get('profile-error').textContent, /缺少分区模型/);
+});
+
+test('a remote switch to whole image keeps unsaved local mask edits recoverable', async () => {
+  const h = harness();
+  await tick();
+  await h.run('openFile(file)');
+  h.api.ready();
+  await h.run('pollDocument()');
+  h.run("state.draft.edits = [{ stage: 'range', tool: 'exclude', radius: 2, points: [[10, 10]] }]; state.draft.cursor = 1; edited()");
+  h.api.mutate({ profile: 'whole', revision: 1 });
+  await h.run('pollDocument()');
+  h.elements.get('conflict-local').click();
+  assert.equal(h.run('state.conflict?.profile'), 'whole');
+  assert.equal(h.run('state.draft.cursor'), 1);
+  assert.match(h.elements.get('notice-text').textContent, /切回按部位精修/);
+  assert.equal(h.elements.get('conflict-remote').hidden, false);
+});
 
 test('model prewarm is deferred until the empty workbench is ready', async () => {
   const warmups = h => h.api.requests.filter(item => item.route === '/api/prepare-models');
@@ -875,6 +959,68 @@ test('closing a browser page reports its departure and sends a pending stroke', 
   const restored = JSON.parse(reports()[2].args.body);
   assert.equal(restored.open, true);
   assert.notEqual(restored.id, joined.id);
+});
+
+test('new-image settings save and reload the choice to ask on every import', async () => {
+  const h = harness();
+  await tick();
+  await h.elements.get('open-settings').click();
+  const mode = h.elements.get('default-profile');
+  assert.ok(mode);
+  assert.equal(mode.value, 'auto');
+  mode.value = 'ask';
+  mode.fire('change');
+  assert.match(h.elements.get('default-profile-note').textContent, /选择模式后/);
+  await h.elements.get('settings-form').fire('submit', { preventDefault() {} });
+  const update = h.api.requests.find(item => item.route === '/api/settings' && item.args?.method === 'POST');
+  assert.deepEqual(JSON.parse(update.args.body), { default_profile: 'ask' });
+  await h.elements.get('open-settings').click();
+  assert.equal(mode.value, 'ask');
+});
+
+test('an import waiting for a mode shows only the original and starts comparing after a choice', async () => {
+  const h = harness();
+  await tick();
+  h.api.mutate({ profile: null, status: 'awaiting_profile' });
+  await h.run('openFile(file)');
+  const get = id => h.elements.get(id);
+  assert.equal(get('profile-label').textContent, '选择处理模式');
+  assert.equal(get('profile-panel').open, true);
+  assert.equal(get('workspace-modes').hidden, true);
+  assert.equal(get('download').disabled, true);
+  assert.match(get('status-message').textContent, /选择处理模式/);
+  assert.equal(h.run('state.view'), 'original');
+  h.run("selectMode('flow')");
+  assert.equal(h.run('state.mode'), 'review');
+  await get('profile-parts').click();
+  assert.equal(h.run('state.doc.profile'), 'fusion');
+  assert.equal(h.run('state.view'), 'compare');
+  assert.equal(get('profile-panel').open, false);
+  assert.equal(get('workspace-modes').hidden, false);
+});
+
+test('reimporting a draft marks its last used mode in the choice menu', async () => {
+  const h = harness();
+  await tick();
+  h.api.mutate({ profile: 'fusion', status: 'ready', choose_profile: true, b: { revision: 0, method: 'l0' } });
+  await h.run('openFile(file)');
+  const panel = h.elements.get('profile-panel');
+  assert.equal(panel.open, true);
+  assert.equal(h.elements.get('profile-parts-previous').hidden, false);
+  assert.equal(h.elements.get('profile-whole-previous').hidden, true);
+  assert.equal(h.elements.get('profile-parts')['aria-pressed'], 'true');
+  panel.open = false;
+  panel.fire('toggle');
+  panel.open = true;
+  panel.fire('toggle');
+  assert.equal(h.elements.get('profile-parts-previous').hidden, false);
+  await h.elements.get('profile-parts').click();
+  assert.equal(panel.open, false);
+  assert.equal(h.api.requests.some(item => item.route.endsWith('/profile')), false);
+  h.api.mutate({ choose_profile: false });
+  await h.run("openRecent('source')");
+  assert.equal(panel.open, false);
+  assert.equal(h.elements.get('profile-parts-previous').hidden, true);
 });
 
 test('settings save and reload the preference to exit with the last page', async () => {

@@ -82,10 +82,13 @@ def _folder(value):
     return str(folder)
 
 
+_DEFAULT_PROFILES = ('auto', 'whole', 'fusion', 'ask')
+
+
 class Preferences:
     def __init__(self, defaults, validate):
         self.validate = validate
-        self.initial = {'defaults': defaults, 'export_dir': '', 'cache_dir': '', 'theme': 'system',
+        self.initial = {'defaults': defaults, 'default_profile': 'auto', 'export_dir': '', 'cache_dir': '', 'theme': 'system',
                         'remember_brush': False, 'brush_radius': 24, 'brush_feather': 0,
                         'exit_on_close': False}
         configured = os.environ.get('GAID_WORKBENCH_SETTINGS')
@@ -115,6 +118,8 @@ class Preferences:
                 result['defaults'] = self.validate({**before['defaults'], **patch['defaults']})
             if result['theme'] not in ('system', 'light', 'dark') or type(result['remember_brush']) is not bool:
                 raise ValueError('外观或笔刷记忆设置无效。')
+            if result['default_profile'] not in _DEFAULT_PROFILES:
+                raise ValueError('新图的默认处理模式无效。')
             if type(result['exit_on_close']) is not bool:
                 raise ValueError('关闭页面时的退出设置无效。')
             radius, feather = result['brush_radius'], result['brush_feather']

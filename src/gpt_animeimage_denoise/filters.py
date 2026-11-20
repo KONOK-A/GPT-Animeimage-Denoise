@@ -152,6 +152,17 @@ def _compose_weight(editable, feather_radius, line_weight, structure_protection)
     return weight.astype(np.float32, copy=False)
 
 
+def whole_weight(rgb, alpha, *, strength, structure_protection):
+    """Build the whole-image blend weight and its fully transparent protection mask."""
+    protected = (alpha == 0 if alpha is not None else np.zeros(rgb.shape[:2], dtype=bool))
+    weight = build_weight(~protected, protected, rgb, feather_radius=0,
+                          structure_radius=5 * (min(rgb.shape[:2]) / 2048), gradient_threshold=4,
+                          structure_protection=structure_protection)
+    weight *= np.float32(strength)
+    weight[weight < 1 / 255] = 0
+    return weight, protected
+
+
 def build_weight(allowed_bool, protected_bool, original_uint8, feather_radius=16,
                  structure_radius=5, gradient_threshold=4, *, structure_protection=1):
     """Return a float32 soft weight strictly inside allowed and outside protected.

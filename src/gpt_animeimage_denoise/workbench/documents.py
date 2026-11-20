@@ -24,6 +24,7 @@ from PIL import Image, UnidentifiedImageError
 from ..corrections import MASK_KEYS, load_edits
 from ..denoisers import resolve_denoiser
 from ..editor import DEFAULT_MODULES, MODULES
+from ..model_paths import part_models_present
 from ..pipeline import _digest, _json, _read_source, _sha
 from .storage import CaseCache, Preferences, StorageBusy, export_png, write_atomic as _write_atomic
 
@@ -59,6 +60,13 @@ _CHANGE_COLORS = np.array([(0, 0, 0, 0), (56, 189, 248, 180), (244, 119, 118, 18
 
 class RevisionConflict(ValueError):
     """An update or export refers to a revision that is no longer current."""
+
+
+def _require_parts(state):
+    if state['status'] == 'awaiting_profile':
+        raise ValueError('请先选择处理模式。')
+    if state.get('profile') == 'whole':
+        raise ValueError('请切换到「按部位精修」后修改选区。')
 
 
 @dataclass
@@ -547,22 +555,30 @@ class Documents:
 
     @staticmethod
     def _analysis_outdated(state):
-        return state['status'] == 'ready' and state.get('_analysis_version') != _ANALYSIS_VERSION
+        return (state.get('profile') != 'whole' and state['status'] == 'ready'
+                and state.get('_analysis_version') != _ANALYSIS_VERSION)
 
     @staticmethod
     def _range_edge_outdated(state):
-        return (state['status'] == 'ready' and state.get('_range_edge_version') != _RANGE_EDGE_VERSION
+        return (state.get('profile') != 'whole' and state['status'] == 'ready'
+                and state.get('_range_edge_version') != _RANGE_EDGE_VERSION
                 and any(edit.get('adaptive_edge') for edit in state['edits'][:state['cursor']]))
 
-    def _restart_render(self, state, *, selection_changed, reset_source=False):
+    def _restart_render(self, state, *, selection_changed, reset_source=False, defer_profile=False):
         # Leave earlier previews available while the new revision is running.
-        updated = {**state, 'revision': state['revision'] + 1, 'status': 'queued',
-                   'phase': 'queued', 'error': None,
+        phase = 'awaiting_profile' if defer_profile else 'queued'
+        updated = {**state, 'revision': state['revision'] + 1, 'status': phase,
+                   'phase': phase, 'error': None,
                    'selection_revision': state['selection_revision'] + int(selection_changed)}
         if reset_source:
             updated['_source_epoch'] = state.get('_source_epoch', 0) + 1
         self._store(updated)
-        self._queue(updated)
+        if defer_profile:
+            self._pending.pop(state['id'], None)
+            self._pending_results.pop(state['id'], None)
+            self._condition.notify_all()
+        else:
+            self._queue(updated)
         return updated
 
     @staticmethod
@@ -587,7 +603,7 @@ class Documents:
         with self._condition:
             state = self._lookup(doc)
             self._current(state, revision)
-            if (self.opener is None and state['status'] == 'ready' and state.get('b')
+            if (self.opener is None and state.get('profile') != 'whole' and state['status'] == 'ready' and state.get('b')
                     and ((self._resident_id, self._resident_epoch) != (doc, state.get('_source_epoch', 0))
                          or self._selection_key != self._selection_cache_key(state))):
                 self._warmup_stop.set()
@@ -598,7 +614,8 @@ class Documents:
         with self._condition:
             if (self._closed or self.opener is not None or self._warmup_thread is not None
                     or self._warmup_stop.is_set() or self._pending or self._prepare_request is not None
-                    or self._resident is not None):
+                    or self._resident is not None or self.preferences.read()['default_profile'] in ('whole', 'ask')
+                    or not part_models_present()):
                 return
             self._warmup_thread = Thread(target=self._warm_model_cache, name='gaid-model-warmup', daemon=True)
             self._warmup_thread.start()
@@ -771,12 +788,17 @@ class Documents:
         analysis_outdated = self._analysis_outdated(state)
         edge_outdated = self._range_edge_outdated(state)
         reset_source = repaired or state['status'] == 'error' or analysis_outdated
-        if reset_source or edge_outdated:
+        choose_profile = self.preferences.read()['default_profile'] == 'ask'
+        active = state['status'] in ('queued', 'running')
+        if state['status'] != 'awaiting_profile' and (reset_source or edge_outdated or (choose_profile and active)):
             updated = self._restart_render(updated, selection_changed=analysis_outdated or edge_outdated,
-                                           reset_source=reset_source)
+                                           reset_source=reset_source, defer_profile=choose_profile)
         else:
             self._store(updated)
-        return self._public(updated)
+        result = self._public(updated)
+        if choose_profile:
+            result['choose_profile'] = True
+        return result
 
     def open(self, content, name):
         if not isinstance(content, bytes) or not content or len(content) > 64 * 1024 * 1024:
@@ -803,19 +825,48 @@ class Documents:
             self._repair_source(doc, suffix, content)
             folder = self.root / doc
             _write_atomic(folder / 'original.png', original)
-            state = {'id': doc, 'name': (name.replace('\\', '/').split('/')[-1] or 'image' + suffix)[:160],
-                     'width': width, 'height': height, 'revision': 0, 'settings': self.preferences.read()['defaults'],
-                     'edits': [], 'cursor': 0, 'status': 'queued', 'phase': 'queued', 'error': None,
+            preferences = self.preferences.read()
+            preferred = preferences['default_profile']
+            if preferred == 'ask':
+                profile = None
+            else:
+                profile = 'fusion' if preferred != 'whole' and (self.opener is not None or part_models_present()) else 'whole'
+            phase = 'awaiting_profile' if profile is None else 'queued'
+            state = {'id': doc, 'profile': profile, 'name': (name.replace('\\', '/').split('/')[-1] or 'image' + suffix)[:160],
+                     'width': width, 'height': height, 'revision': 0, 'settings': preferences['defaults'],
+                     'edits': [], 'cursor': 0, 'status': phase, 'phase': phase, 'error': None,
                      'b': None, 'a': None, 'selection_revision': 0,
                      '_schema': 1, '_updated': time(), '_suffix': suffix, '_correction': None, '_source_epoch': 0}
             self._store(state)
-            self._queue(state)
-            return self._public(state)
+            if profile is not None:
+                self._queue(state)
+            result = self._public(state)
+            if preferred == 'fusion' and profile == 'whole':
+                result['profile_fallback'] = True
+            return result
 
     @staticmethod
     def _current(state, revision):
         if type(revision) is not int or revision != state['revision']:
             raise RevisionConflict('文档已在另一页面更新。请重新载入后继续。')
+
+    def switch_profile(self, doc, revision, profile):
+        if profile not in ('whole', 'fusion'):
+            raise ValueError('请选择整图降噪或按部位精修。')
+        with self._condition:
+            state = self._lookup(doc, upgrade=False)
+            self._current(state, revision)
+            if profile == state.get('profile', 'fusion') and state['status'] != 'awaiting_profile':
+                return self._public(state)
+            if profile == 'fusion' and self.opener is None and not part_models_present():
+                raise ValueError('缺少分区模型。请在项目根目录运行 python -m tools.assets fetch，再切换到按部位精修。')
+            updated = {**state, 'profile': profile, 'selection_preview': None, '_updated': time()}
+            previous = state['b']
+            if profile == 'fusion' and not state['a'] and previous and previous.get('profile') == 'whole':
+                updated['a'] = deepcopy(previous)
+            updated = self._restart_render(updated, selection_changed=True, reset_source=True)
+            self._prune(state, updated)
+            return self._public(updated)
 
     def update(self, doc, payload):
         if not isinstance(payload, dict) or set(payload) != {'revision', 'settings', 'edits', 'cursor'}:
@@ -823,9 +874,17 @@ class Documents:
         with self._condition:
             state = self._lookup(doc)
             self._current(state, payload['revision'])
+            if state['status'] == 'awaiting_profile':
+                raise ValueError('请先选择处理模式。')
             settings = _settings(payload['settings'])
-            stored_edits = {edit['token']: edit for edit in state['edits'] if 'token' in edit}
-            edits = _history(payload['edits'], payload['cursor'], state['width'], state['height'], stored_edits)
+            if state.get('profile') == 'whole':
+                if (payload['edits'] != state['edits'] or type(payload['cursor']) is not int
+                        or payload['cursor'] != state['cursor']):
+                    _require_parts(state)
+                edits = state['edits']
+            else:
+                stored_edits = {edit['token']: edit for edit in state['edits'] if 'token' in edit}
+                edits = _history(payload['edits'], payload['cursor'], state['width'], state['height'], stored_edits)
             new_resolutions = [i for i, edit in enumerate(edits) if edit['tool'] == 'resolve_unknown'
                                and edits[i - 1:i + 1] != state['edits'][i - 1:i + 1]]
             if new_resolutions and (state['status'] != 'ready'
@@ -870,7 +929,8 @@ class Documents:
     @staticmethod
     def _selection_asset(state, revision):
         for rendered in (state.get('selection_preview'), state['b']):
-            if rendered and (revision is None or (type(revision) is int and rendered['revision'] == revision)):
+            if (rendered and rendered.get('profile') != 'whole'
+                    and (revision is None or (type(revision) is int and rendered['revision'] == revision))):
                 return rendered
         raise RevisionConflict('请求的选区预览尚未完成或已更新。')
 
@@ -882,6 +942,7 @@ class Documents:
     def _changes_state(self, doc, revision):
         state = self._lookup(doc, upgrade=False)
         self._current(state, revision)
+        _require_parts(state)
         if (state['status'] != 'ready' or not state['b'] or state['b']['revision'] != revision
                 or self._analysis_outdated(state) or self._range_edge_outdated(state)):
             raise RevisionConflict('当前成品尚未更新，请稍后查看手动改动。')
@@ -1128,6 +1189,7 @@ class Documents:
     def _magnetic_state(self, doc, revision):
         state = self._lookup(doc)
         self._current(state, revision)
+        _require_parts(state)
         if state['status'] != 'ready' or not state['b'] or state['b']['revision'] != revision:
             raise RevisionConflict('当前降噪候选尚未就绪。')
         return state
@@ -1197,6 +1259,7 @@ class Documents:
         with self._condition:
             state = self._published_b(doc, revision)
             self._current(state, revision)
+            _require_parts(state)
             path = self._render_path(doc, revision) / 'corrections.json'
             if path.is_file():
                 record = json.loads(path.read_text(encoding='utf-8'))
@@ -1242,6 +1305,7 @@ class Documents:
         with self._condition:
             state = self._lookup(doc)
             self._current(state, revision)
+            _require_parts(state)
             if record.get('source_sha256') != doc or record.get('size') != [state['width'], state['height']]:
                 raise ValueError('校正文件与当前原图不匹配。')
             if state['cursor'] >= 2000:
@@ -1276,6 +1340,7 @@ class Documents:
         with self._condition:
             state = self._lookup(doc)
             self._current(state, revision)
+            _require_parts(state)
             width, height = state['width'], state['height']
             included = _sam_points(positive, width, height)
             excluded = _sam_points(negative, width, height)
@@ -1521,7 +1586,52 @@ class Documents:
                 return _ResultImage(rgb)
         return _ResultImage(blend(original, self._restored, weight))
 
+    def _render_whole(self, doc, revision, state):
+        from ..filters import blend, whole_weight
+        from .session import ImageCandidates
+
+        settings = state['settings']
+        epoch = state.get('_source_epoch', 0)
+        if (self._resident_id, self._resident_epoch) != (doc, epoch):
+            if not self._stage(doc, revision, 'loading'):
+                return
+            self._drop_resident()
+            source = self._source_path(doc, state['_suffix']).read_bytes()
+            if hashlib.sha256(source).hexdigest() != doc:
+                raise ValueError('本地原图副本已更改，请重新打开源图。')
+            self._resident = ImageCandidates(*_read_source(BytesIO(source)), device='auto')
+            self._resident_id, self._resident_epoch = doc, epoch
+        session = self._resident
+        if not self._prepare_candidate(doc, revision, session, session.rgb, session.alpha, settings):
+            return
+        weight, _ = whole_weight(session.rgb, session.alpha, strength=settings['strength'],
+                                 structure_protection=settings['structure_protection'])
+        result = _ResultImage(blend(session.rgb, self._restored, weight))
+        publication = {'b': {'revision': revision, 'profile': 'whole', 'method': settings['method'],
+                             'selection_revision': state['selection_revision'], 'images': {}},
+                       'selection_preview': None, 'status': 'ready', 'phase': 'done', 'error': None,
+                       'edit_feedback': None, 'correction_error': None,
+                       'active_percent': round(float((weight > 0).mean() * 100), 2)}
+        return _ResultJob(revision, result, session.alpha, session.icc, self._candidate_png, publication)
+
+    def _prepare_candidate(self, doc, revision, session, rgb, alpha, settings):
+        key = _restoration_key(settings)
+        if key == self._restored_key:
+            return self._stage(doc, revision, 'compose')
+        if not self._stage(doc, revision, 'candidate'):
+            return False
+        self._result_cache = None
+        candidate = session.candidate(settings['method'], lam=settings['l0'], downscale=settings['downscale'])
+        if not self._stage(doc, revision, 'compose'):
+            return False
+        self._restored = _restore_candidate(rgb, candidate, settings)
+        self._candidate_png = _png(np.rint(candidate * 255).astype(np.uint8), alpha, session.icc)
+        self._restored_key = key
+        return True
+
     def _render(self, doc, revision, state):
+        if state.get('profile') == 'whole':
+            return self._render_whole(doc, revision, state)
         epoch = state.get('_source_epoch', 0)
         needs_analysis = self._resident_id != doc or self._resident_epoch != epoch
         settings = state['settings']
@@ -1549,16 +1659,8 @@ class Documents:
         preview = {**rendered, 'analysis_version': _ANALYSIS_VERSION}
         if not self._publish_render(doc, revision, images, {'selection_preview': preview}):
             return
-        if needs_candidate:
-            if not self._stage(doc, revision, 'candidate'):
-                return
-            self._result_cache = None
-            candidate = session.candidate(settings['method'], lam=settings['l0'], downscale=settings['downscale'])
-            if not self._stage(doc, revision, 'compose'):
-                return
-            self._restored = _restore_candidate(session.editor.rgb, candidate, settings)
-            self._candidate_png = _png(np.rint(candidate * 255).astype(np.uint8), session.editor.alpha, session.icc)
-            self._restored_key = restore_key
+        if not self._prepare_candidate(doc, revision, session, session.editor.rgb, session.editor.alpha, settings):
+            return
         result = self._blend_result(session.editor.rgb, mask.weight)
         if result.rgb.nbytes <= _MAX_RETAINED_RESULT_BYTES:
             self._result_cache = (mask.weight, result)

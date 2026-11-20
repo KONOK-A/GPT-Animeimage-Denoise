@@ -13,7 +13,7 @@ from PIL import Image
 
 from .auto_sam import refine_regions, select_manual_candidate
 from .corrections import MODULES, apply_corrections, load_edits
-from .filters import blend, build_weight, gradient_preserving_candidate, validate_unit_interval
+from .filters import blend, build_weight, gradient_preserving_candidate, validate_unit_interval, whole_weight
 from .denoisers import (describe_denoiser, resolve_denoiser, uses_sr, uses_l0,
                         super_resolve, smooth_candidate)
 from .fusion import _policy, fuse_evidence, reference_regions
@@ -358,11 +358,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         resumed['split'] = split
         return resumed
     started = time.perf_counter()
-    if whole:
-        protected = (original_alpha == 0 if original_alpha is not None
-                     else np.zeros(rgb.shape[:2], dtype=bool))
-        allowed = ~protected
-    else:
+    if not whole:
         segment_rgb = rgb
         if original_alpha is not None:
             alpha = original_alpha.astype(np.float32)[..., None] / 255
@@ -424,14 +420,17 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
         grid = (regions['person_labels'], regions['objects'], unknown, suspected_objects)
         del evidence, regions, segment_rgb
     else:
-        if not whole:
-            allowed, protected = regions['allowed'], regions['protected']
         scale = min(rgb.shape[:2]) / 2048
         effective_sigma = float(sigma) * scale
-        weight = build_weight(allowed, protected, rgb,
-            feather_radius=0 if whole else 16 * scale, structure_radius=5 * scale, gradient_threshold=4,
-            structure_protection=structure_protection)
-        weight *= np.float32(strength); weight[weight < 1 / 255] = 0
+        if whole:
+            weight, protected = whole_weight(rgb, original_alpha, strength=strength,
+                                             structure_protection=structure_protection)
+        else:
+            allowed, protected = regions['allowed'], regions['protected']
+            weight = build_weight(allowed, protected, rgb,
+                feather_radius=16 * scale, structure_radius=5 * scale, gradient_threshold=4,
+                structure_protection=structure_protection)
+            weight *= np.float32(strength); weight[weight < 1 / 255] = 0
     stage('candidate')
     sr_hit = None; sr_identity = None; candidate_input = rgb
     if uses_sr(denoiser):

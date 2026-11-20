@@ -72,7 +72,63 @@ def _cached_editor(source, workspace, digest, size):
     return _case_editor(source, case, report, digest)[0]
 
 
-class WorkbenchSession:
+class ImageCandidates:
+    """Keep recent denoising candidates on one oriented source grid."""
+
+    def __init__(self, rgb, alpha, icc, device, baseline=None, baseline_lam=None, *,
+                 baseline_method='l0', baseline_downscale=DOWNSCALE):
+        self.rgb, self.alpha, self.icc = rgb, alpha, icc
+        self.device = device
+        if baseline is not None:
+            baseline.setflags(write=False)
+        self._baseline = baseline
+        self._baseline_key = self._candidate_key(baseline_method, baseline_lam, baseline_downscale)
+        self._candidates = OrderedDict()
+        self._sr_input = None
+        self._sr_key = None
+
+    def _inference_device(self):
+        if self.device == 'auto':
+            self.device = resolve_device()
+        return self.device
+
+    @staticmethod
+    def _candidate_key(method, lam, downscale):
+        return method, lam if uses_l0(method) else None, downscale if method.startswith('esrgan') else None
+
+    def candidate(self, method='l0', *, lam=None, downscale=DOWNSCALE):
+        """Return the original-grid float32 candidate for the selected method."""
+        method, lam = resolve_denoiser(method, lam)
+        if self._baseline is not None and self._candidate_key(method, lam, downscale) == self._baseline_key:
+            return self._baseline
+
+        device = self._inference_device()
+        sr_key = None
+        if uses_sr(method):
+            config = describe_denoiser(method, device, downscale=downscale)
+            sr_key = _digest({name: value for name, value in config.items() if name != 'method'})
+        l0_enabled = uses_l0(method)
+        key = (method, lam if l0_enabled else None, sr_key)
+        if key in self._candidates:
+            self._candidates.move_to_end(key)
+            return self._candidates[key]
+
+        rgb = self.rgb
+        if sr_key is not None:
+            if sr_key != self._sr_key:
+                self._sr_input = super_resolve(rgb, device=device, method=method, downscale=downscale)
+                self._sr_key = sr_key
+            rgb = self._sr_input
+        candidate = (smooth_candidate(rgb, lam, device=device) if l0_enabled
+                     else rgb.astype(np.float32) / np.float32(255))
+        candidate.setflags(write=False)
+        self._candidates[key] = candidate
+        if len(self._candidates) > 2:
+            self._candidates.popitem(last=False)
+        return candidate
+
+
+class WorkbenchSession(ImageCandidates):
     """Use immutable analysis inputs while region choices and denoisers change."""
 
     def __init__(self, source, case_dir, source_sha256, device, editor, icc, baseline, baseline_lam,
@@ -81,20 +137,12 @@ class WorkbenchSession:
         self.case_dir = case_dir
         self.name = source.name
         self.source_sha256 = source_sha256
-        self.device = device
         self.editor = editor
         self.suspected_objects = suspected_objects
         self._models = models
-        self.icc = icc
         self.height, self.width = editor.labels.shape
-        if baseline is not None:
-            baseline.setflags(write=False)
-        self._baseline = baseline
-        self._baseline_key = self._candidate_key(baseline_method, baseline_lam, baseline_downscale)
-        # Keep the original candidate, two recent alternatives, and one SR input.
-        self._candidates = OrderedDict()
-        self._sr_input = None
-        self._sr_key = None
+        super().__init__(editor.rgb, editor.alpha, icc, device, baseline, baseline_lam,
+                         baseline_method=baseline_method, baseline_downscale=baseline_downscale)
 
     @classmethod
     def open(cls, source, workspace, *, device='auto', method='l0', lam=None, downscale=DOWNSCALE,
@@ -205,41 +253,6 @@ class WorkbenchSession:
         if mask is None:
             raise ValueError('SAM2 没有找到符合这些点的轮廓，请调整加入点或排除点。')
         return mask if alpha is None else mask & (alpha > 0)
-
-    @staticmethod
-    def _candidate_key(method, lam, downscale):
-        return method, lam if uses_l0(method) else None, downscale if method.startswith('esrgan') else None
-
-    def candidate(self, method='l0', *, lam=None, downscale=DOWNSCALE):
-        """Return the original-grid float32 candidate for the selected method."""
-        method, lam = resolve_denoiser(method, lam)
-        if self._baseline is not None and self._candidate_key(method, lam, downscale) == self._baseline_key:
-            return self._baseline
-
-        device = self._inference_device()
-        sr_key = None
-        if uses_sr(method):
-            config = describe_denoiser(method, device, downscale=downscale)
-            sr_key = _digest({name: value for name, value in config.items() if name != 'method'})
-        l0_enabled = uses_l0(method)
-        key = (method, lam if l0_enabled else None, sr_key)
-        if key in self._candidates:
-            self._candidates.move_to_end(key)
-            return self._candidates[key]
-
-        rgb = self.editor.rgb
-        if sr_key is not None:
-            if sr_key != self._sr_key:
-                self._sr_input = super_resolve(rgb, device=device, method=method, downscale=downscale)
-                self._sr_key = sr_key
-            rgb = self._sr_input
-        candidate = (smooth_candidate(rgb, lam, device=device) if l0_enabled
-                     else rgb.astype(np.float32) / np.float32(255))
-        candidate.setflags(write=False)
-        self._candidates[key] = candidate
-        if len(self._candidates) > 2:
-            self._candidates.popitem(last=False)
-        return candidate
 
     def save_corrections(self, directory, modules):
         """Export portable, source-bound edits in a new or empty directory."""

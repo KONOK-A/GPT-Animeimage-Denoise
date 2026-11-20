@@ -4,6 +4,17 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
   const dialog = byId('settings-dialog'), form = byId('settings-form');
   const tabs = ['defaults', 'storage', 'appearance'];
   const themeNames = ['system', 'light', 'dark'];
+  const profileField = byId('default-profile');
+  const profileNotes = {
+    auto: '有分区模型时使用按部位精修，否则使用整图降噪。',
+    whole: '直接处理整张图。纯 L0 无需下载模型。',
+    fusion: '优先识别人物部位。缺少分区模型时使用整图降噪。',
+    ask: '导入后先显示图片，选择模式后开始处理。',
+  };
+  function describeProfile() {
+    byId('default-profile-note').textContent = profileNotes[profileField.value] || '';
+  }
+  profileField.addEventListener('change', describeProfile);
   const fields = new Map();
   let value, read, queue = Promise.resolve(), defaults, saved, busy = false, visit = 0;
   let cacheInfo, cacheRead = 0;
@@ -133,6 +144,8 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       install(saved);
       buildOptions();
       displayDefaults(saved.defaults);
+      profileField.value = saved.default_profile || 'auto';
+      describeProfile();
       byId('pref-export-dir').value = saved.export_dir;
       byId('pref-cache-dir').value = saved.cache_dir;
       byId('pref-theme-' + saved.theme).checked = true;
@@ -164,7 +177,8 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       if (level !== 1) next.part_strengths[id] = level;
     }
     const values = {
-      defaults: next, export_dir: byId('pref-export-dir').value.trim(), cache_dir: byId('pref-cache-dir').value.trim(),
+      defaults: next, default_profile: profileField.value,
+      export_dir: byId('pref-export-dir').value.trim(), cache_dir: byId('pref-cache-dir').value.trim(),
       theme: themeNames.find(name => byId('pref-theme-' + name).checked) || 'system',
       remember_brush: byId('pref-remember-brush').checked, brush_radius: Number(byId('pref-brush-size').value) / 2,
       brush_feather: Number(byId('pref-brush-feather').value), exit_on_close: byId('pref-exit-on-close').checked,

@@ -19,6 +19,71 @@ from gpt_animeimage_denoise.workbench.documents import Documents, RevisionConfli
 
 
 class DocumentsTest(unittest.TestCase):
+    def test_switching_profiles_preserves_part_edits_and_pins_the_whole_result(self):
+        with patch('gpt_animeimage_denoise.workbench.session.resolve_device', return_value='cpu'):
+            opened = self.docs.open(self.content.getvalue(), 'sample.png')
+            doc = opened['id']
+            ready = self.ready(doc, opened['revision'])
+            edit = {'stage': 'range', 'tool': 'exclude', 'radius': 2, 'points': [[10, 10]]}
+            edited = self.docs.update(doc, {**self.update(ready), 'edits': [edit], 'cursor': 1})
+            parts = self.ready(doc, edited['revision'])
+            original_result = self.docs.asset(doc, 'b', revision=parts['revision'])
+            self.assertTrue(hasattr(self.docs, 'switch_profile'), 'Workbench needs a revisioned mode switch')
+            whole = self.docs.switch_profile(doc, parts['revision'], 'whole')
+            self.assertEqual(whole['profile'], 'whole')
+            self.assertEqual(whole['b'], parts['b'])
+            whole = self.ready(doc, whole['revision'])
+            whole_result = self.docs.asset(doc, 'b', revision=whole['revision'])
+            self.assertNotEqual(whole_result, original_result)
+            with self.assertRaises(RevisionConflict):
+                self.docs.switch_profile(doc, parts['revision'], 'fusion')
+            returning = self.docs.switch_profile(doc, whole['revision'], 'fusion')
+            self.assertEqual(returning['a']['revision'], whole['revision'])
+            self.assertEqual(returning['edits'], [edit])
+            restored = self.ready(doc, returning['revision'])
+            self.assertEqual(restored['cursor'], 1)
+            self.assertEqual(self.docs.asset(doc, 'b', revision=restored['revision']), original_result)
+            self.assertEqual(self.docs.asset(doc, 'a', revision=whole['revision']), whole_result)
+
+    def test_legacy_parts_draft_preserves_its_results_without_installed_models(self):
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        self.docs.pin(doc, ready['revision'])
+        png = self.docs.asset(doc, 'b', revision=ready['revision'])
+        self.docs.close()
+        draft = self.workspace / 'documents' / doc / 'draft.json'
+        stored = json.loads(draft.read_text(encoding='utf-8'))
+        stored.pop('profile', None)
+        draft.write_text(json.dumps(stored), encoding='utf-8')
+
+        with patch.dict(os.environ, GPT_ANIMEIMAGE_DENOISE_MODEL_DIR=str(self.workspace / 'missing')), \
+                Documents(self.workspace) as reopened:
+            restored = reopened.open(self.content.getvalue(), 'sample.png')
+            self.assertEqual(restored.get('profile', 'fusion'), 'fusion')
+            self.assertEqual(restored['revision'], ready['revision'])
+            self.assertEqual(reopened.asset(doc, 'b', revision=ready['revision']), png)
+            self.assertEqual(reopened.asset(doc, 'a', revision=ready['revision']), png)
+
+    def test_reimport_with_ask_waits_even_when_a_previous_revision_is_rendering(self):
+        opened = self.docs.open(self.content.getvalue(), 'sample.png')
+        doc = opened['id']
+        ready = self.ready(doc, opened['revision'])
+        active = self.docs.update(doc, self.update(ready, l0=.001))
+        try:
+            self.assertTrue(self.entered.wait(5))
+            self.docs.change_preferences({'default_profile': 'ask'})
+            waiting = self.docs.open(self.content.getvalue(), 'sample.png')
+            self.assertEqual(waiting['status'], 'awaiting_profile')
+            self.assertEqual(waiting['profile'], 'fusion')
+            self.assertGreater(waiting['revision'], active['revision'])
+        finally:
+            self.release.set()
+        self.assertEqual(self.docs.get(doc)['b'], ready['b'])
+        chosen = self.docs.switch_profile(doc, waiting['revision'], 'fusion')
+        restored = self.ready(doc, chosen['revision'])
+        self.assertEqual((restored['profile'], restored['settings']['l0']), ('fusion', .001))
+
     def test_warm_selection_reuses_unchanged_parts_overlay(self):
         from unittest.mock import patch
         from gpt_animeimage_denoise.workbench import documents as docs

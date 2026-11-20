@@ -736,7 +736,7 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: 
   font-size: 12px;
 }
 .status-group { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; min-width: 0; }
-.status-actions { display: flex; align-items: center; gap: 12px; margin-inline-start: auto; }
+.status-actions { position: relative; display: flex; align-items: center; gap: 10px; margin-inline-start: auto; }
 #status {
   display: flex;
   align-items: center;
@@ -761,6 +761,97 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: 
 #status[data-tone="error"] { color: var(--error); background: var(--error-surface); }
 #viewer-hint { font-size: 11px; }
 .statusbar button { min-height: 25px; padding: 1px 7px; border-color: var(--edge); color: var(--ink); }
+.profile-panel { position: static; }
+.profile-toggle {
+  gap: 6px;
+  min-height: 30px;
+  padding: 3px 8px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.profile-toggle svg { width: 15px; height: 15px; color: var(--accent); }
+.profile-panel[data-awaiting="true"] .profile-toggle {
+  color: var(--accent);
+  background: var(--active);
+  border-color: var(--active-edge);
+}
+.profile-toggle::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: -3px 2px 0 1px;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  color: var(--quiet);
+  transform: rotate(45deg);
+}
+.profile-panel[open] .profile-toggle::after { margin-block-start: 2px; transform: rotate(225deg); }
+.profile-menu {
+  position: absolute;
+  z-index: 4;
+  inset-block-start: calc(100% + 7px);
+  inset-inline-end: 0;
+  display: grid;
+  gap: 3px;
+  inline-size: min(290px, calc(100vw - 24px));
+  max-block-size: min(290px, calc(100dvh - 112px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid var(--edge);
+  border-radius: 11px;
+  background: var(--raised);
+  box-shadow: 0 10px 26px var(--shadow);
+}
+.profile-menu button {
+  display: grid;
+  grid-template-columns: 29px minmax(0,1fr) 15px;
+  gap: 9px;
+  align-items: center;
+  min-height: 51px;
+  padding: 6px 8px;
+  border-color: transparent;
+  border-radius: 7px;
+  text-align: start;
+}
+.profile-menu button[aria-pressed="true"] { color: var(--accent); border-color: var(--active-edge); }
+.profile-mark {
+  display: grid;
+  place-items: center;
+  width: 29px;
+  height: 29px;
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--accent);
+}
+.profile-menu button[aria-pressed="true"] .profile-mark { background: var(--raised); }
+.profile-option-copy { display: grid; gap: 1px; }
+.profile-option-title { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 7px; }
+.profile-previous {
+  padding-inline: 5px;
+  border: 1px solid var(--active-edge);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.profile-option-copy strong { font-size: 13px; font-weight: 650; }
+.profile-option-copy small { color: var(--quiet); font-size: 11px; }
+.profile-check { visibility: hidden; width: 15px; height: 15px; }
+[aria-pressed="true"] > .profile-check { visibility: visible; }
+.profile-error {
+  margin: 1px 4px 3px;
+  padding: 6px 8px;
+  border-inline-start: 2px solid var(--error-edge);
+  background: var(--error-surface);
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
 #open-shortcuts {
   display: inline-flex;
   flex: none;
@@ -1011,6 +1102,7 @@ select, input[type=number] {
   .workspace-navigation { display: grid; gap: 0; padding-inline: 7px; }
   .workspace .viewer, body:is([data-mode="parts"], [data-mode="range"]) .workspace .viewer { margin: 0 7px 7px; }
   .workspace-modes { flex-wrap: wrap; gap: 3px; }
+  .status-actions { gap: 6px; }
   #inspector-toggle {
     display: inline-flex;
     align-items: center;

@@ -271,6 +271,11 @@ def create_server(workspace, *, port=0):
                 return self._send(200, data, 'image/png', download=name)
             if post and action == 'edit':
                 return self._json(documents.update(identifier, self._read_json()))
+            if post and action == 'profile':
+                value = self._read_json(512)
+                if set(value) != {'revision', 'profile'}:
+                    raise ValueError('处理模式需要指定版本和模式。')
+                return self._json(documents.switch_profile(identifier, _revision(value), value['profile']))
             if post and action == 'pin':
                 return self._json(documents.pin(identifier, _revision(self._read_json())))
             if post and action == 'export':
