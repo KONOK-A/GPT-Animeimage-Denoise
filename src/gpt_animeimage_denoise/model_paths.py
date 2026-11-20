@@ -3,9 +3,12 @@ import os
 from pathlib import Path
 
 
+MODEL_ENV = 'GPT_ANIMEIMAGE_DENOISE_MODEL_DIR'
+
+
 def model_root():
     """Read the configured asset directory at invocation time."""
-    configured = os.environ.get('GPT_ANIMEIMAGE_DENOISE_MODEL_DIR')
+    configured = os.environ.get(MODEL_ENV)
     return Path(configured or 'models').expanduser().resolve()
 
 

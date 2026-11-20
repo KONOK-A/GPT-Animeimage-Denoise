@@ -10,6 +10,29 @@
 .\.venv\Scripts\gaid.exe process --help
 ```
 
+## 环境诊断
+
+```powershell
+.\.venv\Scripts\gaid.exe doctor
+.\.venv\Scripts\gaid.exe doctor --whole --device cpu --json
+.\.venv\Scripts\gaid.exe doctor --verify-models
+```
+
+程序会检查当前 Python 环境、影像依赖、PyTorch 和 torchvision 的导入情况，并在实际选中的设备上运行一个小算子。默认检查分区模型文件存在性和异常的空文件。加 `--verify-models` 时会逐个核对 SHA-256，完整分区模型约 3.3 GB。诊断过程只读，可以在离线环境运行。缺少可选的 ESRGAN 或 APISR 权重时，报告会列出文件名。
+
+- `--whole` 用于整图纯 L0，跳过分区模型。
+- `--model-dir` 为本次指定模型目录。省略时用环境变量 `GPT_ANIMEIMAGE_DENOISE_MODEL_DIR`，再省略时用调用目录下的 `models/`。
+- `--installation` 检查用户级 Skill 的 `gaid-installation.json`。未传 `--model-dir` 时，优先用记录里的模型目录。
+- `--json` 输出单份报告。发现需要修复的问题时退出码为 `1`。报告的 `issues` 包含级别、问题类型和修复方法。
+
+如果项目移动后原来的 `gaid` 命令无法启动，用能运行的 Python 3.12 从当前项目目录直接执行诊断。也可以加 `--installation` 指出旧的 Skill 记录。
+
+```powershell
+py -3.12 .\src\gpt_animeimage_denoise\doctor.py
+```
+
+在新项目目录按 README 重建虚拟环境并安装后，再用新环境运行 `gaid doctor`。如果使用用户级 Skill，也要用新环境重新运行 `tools/install_agent_skill.py`，更新解释器和模型目录。
+
 ## 按人物部位去噪
 
 先 [准备分区模型](models.md)。

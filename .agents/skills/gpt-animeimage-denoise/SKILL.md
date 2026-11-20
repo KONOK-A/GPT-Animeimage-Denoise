@@ -34,6 +34,8 @@ $gaidArgs = @('-P', '-X', 'utf8', '-m', 'gpt_animeimage_denoise.cli')
 & $python @gaidArgs inventory --help
 ```
 
+安装、迁移或运行出错时，用上面定位的解释器运行 `doctor --json --model-dir <模型目录绝对路径>`。用户级安装可用 `--installation <gaid-installation.json 的绝对路径>` 检查记录并读取其中的模型目录。只检查整图纯 L0 时加 `--whole`。报告的 `issues` 列出问题和修复方法。若记录指向的解释器已无法启动，从新仓库运行 `src/gpt_animeimage_denoise/doctor.py`，确认环境后再运行 Skill 安装器。诊断过程只读。更多参数见 `project_root` 下的 `docs/cli.md`。
+
 需要固定批次清单时，用 `inventory` 生成 `manifest.json`，再传给 `batch --manifest`。`inventory --out` 必须位于输入目录之外。例如 `& $python @gaidArgs inventory .\images --out .\inventory` 将清单写到输入目录的同级目录。
 
 ## 默认按部位去噪

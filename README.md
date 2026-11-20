@@ -18,6 +18,15 @@ py -3.12 -m venv .venv
 
 AMD 显卡和 Apple Silicon 的安装步骤、驱动要求及验证命令见 [AMD ROCm 和 Apple MPS](docs/accelerators.md)。
 
+### 检查安装
+
+```powershell
+.\.venv\Scripts\gaid.exe doctor
+.\.venv\Scripts\gaid.exe doctor --whole
+```
+
+`doctor` 显示实际使用的解释器、PyTorch 构建、推理设备和模型目录，并给出修复方法。只用整图纯 L0 时加 `--whole`。如果移动目录后 `gaid.exe` 已无法启动，可以从源码运行诊断。 [环境诊断](docs/cli.md#环境诊断)
+
 ### 切换 CPU 或 CUDA 版 PyTorch
 
 已有安装时，先退出工作台和使用同一 `.venv` 的 GAID 进程。在项目根目录运行下面的命令切到 NVIDIA CUDA 12.8 版。要切到 CPU 版，将最后的 `cuda` 改为 `cpu`。

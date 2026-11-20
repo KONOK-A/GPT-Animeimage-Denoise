@@ -1,34 +1,28 @@
 """Start the Windows workbench from a windowless Python interpreter."""
 from contextlib import redirect_stderr, redirect_stdout
 import ctypes
-from importlib import metadata
 from pathlib import Path
-import re
+import sys
 import traceback
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-_PROJECT = 'gpt-animeimage-denoise'
+from gpt_animeimage_denoise.doctor import dependency_problems
+
+
 _INSTALL_HELP = (
     '请按 README.md 的「安装」章节准备 PyTorch，然后在项目根目录运行\n'
-    r'.\.venv\Scripts\python.exe -m pip install -e .'
+    r'.\.venv\Scripts\python.exe -m pip install -e .' '\n'
+    '进一步诊断可用下面的命令\n'
+    r'.\.venv\Scripts\python.exe -X utf8 .\src\gpt_animeimage_denoise\doctor.py'
 )
 
 
 def _check_dependencies():
-    try:
-        requirements = metadata.requires(_PROJECT) or ()
-    except metadata.PackageNotFoundError as error:
-        raise ImportError(f'缺少依赖包 {_PROJECT}') from error
-
-    missing = []
-    for requirement in requirements:
-        package = re.split(r'[<>=!~]', requirement, maxsplit=1)[0].strip()
-        try:
-            metadata.distribution(package)
-        except metadata.PackageNotFoundError:
-            missing.append(package)
-    if missing:
-        raise ImportError(f'缺少依赖包 {", ".join(missing)}')
+    problems = dependency_problems()
+    if problems:
+        raise ImportError('\n'.join(problems))
 
 
 def _message(text):

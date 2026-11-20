@@ -549,6 +549,15 @@
             <label>羽化宽度<span class="pref-percentage"><input type="number" min="0" max="256" step="1" id="pref-brush-feather" required>px</span></label></div>
           <h2>关闭页面</h2>
           <label class="exit-on-close"><input type="checkbox" id="pref-exit-on-close">关闭最后一个工作台页面时退出后台</label>
+          <h2>环境诊断</h2>
+          <p class="settings-hint">检查工作台实际使用的 Python、PyTorch、推理设备和模型目录。</p>
+          <div class="doctor-options">
+            <label><input id="doctor-whole" type="checkbox">只检查整图 L0</label>
+            <label><input id="doctor-verify" type="checkbox">校验模型 SHA-256</label>
+            <button id="run-doctor" type="button" class="button">运行诊断</button>
+          </div>
+          <p id="doctor-status" class="settings-hint" role="status" hidden></p>
+          <pre id="doctor-report" class="doctor-report" tabindex="0" aria-label="环境诊断报告" hidden></pre>
         </section>
       </div>
       <footer class="settings-footer">

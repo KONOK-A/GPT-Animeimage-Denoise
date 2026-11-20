@@ -650,17 +650,24 @@ class Documents:
             return prepared
 
     @contextmanager
-    def maintenance(self):
+    def maintenance(self, activity='管理缓存'):
         if not self._inference.acquire(blocking=False):
-            raise StorageBusy('工作台正在处理图片，请等待空闲后再管理缓存。')
+            raise StorageBusy(f'工作台正在处理图片，请等待空闲后再{activity}。')
         try:
             with self._condition:
                 if any(state['status'] in ('queued', 'running') for state in self._documents.values()):
-                    raise StorageBusy('工作台有待处理图片，请等待空闲后再管理缓存。')
+                    raise StorageBusy(f'工作台有待处理图片，请等待空闲后再{activity}。')
             with self.cache.processing(wait=False):
                 yield
         finally:
             self._inference.release()
+
+    def environment_diagnosis(self, *, whole, verify_models):
+        from ..doctor import diagnose, format_report
+
+        with self.maintenance('运行诊断'):
+            report = diagnose(whole=whole, verify_models=verify_models)
+        return {'report': report, 'text': format_report(report)}
 
     def change_preferences(self, patch):
         return self.preferences.change(patch, self.cache, self.maintenance)

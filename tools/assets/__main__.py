@@ -10,7 +10,7 @@ import tempfile
 import urllib.request
 
 
-MANIFEST = Path(__file__).with_name('manifest.json')
+MANIFEST = Path(__file__).resolve().parents[2] / 'src/gpt_animeimage_denoise/model_manifest.json'
 ENV_MODEL_DIR = 'GPT_ANIMEIMAGE_DENOISE_MODEL_DIR'
 LABELS = ('background', 'skin', 'face', 'hair_main', 'left_eye', 'right_eye',
           'left_eyebrow', 'right_eyebrow', 'nose', 'mouth', 'clothes', 'accessory')

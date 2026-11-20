@@ -10,9 +10,14 @@ _RUN_DESKTOP = '''
 import ctypes
 import runpy
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from pathlib import Path
 
-sys.path.insert(0, sys.argv[2])
+site = Path(sys.argv[2])
+sys.path.insert(0, str(site))
+workbench = ModuleType('gpt_animeimage_denoise.workbench')
+workbench.__path__ = [str(site / 'gpt_animeimage_denoise/workbench')]
+sys.modules[workbench.__name__] = workbench
 ctypes.windll = SimpleNamespace(user32=SimpleNamespace(
     MessageBoxW=lambda _window, text, _title, _flags: print(text),
 ))
@@ -52,6 +57,7 @@ class WorkbenchDesktopTest(unittest.TestCase):
         self.assertRegex(result.stdout, rf'\b{dependency}\b')
         self.assertIn('README.md', result.stdout)
         self.assertIn(r'.\.venv\Scripts\python.exe -m pip install -e .', result.stdout)
+        self.assertIn('doctor.py', result.stdout)
         self.assertIn(dependency, self.log.read_text(encoding='utf-8'))
 
     def test_uninstalled_project_reports_missing_package(self):

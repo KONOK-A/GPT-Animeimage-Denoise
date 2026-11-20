@@ -301,6 +301,17 @@ class WorkbenchHTTPTest(unittest.TestCase):
             'X-GAID-Request': '1', 'Content-Type': 'application/json'})
         return status, json.loads(body)
 
+    def test_workbench_diagnosis_uses_the_same_report_without_downloading_models(self):
+        root = self.server.documents.workspace / 'missing-models'
+        with patch.dict(os.environ, GPT_ANIMEIMAGE_DENOISE_MODEL_DIR=str(root)):
+            status, value = self.post('/api/doctor', {'whole': True, 'verify_models': False})
+        self.assertEqual(status, 200)
+        self.assertEqual(value['report']['status'], 'ok')
+        self.assertEqual(value['report']['models']['root'], str(root))
+        self.assertTrue(value['report']['device']['tested'])
+        self.assertIn(str(root), value['text'])
+        self.assertFalse(root.exists())
+
     def test_settings_are_machine_local_and_apply_only_to_new_images(self):
         from gpt_animeimage_denoise.editor import SelectionEditor
         from gpt_animeimage_denoise.workbench import create_server

@@ -5,8 +5,8 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .denoisers import METHOD_CHOICES
 from .devices import DEVICE_HELP, resolve_device
+from .methods import METHOD_CHOICES
 from .model_paths import model_root
 
 
@@ -46,10 +46,16 @@ def _model_args(parser):
 
 
 def main(argv=None):
+    from . import doctor
+
     parser = argparse.ArgumentParser(description=__doc__,
                                      epilog='Run gaid <command> --help for command options.')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     commands = parser.add_subparsers(dest='command', required=True, title='commands')
+
+    diagnosis = commands.add_parser('doctor', help='Check the Python environment, device and model files',
+                                    description='Report installation problems without changing local files.')
+    doctor.add_arguments(diagnosis)
 
     inventory = commands.add_parser('inventory', help='Create a manifest for repeatable batches',
                                     description='Scan an image directory and write a dataset manifest.')
@@ -99,6 +105,9 @@ def main(argv=None):
         if part_options:
             parser.error('--whole cannot be combined with ' + ', '.join(part_options))
     try:
+        if args.command == 'doctor':
+            return doctor.run_command(args)
+
         if args.command == 'ui':
             from .workbench import launch_workbench
 

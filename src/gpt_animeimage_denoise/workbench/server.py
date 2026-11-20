@@ -204,6 +204,13 @@ def create_server(workspace, *, port=0):
             documents = self.server.documents
             if path.path == '/api/settings':
                 return self._json(documents.change_preferences(self._read_json()) if post else documents.preferences.read())
+            if post and path.path == '/api/doctor':
+                value = self._read_json(512)
+                if (set(value) - {'whole', 'verify_models'}
+                        or any(type(flag) is not bool for flag in value.values())):
+                    raise ValueError('诊断选项无效。')
+                return self._json(documents.environment_diagnosis(
+                    whole=value.get('whole', False), verify_models=value.get('verify_models', False)))
             if not post and path.path == '/api/cache':
                 return self._json(documents.cache_info())
             if post and path.path == '/api/cache/clear':

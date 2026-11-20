@@ -41,4 +41,5 @@ packages = ["gpt_animeimage_denoise", "gpt_animeimage_denoise.workbench"]
 py-modules = ["denoise", "l0_cuda", "tiled_inference"]
 
 [tool.setuptools.package-data]
+gpt_animeimage_denoise = ["model_manifest.json"]
 "gpt_animeimage_denoise.workbench" = ["web/*.html", "web/*.css", "web/*.js"]

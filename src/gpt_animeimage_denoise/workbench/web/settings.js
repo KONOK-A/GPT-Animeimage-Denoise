@@ -17,7 +17,8 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
   profileField.addEventListener('change', describeProfile);
   const fields = new Map();
   let value, read, queue = Promise.resolve(), defaults, saved, busy = false, visit = 0;
-  let cacheInfo, cacheRead = 0;
+  let cacheInfo, cacheRead = 0, diagnosing = false;
+  const runDoctor = byId('run-doctor');
 
   function install(next, changed, syncControls = true) {
     value = next;
@@ -48,6 +49,7 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
       byId(id).disabled = next;
     }
     updateCacheActions();
+    runDoctor.disabled = busy || diagnosing;
   }
   function selectTab(name) {
     for (const key of tabs) {
@@ -191,6 +193,31 @@ function createWorkbenchSettings({ byId, request, post, options, draft, onChange
     } catch (error) { setBusy(false); message(error.message, true); }
   }
   byId('open-settings').addEventListener('click', open);
+  runDoctor.addEventListener('click', async () => {
+    if (busy || diagnosing) return;
+    const status = byId('doctor-status'), output = byId('doctor-report');
+    diagnosing = runDoctor.disabled = true;
+    output.hidden = true;
+    status.textContent = '正在检查环境…';
+    status.dataset.tone = 'neutral';
+    status.hidden = false;
+    try {
+      const { report, text } = await post('/api/doctor', {
+        whole: Boolean(byId('doctor-whole').checked),
+        verify_models: Boolean(byId('doctor-verify').checked),
+      });
+      status.textContent = report.status === 'ok' ? '检查完成' : '请查看报告中的修复方法';
+      status.dataset.tone = report.status === 'ok' ? 'neutral' : 'error';
+      output.textContent = text;
+      output.hidden = false;
+    } catch (error) {
+      status.textContent = error.message;
+      status.dataset.tone = 'error';
+    } finally {
+      diagnosing = false;
+      runDoctor.disabled = busy;
+    }
+  });
   byId('exit-workbench').addEventListener('click', async () => {
     if (busy) return;
     setBusy(true);

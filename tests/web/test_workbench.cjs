@@ -160,6 +160,7 @@ function harness({ theme, prefersDark = false, prefersReducedMotion = false, com
       });
       if (route === '/api/options') return response(options);
       if (route === '/api/exit') return response({ closing: true });
+      if (route === '/api/doctor') return response({ text: 'Python 3.12\nPyTorch 2.11 · CPU', report: { status: 'ok' } });
       if (route === '/api/settings') {
         if (args.method === 'POST') {
           await api.beforeSettings;
@@ -1050,6 +1051,19 @@ test('missing models leave the centered prompt open and the document unprocessed
   assert.equal(get('profile-error').hidden, true);
   assert.equal(get('profile-toggle').focused, true);
   assert.equal(h.run('state.doc.status'), 'awaiting_profile');
+});
+
+test('workbench settings can run the shared diagnosis on demand', async () => {
+  const h = harness();
+  await tick();
+  await h.elements.get('open-settings').click();
+  assert.equal(h.api.requests.some(item => item.route === '/api/doctor'), false);
+  h.elements.get('tab-appearance').click();
+  h.elements.get('doctor-whole').checked = true;
+  await h.elements.get('run-doctor').click();
+  const request = h.api.requests.find(item => item.route === '/api/doctor');
+  assert.deepEqual(JSON.parse(request.args.body), { whole: true, verify_models: false });
+  assert.match(h.elements.get('doctor-report').textContent, /PyTorch 2.11/);
 });
 
 test('settings save and reload the preference to exit with the last page', async () => {

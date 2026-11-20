@@ -11,7 +11,9 @@
 & .\.venv\Scripts\python.exe -m tools.assets verify
 ```
 
-默认目录为 `models/`。下载来源、相对路径和 SHA-256 见 [资产清单](../tools/assets/manifest.json)。
+默认目录为 `models/`。下载来源、相对路径和 SHA-256 见 [资产清单](../src/gpt_animeimage_denoise/model_manifest.json)。
+
+如果要同时检查 Python 和推理设备，可用 `gaid doctor --verify-models`。 [环境诊断](cli.md#环境诊断)
 
 ## 复用本机模型
 

@@ -323,7 +323,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     if policy_path is not None:
         input_snapshots[str(policy_path)] = policy_hash
     code = _code_hash(['fusion_pipeline.py', 'corrections.py', 'fusion.py', 'auto_sam.py',
-                       'fusion_models.py', 'grouping.py', 'filters.py', 'pipeline.py', 'denoisers.py', 'semantic_repair.py',
+                       'fusion_models.py', 'grouping.py', 'filters.py', 'pipeline.py', 'denoisers.py', 'methods.py', 'semantic_repair.py',
                        'devices.py', '../denoise.py', '../l0_cuda.py', '../tiled_inference.py'])
     device = str(device if device is not None else getattr(models, 'device', 'cpu'))
     stage('candidate')
@@ -447,7 +447,7 @@ def process_image(source, output_root, models, *, profile='fusion', case_id=None
     candidate_identity = {'source_sha256': input_hash,
         'lambda': float(lam) if uses_l0(denoiser) else None, 'device': device,
         'denoiser': denoiser, 'denoiser_config': denoiser_config,
-        'code': _code_hash(['../denoise.py', '../l0_cuda.py', 'fusion_pipeline.py', 'denoisers.py', 'devices.py']),
+        'code': _code_hash(['../denoise.py', '../l0_cuda.py', 'fusion_pipeline.py', 'denoisers.py', 'methods.py', 'devices.py']),
         'callable': l0_implementation, 'precision': 'float32-cache'}
     candidate_stage = 'l0' if denoiser == 'l0' else 'candidate'
 

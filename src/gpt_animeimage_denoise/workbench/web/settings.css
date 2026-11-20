@@ -62,6 +62,23 @@
 #pref-message { flex: 1 1 100px; margin: 0; overflow-wrap: anywhere; color: var(--quiet); font-size: 12px; }
 #pref-message:empty { display: none; }
 #pref-message[data-tone="error"] { color: var(--error); }
+.doctor-options { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 12px; }
+.doctor-options label { display: inline-flex; align-items: center; gap: 5px; }
+#doctor-status { margin-block: 8px; }
+#doctor-status[data-tone="error"] { color: var(--error); }
+.doctor-report {
+  max-block-size: min(19rem, 42dvh);
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  background: var(--field);
+  color: var(--ink);
+  font: 12px/1.65 ui-monospace, Consolas, "Microsoft YaHei UI", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 440px) {
   .settings-header, .settings-scroll, .settings-footer { padding-inline: 14px; }
   .settings-tabs { gap: 12px; padding-inline: 14px; }
