@@ -985,7 +985,10 @@ test('an import waiting for a mode shows only the original and starts comparing 
   await h.run('openFile(file)');
   const get = id => h.elements.get(id);
   assert.equal(get('profile-label').textContent, '选择处理模式');
-  assert.equal(get('profile-panel').open, true);
+  assert.equal(get('profile-prompt').open, true);
+  assert.notEqual(get('profile-panel').open, true);
+  assert.equal(get('profile-menu').parent, get('profile-prompt-content'));
+  assert.equal(get('profile-prompt-title').focused, true);
   assert.equal(get('workspace-modes').hidden, true);
   assert.equal(get('download').disabled, true);
   assert.match(get('status-message').textContent, /选择处理模式/);
@@ -995,7 +998,9 @@ test('an import waiting for a mode shows only the original and starts comparing 
   await get('profile-parts').click();
   assert.equal(h.run('state.doc.profile'), 'fusion');
   assert.equal(h.run('state.view'), 'compare');
-  assert.equal(get('profile-panel').open, false);
+  assert.equal(get('profile-prompt').open, false);
+  assert.equal(get('profile-menu').parent, get('profile-panel'));
+  assert.equal(get('profile-toggle').focused, true);
   assert.equal(get('workspace-modes').hidden, false);
 });
 
@@ -1004,11 +1009,16 @@ test('reimporting a draft marks its last used mode in the choice menu', async ()
   await tick();
   h.api.mutate({ profile: 'fusion', status: 'ready', choose_profile: true, b: { revision: 0, method: 'l0' } });
   await h.run('openFile(file)');
+  const prompt = h.elements.get('profile-prompt');
   const panel = h.elements.get('profile-panel');
-  assert.equal(panel.open, true);
+  assert.equal(prompt.open, true);
+  assert.notEqual(panel.open, true);
   assert.equal(h.elements.get('profile-parts-previous').hidden, false);
   assert.equal(h.elements.get('profile-whole-previous').hidden, true);
   assert.equal(h.elements.get('profile-parts')['aria-pressed'], 'true');
+  h.elements.get('profile-prompt-dismiss').click();
+  assert.equal(prompt.open, false);
+  assert.equal(h.elements.get('profile-menu').parent, panel);
   panel.open = false;
   panel.fire('toggle');
   panel.open = true;
@@ -1021,6 +1031,25 @@ test('reimporting a draft marks its last used mode in the choice menu', async ()
   await h.run("openRecent('source')");
   assert.equal(panel.open, false);
   assert.equal(h.elements.get('profile-parts-previous').hidden, true);
+});
+
+test('missing models leave the centered prompt open and the document unprocessed', async () => {
+  const h = harness();
+  await tick();
+  h.api.mutate({ profile: null, status: 'awaiting_profile' });
+  await h.run('openFile(file)');
+  const get = id => h.elements.get(id);
+  h.api.profileError = '缺少分区模型';
+  await get('profile-parts').click();
+  assert.equal(get('profile-prompt').open, true);
+  assert.equal(get('profile-error').hidden, false);
+  assert.equal(get('profile-parts').focused, true);
+  assert.equal(h.run('state.doc.status'), 'awaiting_profile');
+  get('profile-prompt-dismiss').click();
+  assert.equal(get('profile-prompt').open, false);
+  assert.equal(get('profile-error').hidden, true);
+  assert.equal(get('profile-toggle').focused, true);
+  assert.equal(h.run('state.doc.status'), 'awaiting_profile');
 });
 
 test('settings save and reload the preference to exit with the last page', async () => {

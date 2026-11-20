@@ -86,6 +86,9 @@ const MODE_VIEWS = { review: ['compare', 'original', 'result'], flow: [],
 const nodeNames = { parts: '部位分区', range: '处理范围', effect: '降噪效果' };
 const profilePanel = byId('profile-panel');
 const profileToggle = byId('profile-toggle');
+const profileMenu = byId('profile-menu');
+const profilePrompt = byId('profile-prompt');
+const profilePromptDismiss = byId('profile-prompt-dismiss');
 const profileChoices = { whole: byId('profile-whole'), fusion: byId('profile-parts') };
 const profileError = byId('profile-error');
 const actions = {
@@ -517,6 +520,7 @@ function updateControls() {
   const whole = wholeImage();
   profilePanel.hidden = !state.doc;
   profilePanel.dataset.awaiting = String(awaiting);
+  profilePromptDismiss.disabled = state.switchingProfile;
   const profileLabel = byId('profile-label');
   const currentProfileName = awaiting ? '选择处理模式' : whole ? '整图降噪' : '按部位精修';
   if (profileLabel.textContent !== currentProfileName) {
@@ -1262,7 +1266,7 @@ function applyMetadata(doc) {
     state.view = 'original';
   } else if (wasAwaiting) {
     state.view = 'compare';
-    closeProfilePanel();
+    closeProfileChooser();
   }
   if (wholeImage() && ['parts', 'range', 'flow'].includes(state.mode)) selectMode('review', false);
   if (doc.status === 'ready' && doc.b?.revision === doc.revision && state.appliedHistory?.revision !== doc.revision) {
@@ -1315,10 +1319,8 @@ function startDocument(doc) {
       }
     } catch { storage('removeItem', pendingKey(doc.id)); }
   }
-  if (awaitingProfile() || doc.choose_profile) {
-    markPreviousProfile(doc.profile === undefined ? 'fusion' : doc.profile);
-    profilePanel.open = true;
-    profileToggle.focus({ preventScroll: true });
+  if (!state.conflict && (awaitingProfile() || doc.choose_profile)) {
+    showProfilePrompt(doc.profile === undefined ? 'fusion' : doc.profile);
   }
   if (!wholeImage() && doc.status === 'ready' && !state.dirty && !state.conflict) {
     post(route('/prepare-edit'), { revision: doc.revision }).catch(() => {});
@@ -1329,6 +1331,7 @@ function beginDocumentChange() {
   clearTimeout(state.pollTimer);
   state.epoch += 1;
   state.opening = true;
+  dismissProfilePrompt(false);
   profilePanel.open = false;
   profileError.hidden = true;
   markPreviousProfile(null);
@@ -2630,16 +2633,33 @@ function markPreviousProfile(previous) {
     button.setAttribute('aria-describedby', prefix + '-help' + (active ? ' ' + prefix + '-previous' : ''));
   }
 }
-function closeProfilePanel() {
+function showProfilePrompt(previous) {
+  markPreviousProfile(previous);
+  byId('profile-prompt-hint').textContent = awaitingProfile()
+    ? '选择后开始处理这张图片。' : '可以沿用上次的模式，或切换模式重新处理。';
+  byId('profile-prompt-content').append(profileMenu);
+  profilePrompt.showModal();
+  byId('profile-prompt-title').focus({ preventScroll: true });
+}
+function dismissProfilePrompt(restoreFocus = true) {
+  if (!profilePrompt.open) return;
+  profilePrompt.close();
+  profilePanel.append(profileMenu);
+  profileError.hidden = true;
+  if (restoreFocus) profileToggle.focus({ preventScroll: true });
+}
+function closeProfileChooser() {
   markPreviousProfile(null);
-  if (!profilePanel.open) return;
-  profilePanel.open = false;
-  profileToggle.focus({ preventScroll: true });
+  if (profilePrompt.open) dismissProfilePrompt();
+  else if (profilePanel.open) {
+    profilePanel.open = false;
+    profileToggle.focus({ preventScroll: true });
+  }
 }
 async function switchProcessingProfile(profile) {
   if (!state.doc || state.opening || state.switchingProfile || state.conflict || state.sam?.busy === 'apply') return;
   if (!awaitingProfile() && profile === (state.doc.profile || 'fusion')) {
-    closeProfilePanel();
+    closeProfileChooser();
     return;
   }
   profileError.hidden = true;
@@ -2656,17 +2676,17 @@ async function switchProcessingProfile(profile) {
     selectMode('review', false);
     applyMetadata(doc);
     if (newReference && state.view !== 'compare') selectView('compare');
-    closeProfilePanel();
+    closeProfileChooser();
   } catch (error) {
     if (epoch !== state.epoch) return;
-    if (profilePanel.open) {
+    if (profilePrompt.open || profilePanel.open) {
       profileError.textContent = error.message || String(error);
       profileError.hidden = false;
     } else showError(error);
   } finally {
     state.switchingProfile = false;
     refresh();
-    if (profilePanel.open) profileChoices[profile].focus({ preventScroll: true });
+    if (profilePrompt.open || profilePanel.open) profileChoices[profile].focus({ preventScroll: true });
     schedulePoll();
   }
 }
@@ -2748,7 +2768,7 @@ for (const [id, triggerId, menuId] of menuIds) {
   popover.addEventListener('toggle', () => {
     if (!popover.open) {
       stopMotion(menu);
-      if (popover === profilePanel) profileError.hidden = true;
+      if (popover === profilePanel && !profilePrompt.open) profileError.hidden = true;
       return;
     }
     for (const other of popovers) if (other !== popover) other.open = false;
@@ -2766,6 +2786,13 @@ byId('pin').addEventListener('click', event => pin(event.detail > 0));
 for (const [profile, button] of Object.entries(profileChoices)) {
   button.addEventListener('click', () => switchProcessingProfile(profile));
 }
+profilePromptDismiss.addEventListener('click', () => {
+  if (!state.switchingProfile) dismissProfilePrompt();
+});
+profilePrompt.addEventListener('cancel', event => {
+  event.preventDefault();
+  if (!state.switchingProfile) dismissProfilePrompt();
+});
 for (const [reference, button] of comparisonButtons) {
   button.addEventListener('click', () => chooseComparisonReference(reference));
 }
@@ -3057,13 +3084,13 @@ byId('shortcuts-close').addEventListener('click', () => shortcutsDialog.close())
 
 window.addEventListener('paste', event => {
   const file = event.clipboardData?.files[0];
-  if (!byId('settings-dialog').open && !shortcutsDialog.open && file?.type.startsWith('image/')) {
+  if (!byId('settings-dialog').open && !shortcutsDialog.open && !profilePrompt.open && file?.type.startsWith('image/')) {
     event.preventDefault();
     openFile(file);
   }
 });
 window.addEventListener('keydown', event => {
-  if (event.defaultPrevented || event.isComposing || byId('settings-dialog').open || shortcutsDialog.open) return;
+  if (event.defaultPrevented || event.isComposing || byId('settings-dialog').open || shortcutsDialog.open || profilePrompt.open) return;
   if (event.key === 'Escape' && document.body.dataset.drawer === 'open') {
     event.preventDefault(); setDrawer(false, true); return;
   }
