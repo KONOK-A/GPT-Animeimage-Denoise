@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpt-animeimage-denoise"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local anime illustration denoising with optional character-part segmentation"
 readme = "README.md"
 requires-python = ">=3.12"
